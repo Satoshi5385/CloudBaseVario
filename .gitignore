@@ -1,0 +1,78 @@
+# Operating system metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+.directory
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor and temporary files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+*.log
+
+# ESP-IDF build and generated configuration
+/build/
+/build-*/
+**/build/
+sdkconfig
+sdkconfig.old
+flasher_args.json
+*.bin
+*.elf
+*.map
+*.o
+*.a
+*.out
+*.exe
+
+# ESP-IDF dependencies and local tools
+/managed_components/
+/components/.idf/
+**/components/.idf/
+/.espressif/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+/compile_commands.json
+
+# Python caches and virtual environments
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+venv/
+.venv/
+env/
+
+# Language server caches
+.clangd/
+.ccls-cache/
+
+# User-specific IDE configuration
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.devcontainer/
+*.code-workspace
+*.workspace
+*.user
+*.suo
+*.sln.docstates
+
+# Local agent configuration
+.agents/
+.codex/
+
+# Local planning notes; public roadmap is maintained in README.md
+DOC/TODO.txt

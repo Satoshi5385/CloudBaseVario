@@ -1,0 +1,11 @@
+{
+  "cmake.configureOnOpen": false,
+  "idf.extensionActivationMode": "always",
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.portWin": "detect",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  }
+}
