@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "app/main.c"
+        "app/app_resources.c"
+        "app/app_tasks.c"
+        "platform/app_power.c"
+        "platform/audio_output.c"
+        "platform/ble_vario.c"
+        "platform/board.c"
+        "platform/sensor_bus.c"
+        "platform/system_io.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES
+        bt
+        esp_adc
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_hw_support
+        esp_pm
+        esp_psram
+        esp_system
+        nvs_flash
+        spi_flash
+)

@@ -1,0 +1,11 @@
+menu "CloudBaseVario application"
+
+    choice CBV_BOARD_REVISION
+        prompt "Board revision"
+        default CBV_BOARD_AOHAZUKU_REV0
+
+        config CBV_BOARD_AOHAZUKU_REV0
+            bool "Aohazuku Rev.0"
+    endchoice
+
+endmenu

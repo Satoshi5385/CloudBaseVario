@@ -10,6 +10,7 @@
 *.cmake text eol=lf
 CMakeLists.txt text eol=lf
 Kconfig* text eol=lf
+sdkconfig* text eol=lf
 Dockerfile text eol=lf
 LICENSE text eol=lf
 .gitignore text eol=lf
