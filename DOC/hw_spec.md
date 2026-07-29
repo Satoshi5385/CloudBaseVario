@@ -28,9 +28,9 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 | 11 | `SD_MOSI` | `PIN_SD_MOSI` | microSD CMD／MOSI | 出力 | SPI |
 | 12 | `SD_CLK` | `PIN_SD_CLK` | microSD クロック | 出力 | SPI |
 | 13 | `SD_MISO` | `PIN_SD_MISO` | microSD DAT0／MISO | 入力 | SPI |
-| 14 | `INT_ICM` | `PIN_INT_ICM` | ICM-42688 INT1 | 入力 | 割り込み極性はセンサ設定に依存 |
+| 14 | `INT_ICM` | `PIN_INT_ICM` | ICM-42688P-HXY INT1 Data Ready | 入力 | 立上りedge。ISRはsensor taskへの通知だけを行う |
 | 15 | `BUZZER_MODE1` | `PIN_BUZZER_MODE1` | PAM8904E EN1 | 出力 | Highアクティブ、外付け100kΩプルダウン |
-| 16 | `LED_2` | `PIN_LED_2` | 黄LED | 出力 | Lowで点灯、Highで消灯 |
+| 16 | `LED_1` | `PIN_LED_1` | 緑LED | 出力 | Lowで点灯、Highで消灯 |
 | 17 | `GPS_RX` | `PIN_GPS_UART_TX` | GPS受信端子へのUART送信 | 出力 | ESP32側UART1 TX。L96-M33 RXD1へ接続 |
 | 18 | `GPS_TX` | `PIN_GPS_UART_RX` | GPS送信端子からのUART受信 | 入力 | ESP32側UART1 RX。L96-M33 TXD1から入力 |
 | 19 | `USB_DN` | `PIN_USB_DN` | USB D− | USB | 通常GPIOとして使用しない |
@@ -40,11 +40,11 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 | 39 | `GPS_IO` | `PIN_GPS_PPS` | GPS TIMEPULSE／PPS | 入力 | 時刻同期、測位タイミング取得 |
 | 40 | `BUZZER_PWM` | `PIN_BUZZER_PWM` | PAM8904E DIN | 出力 | ブザー駆動波形を出力。停止時はLow |
 | 41 | `SD_DET` | `PIN_SD_DET` | microSD挿入検出 | 入力 | カード挿入時Low、外付けプルアップ |
-| 42 | `PWR_EXT` | `PIN_PWR_EXT` | USB外部電源検出 | 入力 | USB VBUSありでHigh |
-| 43 | `LED_1` | `PIN_LED_1` | 緑LED | 出力 | Lowで点灯、Highで消灯。既定機能はU0TXD |
+| 42 | `PWR_EXT` | `PIN_PWR_EXT` | USB外部電源検出 | 入力 | VBUS valid（4.75 V以上）でHigh、invalid（4.35 V以下）でLow |
+| 43 | `LED_2` | `PIN_LED_2` | 黄LED | 出力 | Lowで点灯、Highで消灯。既定機能はU0TXD |
 | 44 | `BUZZER_MODE2` | `PIN_BUZZER_MODE2` | PAM8904E EN2 | 出力 | Highアクティブ、外付け100kΩプルダウン。既定機能はU0RXD |
 | 47 | `PWR_HOLD` | `PIN_PWR_HOLD` | 電源自己保持 | 出力 | Highで電源保持 |
-| 48 | `SW_1` | `PIN_SW_1` | 電源／操作スイッチ状態 | 入力 | 電源ラッチ回路を介したスイッチ入力 |
+| 48 | `SW_1` | `PIN_SW_1` | 電源／操作スイッチ状態 | 入力 | 電源ラッチ回路を介した入力、押下時High |
 
 ### 2.2 未使用または使用禁止GPIO
 
@@ -80,8 +80,8 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 
 | SW定義名 | GPIO | 用途 |
 |---|---:|---|
-| `PIN_LED_1` | 43 | 緑LED |
-| `PIN_LED_2` | 16 | 黄LED |
+| `PIN_LED_1` | 16 | 緑LED |
+| `PIN_LED_2` | 43 | 黄LED |
 | `PIN_BUZZER_PWM` | 40 | PAM8904E DIN |
 | `PIN_BUZZER_MODE1` | 15 | PAM8904E EN1 |
 | `PIN_BUZZER_MODE2` | 44 | PAM8904E EN2 |
@@ -92,8 +92,10 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 |---|---:|---|
 | `PIN_I2C_SDA` | 4 | I2C SDA |
 | `PIN_I2C_SCL` | 5 | I2C SCL |
-| `PIN_INT_ICM` | 14 | ICM-42688 INT1 |
+| `PIN_INT_ICM` | 14 | ICM-42688P-HXY INT1 Data Ready |
 | `PIN_INT_BMP` | 21 | BMP581 INT |
+
+ICM-42688P-HXYはSDO Low固定とし、7 bit I2Cアドレスを`0x18`に固定する。`0x19`は使用しない。CSBはI2C modeとなるHighを維持する。ソフトウェアはBMP581のdevice handleを1 MHz、ICM-42688P-HXYのdevice handleを400 kHz以下とし、HXY品の識別レジスタ`0x01`が`0x6A`であることを確認する。識別後はHXY版レジスタで400 Hz、加速度±8 g、ジャイロ±2000 dpsへ設定し、INT1 Data ReadyをGPIO14の立上り割り込みへ接続する。
 
 ### 3.4 GPS
 
@@ -129,6 +131,14 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 | `PIN_USB_DN` | 19 | USB D− |
 | `PIN_USB_DP` | 20 | USB D+ |
 
+本機はself-powered USB deviceとして動作し、`PIN_PWR_EXT`（GPIO42）でVBUSを監視する。VBUS監視回路は次の電気条件および応答条件を満たすこと。
+
+- VBUSが4.75 V以上のとき、VBUS validとしてGPIO42がHighになること。
+- VBUSが4.35 V以下のとき、VBUS invalidとしてGPIO42がLowになること。
+- 4.35 V超4.75 V未満は切替しきい値の許容帯とすること。
+- USB切断後3 ms以内にGPIO42がLowになること。
+- 回路定数と部品特性によるしきい値・応答時間の成立を回路確認し、実機でVBUS電圧掃引およびUSB切断試験を行うこと。
+
 ---
 
 ## 4. ブザー制御仕様
@@ -159,14 +169,14 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 
 | 信号名 | SW定義名 | 色 | GPIO | 点灯論理 |
 |---|---|---|---:|---|
-| `LED_1` | `PIN_LED_1` | 緑 | 43 | Lowで点灯、Highで消灯 |
-| `LED_2` | `PIN_LED_2` | 黄 | 16 | Lowで点灯、Highで消灯 |
+| `LED_1` | `PIN_LED_1` | 緑 | 16 | Lowで点灯、Highで消灯 |
+| `LED_2` | `PIN_LED_2` | 黄 | 43 | Lowで点灯、Highで消灯 |
 
 LEDは3.3V側から電流制限抵抗およびLEDを通してGPIOへ接続されており、GPIOが電流を吸い込む構成である。
 
 ### 5.2 GPIO43使用時の注意
 
-GPIO43の既定機能はUART0 TXである。ROM起動ログまたはUART0ログ出力により、起動時に緑LEDが一時的に点滅する場合がある。
+GPIO43の既定機能はUART0 TXである。ROM起動ログまたはUART0ログ出力により、起動時に黄LEDが一時的に点滅する場合がある。
 
 この一時点滅は許容動作とする。
 
@@ -180,8 +190,8 @@ GPIO43の既定機能はUART0 TXである。ROM起動ログまたはUART0ログ�
 
 | SW定義名 | GPIO | 初期出力値 | 初期状態 |
 |---|---:|---:|---|
-| `PIN_LED_1` | 43 | High | 消灯 |
-| `PIN_LED_2` | 16 | High | 消灯 |
+| `PIN_LED_1` | 16 | High | 消灯 |
+| `PIN_LED_2` | 43 | High | 消灯 |
 | `PIN_BUZZER_PWM` | 40 | Low | 発音停止 |
 | `PIN_BUZZER_MODE1` | 15 | Low | シャットダウン設定 |
 | `PIN_BUZZER_MODE2` | 44 | Low | シャットダウン設定 |
@@ -197,7 +207,8 @@ GPIO43の既定機能はUART0 TXである。ROM起動ログまたはUART0ログ�
 
 1. GPIO43をUART0の通常ログ出力として使用しない。
 1. GPIO44をUART0 RXとして使用しない。
-1. デバッグ、書き込み、コンソール出力には原則としてUSB Serial/JTAGまたはUSB CDCを使用する。
+1. ROM download modeでの書き込みおよび復旧にはUSB Serial/JTAGを使用できる。
+1. アプリケーション稼働中のコンソール出力にはTinyUSB CDCを使用し、USB Serial/JTAGを併用しない。
 1. ブザー初期化前にGPIO40から駆動波形を出力しない。
 1. GPIO35、GPIO36、GPIO37をソフトウェアから初期化しない。
 1. LED制御はLowアクティブとして実装する。

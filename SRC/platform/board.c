@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stddef.h>
 
+#include "driver/ledc.h"
 #include "esp_log.h"
 
 #define BOARD_OUTPUT_MASK                                                                          \
@@ -16,14 +17,24 @@
 
 #define BOARD_EXPECTED_BAT_SCALE (133.0f / 33.0f)
 #define BOARD_FLOAT_TOLERANCE 0.000001f
+#define GREEN_LED_LEDC_DUTY_RESOLUTION LEDC_TIMER_10_BIT
+#define GREEN_LED_PWM_FREQUENCY_HZ UINT32_C(5000)
+#define GREEN_LED_DUTY_MAX UINT32_C(1023)
 
 static const char *TAG = "board";
+static bool green_led_pwm_initialized = false;
 
 _Static_assert(PIN_PWR_HOLD == GPIO_NUM_47, "Unexpected power-hold GPIO");
+_Static_assert(PIN_LED_1 == GPIO_NUM_16, "Unexpected green LED GPIO");
+_Static_assert(PIN_LED_2 == GPIO_NUM_43, "Unexpected yellow LED GPIO");
 _Static_assert(PIN_I2C_SDA == GPIO_NUM_4, "Unexpected I2C SDA GPIO");
 _Static_assert(PIN_I2C_SCL == GPIO_NUM_5, "Unexpected I2C SCL GPIO");
 _Static_assert(PIN_USB_DN == GPIO_NUM_19, "Unexpected USB D- GPIO");
 _Static_assert(PIN_USB_DP == GPIO_NUM_20, "Unexpected USB D+ GPIO");
+_Static_assert(BOARD_AUDIO_LEDC_TIMER != BOARD_GREEN_LED_LEDC_TIMER,
+               "Audio and green LED require independent LEDC timers");
+_Static_assert(BOARD_AUDIO_LEDC_CHANNEL != BOARD_GREEN_LED_LEDC_CHANNEL,
+               "Audio and green LED require independent LEDC channels");
 
 static esp_err_t keep_safe_outputs_during_light_sleep(void) {
     const gpio_num_t safety_outputs[] = {
@@ -38,6 +49,37 @@ static esp_err_t keep_safe_outputs_during_light_sleep(void) {
             return ret;
         }
     }
+    return ESP_OK;
+}
+
+static esp_err_t init_green_led_pwm(void) {
+    ledc_timer_config_t timer_config = {
+        .speed_mode = BOARD_LEDC_MODE,
+        .duty_resolution = GREEN_LED_LEDC_DUTY_RESOLUTION,
+        .timer_num = BOARD_GREEN_LED_LEDC_TIMER,
+        .freq_hz = GREEN_LED_PWM_FREQUENCY_HZ,
+        .clk_cfg = LEDC_USE_XTAL_CLK,
+    };
+    ledc_channel_config_t channel_config = {
+        .gpio_num = PIN_LED_1,
+        .speed_mode = BOARD_LEDC_MODE,
+        .channel = BOARD_GREEN_LED_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = BOARD_GREEN_LED_LEDC_TIMER,
+        .duty = 0U,
+        .hpoint = 0U,
+        .flags.output_invert = 1U,
+    };
+    esp_err_t ret = ledc_timer_config(&timer_config);
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = ledc_channel_config(&channel_config);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    green_led_pwm_initialized = true;
     return ESP_OK;
 }
 
@@ -101,6 +143,12 @@ esp_err_t board_init_safe_gpio(void) {
         return ret;
     }
 
+    ret = init_green_led_pwm();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    board_set_status_leds(false, false);
+
     return keep_safe_outputs_during_light_sleep();
 }
 
@@ -135,10 +183,30 @@ void board_set_audio_shutdown(void) {
 }
 
 void board_set_status_leds(bool green_enabled, bool yellow_enabled) {
-    uint32_t green_level = green_enabled ? 0U : 1U;
+    board_set_status_leds_brightness(green_enabled ? 100U : 0U,
+                                     yellow_enabled);
+}
+
+void board_set_status_leds_brightness(uint32_t green_brightness_percent,
+                                      bool yellow_enabled) {
     uint32_t yellow_level = yellow_enabled ? 0U : 1U;
 
-    (void) gpio_set_level(PIN_LED_1, green_level);
+    if (green_brightness_percent > 100U) {
+        green_brightness_percent = 100U;
+    }
+    if (green_led_pwm_initialized) {
+        uint32_t green_duty =
+            (GREEN_LED_DUTY_MAX * green_brightness_percent + 50U) / 100U;
+
+        (void) ledc_set_duty(BOARD_LEDC_MODE,
+                             BOARD_GREEN_LED_LEDC_CHANNEL,
+                             green_duty);
+        (void) ledc_update_duty(BOARD_LEDC_MODE,
+                                BOARD_GREEN_LED_LEDC_CHANNEL);
+    } else {
+        (void) gpio_set_level(PIN_LED_1,
+                              green_brightness_percent > 0U ? 0U : 1U);
+    }
     (void) gpio_set_level(PIN_LED_2, yellow_level);
 }
 
@@ -154,5 +222,5 @@ esp_err_t board_set_power_hold(bool enabled) {
 bool board_is_sw1_pressed(void) {
     int input_level = gpio_get_level(PIN_SW_1);
 
-    return input_level == 0;
+    return input_level != 0;
 }

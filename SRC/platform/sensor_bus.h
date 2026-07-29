@@ -10,6 +10,18 @@
 esp_err_t sensor_bus_init(void);
 
 /**
+ * @brief Delete the shared bus after all device handles have been removed.
+ * @return ESP_OK when the bus is absent or was deleted successfully.
+ */
+esp_err_t sensor_bus_deinit(void);
+
+/**
+ * @brief Recreate the bus after a stuck-bus failure.
+ * @return ESP_OK when a fresh bus handle was created.
+ */
+esp_err_t sensor_bus_recover(void);
+
+/**
  * @brief Return the shared bus handle for sensor-driver initialization.
  * @return I2C bus handle, or NULL when initialization failed.
  */

@@ -8,4 +8,31 @@ menu "CloudBaseVario application"
             bool "Aohazuku Rev.0"
     endchoice
 
+    config CBV_SENSOR_RETRY_INTERVAL_MS
+        int "Sensor re-detection interval (ms)"
+        range 100 10000
+        default 2000
+        help
+            Retry an unavailable BMP581 or HXY IMU without
+            blocking the sensor task between attempts.
+
+    config CBV_IMU_HXY_ENABLE
+        bool "Enable ICM-42688P-HXY sampling and vario fusion"
+        default y
+        help
+            Configure the SDO-Low device at address 0x18 using the HXY
+            register map, sample acceleration and angular rate at 400 Hz
+            from GPIO14 Data Ready, calibrate attitude, and fuse vertical
+            acceleration with BMP581 pressure altitude. Probe and runtime
+            failures remain non-fatal and fall back to pressure-only mode.
+
+    config CBV_SENSOR_CONSECUTIVE_ERROR_LIMIT
+        int "Consecutive sensor I2C error limit"
+        range 1 100
+        default 10
+        help
+            Reinitialize the affected BMP581 or HXY IMU after this many
+            consecutive read failures. A timeout can also recreate the
+            shared I2C bus.
+
 endmenu

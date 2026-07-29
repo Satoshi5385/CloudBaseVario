@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "domain/app_config.h"
 #include "domain/app_types.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +17,18 @@
 #define APP_EVENT_CONSOLE_ACK BIT5
 #define APP_EVENT_BLE_TX_ACK BIT6
 #define APP_EVENT_SAFE_SLEEP_BLOCKED BIT7
+#define APP_EVENT_BMP581_STARTUP_COMPLETE BIT8
+#define APP_EVENT_FATAL_BMP581 BIT9
+#define APP_EVENT_BMP581_RECOVERING BIT10
+#define APP_EVENT_IMU_CALIBRATING BIT11
+#define APP_EVENT_IMU_DEGRADED BIT12
+#define APP_EVENT_AUDIO_QUIESCED BIT13
+#define APP_EVENT_SHUTDOWN_SOUND_REQUEST BIT14
+#define APP_EVENT_SHUTDOWN_SOUND_DONE BIT15
+#define APP_EVENT_SHUTDOWN_SOUND_ABORT BIT16
+#define APP_EVENT_STARTUP_SOUND_REQUEST BIT17
+#define APP_EVENT_STARTUP_SOUND_DONE BIT18
+#define APP_EVENT_STARTUP_SOUND_ABORT BIT19
 
 #define APP_EVENT_ALL_TASK_ACKS                                                                    \
     (APP_EVENT_AUDIO_ACK | APP_EVENT_SENSOR_ACK | APP_EVENT_SYSTEM_ACK | APP_EVENT_CONSOLE_ACK |   \
@@ -60,6 +73,20 @@ bool app_resources_publish_vario(const vario_result_t *result);
 bool app_resources_copy_vario(vario_result_t *result);
 
 /**
+ * @brief Replace the complete HXY IMU diagnostic snapshot.
+ * @param[in] diagnostics Complete diagnostic state to publish.
+ * @return true when the shared snapshot mutex was acquired.
+ */
+bool app_resources_publish_imu_diagnostics(const imu_diagnostics_t *diagnostics);
+
+/**
+ * @brief Copy the latest HXY IMU diagnostic snapshot.
+ * @param[out] diagnostics Destination snapshot.
+ * @return true when a snapshot was copied.
+ */
+bool app_resources_copy_imu_diagnostics(imu_diagnostics_t *diagnostics);
+
+/**
  * @brief Replace the complete system snapshot.
  * @param[in] snapshot Complete system state to publish.
  * @return true when the snapshot mutex was acquired.
@@ -72,6 +99,32 @@ bool app_resources_publish_system(const system_snapshot_t *snapshot);
  * @return true when a snapshot was copied.
  */
 bool app_resources_copy_system(system_snapshot_t *snapshot);
+
+/**
+ * @brief Atomically replace the complete runtime parameter configuration.
+ * @param[in] config Fully validated candidate.
+ * @return true when the configuration mutex was acquired.
+ */
+bool app_resources_publish_config(const app_config_t *config);
+
+/**
+ * @brief Copy one coherent runtime parameter configuration.
+ * @param[out] config Destination configuration.
+ * @return true when a configuration was copied.
+ */
+bool app_resources_copy_config(app_config_t *config);
+
+/** Enable a persistent diagnostic climb-rate input. */
+bool app_resources_set_debug_vario(float climb_rate_mps,
+                                   bool pressure_override_valid,
+                                   int32_t pressure_pa_x100);
+
+/** Disable the diagnostic input and return consumers to sensor data. */
+void app_resources_clear_debug_vario(void);
+
+/** Apply the current diagnostic input to a private consumer snapshot. */
+bool app_resources_apply_debug_vario(vario_result_t *result,
+                                     int64_t current_time_us);
 
 /**
  * @brief Post a fixed-size diagnostic event without blocking the caller.

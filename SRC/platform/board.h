@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
+#include "driver/ledc.h"
 #include "esp_err.h"
 
 #if !CONFIG_CBV_BOARD_AOHAZUKU_REV0
@@ -27,7 +28,7 @@
 #define PIN_SD_MISO GPIO_NUM_13
 #define PIN_INT_ICM GPIO_NUM_14
 #define PIN_BUZZER_MODE1 GPIO_NUM_15
-#define PIN_LED_2 GPIO_NUM_16
+#define PIN_LED_1 GPIO_NUM_16
 #define PIN_GPS_UART_TX GPIO_NUM_17
 #define PIN_GPS_UART_RX GPIO_NUM_18
 #define PIN_USB_DN GPIO_NUM_19
@@ -38,13 +39,19 @@
 #define PIN_BUZZER_PWM GPIO_NUM_40
 #define PIN_SD_DET GPIO_NUM_41
 #define PIN_PWR_EXT GPIO_NUM_42
-#define PIN_LED_1 GPIO_NUM_43
+#define PIN_LED_2 GPIO_NUM_43
 #define PIN_BUZZER_MODE2 GPIO_NUM_44
 #define PIN_PWR_HOLD GPIO_NUM_47
 #define PIN_SW_1 GPIO_NUM_48
 
 #define BOARD_I2C_PORT I2C_NUM_0
-#define BOARD_I2C_DEVICE_SPEED_HZ UINT32_C(1000000)
+#define BOARD_BMP581_I2C_SPEED_HZ UINT32_C(1000000)
+#define BOARD_ICM42688_HXY_I2C_SPEED_HZ UINT32_C(400000)
+#define BOARD_LEDC_MODE LEDC_LOW_SPEED_MODE
+#define BOARD_AUDIO_LEDC_TIMER LEDC_TIMER_0
+#define BOARD_AUDIO_LEDC_CHANNEL LEDC_CHANNEL_0
+#define BOARD_GREEN_LED_LEDC_TIMER LEDC_TIMER_1
+#define BOARD_GREEN_LED_LEDC_CHANNEL LEDC_CHANNEL_1
 
 #define BAT_ADC_R_HIGH_OHM UINT32_C(1000000)
 #define BAT_ADC_R_LOW_OHM UINT32_C(330000)
@@ -59,8 +66,8 @@
 esp_err_t board_init_power_hold(void);
 
 /**
- * @brief Configure safe startup levels and the initial digital inputs.
- * @return ESP_OK on success, otherwise the first GPIO driver error.
+ * @brief Configure safe startup levels, digital inputs, and green LED PWM.
+ * @return ESP_OK on success, otherwise the first GPIO/LEDC driver error.
  */
 esp_err_t board_init_safe_gpio(void);
 
@@ -88,6 +95,14 @@ void board_set_audio_shutdown(void);
 void board_set_status_leds(bool green_enabled, bool yellow_enabled);
 
 /**
+ * @brief Set green LED brightness and the yellow LED state.
+ * @param[in] green_brightness_percent green LED brightness from 0 to 100 percent.
+ * @param[in] yellow_enabled true to illuminate the yellow LED.
+ */
+void board_set_status_leds_brightness(uint32_t green_brightness_percent,
+                                      bool yellow_enabled);
+
+/**
  * @brief Enable or release the external power hold circuit.
  * @param[in] enabled true to keep the board powered.
  * @return ESP_OK on success, otherwise a GPIO driver error.
@@ -95,7 +110,7 @@ void board_set_status_leds(bool green_enabled, bool yellow_enabled);
 esp_err_t board_set_power_hold(bool enabled);
 
 /**
- * @brief Read the raw SW1 state using its active-low convention.
+ * @brief Read the active-high SW1 signal from the power-latch circuit.
  * @return true while SW1 is pressed.
  */
 bool board_is_sw1_pressed(void);

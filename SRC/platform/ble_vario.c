@@ -1,11 +1,14 @@
 #include "platform/ble_vario.h"
 
+#include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "esp_bt.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
@@ -15,6 +18,7 @@
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -57,6 +61,10 @@ static uint8_t own_address_type = 0U;
 static bool notification_subscribed = false;
 static bool nimble_initialized = false;
 static bool stop_requested = false;
+static uint32_t sentence_count = 0U;
+static uint32_t dropped_sentence_count = 0U;
+static int32_t last_notify_error = 0;
+static int64_t last_notify_success_us = 0;
 
 static int ble_gap_event_handler(struct ble_gap_event *event, void *context);
 static int ble_start_advertising(void);
@@ -65,6 +73,9 @@ static void ble_set_connection_state(uint16_t handle, bool subscribed) {
     portENTER_CRITICAL(&ble_state_lock);
     connection_handle = handle;
     notification_subscribed = subscribed;
+    if (handle == BLE_HS_CONN_HANDLE_NONE || !subscribed) {
+        last_notify_success_us = 0;
+    }
     portEXIT_CRITICAL(&ble_state_lock);
 }
 
@@ -399,4 +410,175 @@ bool ble_vario_can_notify(void) {
                  connection_handle != BLE_HS_CONN_HANDLE_NONE;
     portEXIT_CRITICAL(&ble_state_lock);
     return can_notify;
+}
+
+bool ble_vario_notify_active(void) {
+    bool active = false;
+    int64_t success_us = 0;
+    int64_t now_us = esp_timer_get_time();
+
+    portENTER_CRITICAL(&ble_state_lock);
+    success_us = last_notify_success_us;
+    active = nimble_initialized && !stop_requested &&
+             notification_subscribed &&
+             connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+             last_notify_error == 0 && success_us > 0;
+    portEXIT_CRITICAL(&ble_state_lock);
+    return active && now_us >= success_us &&
+           now_us - success_us <= INT64_C(500000);
+}
+
+static uint8_t lk8ex1_checksum(const char *body) {
+    uint8_t checksum = 0U;
+
+    if (body != NULL) {
+        for (const unsigned char *cursor = (const unsigned char *) body;
+             *cursor != '\0'; cursor++) {
+            checksum ^= *cursor;
+        }
+    }
+    return checksum;
+}
+
+static void record_notify_result(bool success, int error) {
+    portENTER_CRITICAL(&ble_state_lock);
+    if (success) {
+        if (sentence_count < UINT32_MAX) {
+            sentence_count++;
+        }
+        last_notify_error = 0;
+        last_notify_success_us = esp_timer_get_time();
+    } else {
+        if (dropped_sentence_count < UINT32_MAX) {
+            dropped_sentence_count++;
+        }
+        last_notify_error = error;
+    }
+    portEXIT_CRITICAL(&ble_state_lock);
+}
+
+bool ble_vario_format_lk8ex1_fields(
+    const vario_result_t *vario, const system_snapshot_t *system,
+    ble_vario_lk8ex1_fields_t *fields) {
+    int written = 0;
+
+    if (vario == NULL || system == NULL || fields == NULL) {
+        return false;
+    }
+    memset(fields, 0, sizeof(*fields));
+    (void) strcpy(fields->raw_pressure, "999999");
+    (void) strcpy(fields->altitude, "99999");
+    (void) strcpy(fields->vario, "9999");
+    (void) strcpy(fields->temperature, "99");
+    (void) strcpy(fields->battery, "999");
+
+    if (vario->pressure_valid) {
+        written = snprintf(
+            fields->raw_pressure, sizeof(fields->raw_pressure), "%ld",
+            (long) lroundf((float) vario->pressure_pa_x100 / 100.0f));
+        if (written <= 0 ||
+            (size_t) written >= sizeof(fields->raw_pressure)) {
+            return false;
+        }
+    }
+    if (vario->climb_rate_valid && isfinite(vario->climb_rate_mps)) {
+        written = snprintf(fields->vario, sizeof(fields->vario), "%ld",
+                           (long) lroundf(vario->climb_rate_mps * 100.0f));
+        if (written <= 0 || (size_t) written >= sizeof(fields->vario)) {
+            return false;
+        }
+    }
+    if (system->battery_valid && isfinite(system->battery_voltage_v) &&
+        system->battery_voltage_v >= 0.0f) {
+        written = snprintf(fields->battery, sizeof(fields->battery), "%.2f",
+                           (double) system->battery_voltage_v);
+        if (written <= 0 || (size_t) written >= sizeof(fields->battery)) {
+            return false;
+        }
+    }
+    fields->sentence_available =
+        vario->pressure_valid || vario->climb_rate_valid;
+    return true;
+}
+
+esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
+                                  const system_snapshot_t *system) {
+    char body[96] = {0};
+    char sentence[104] = {0};
+    ble_vario_lk8ex1_fields_t fields = {0};
+    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
+    uint16_t mtu = 23U;
+    size_t chunk_size = 20U;
+    size_t sentence_length = 0U;
+    int written = 0;
+
+    if (!ble_vario_format_lk8ex1_fields(vario, system, &fields)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!fields.sentence_available) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    written = snprintf(body, sizeof(body), "LK8EX1,%s,%s,%s,%s,%s,",
+                       fields.raw_pressure, fields.altitude, fields.vario,
+                       fields.temperature, fields.battery);
+    if (written <= 0 || (size_t) written >= sizeof(body)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    written = snprintf(sentence, sizeof(sentence), "$%s*%02X\r\n", body,
+                       lk8ex1_checksum(body));
+    if (written <= 0 || (size_t) written >= sizeof(sentence)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    sentence_length = (size_t) written;
+
+    portENTER_CRITICAL(&ble_state_lock);
+    if (nimble_initialized && !stop_requested && notification_subscribed) {
+        handle = connection_handle;
+    }
+    portEXIT_CRITICAL(&ble_state_lock);
+    if (handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    mtu = ble_att_mtu(handle);
+    if (mtu > 3U) {
+        chunk_size = (size_t) mtu - 3U;
+    }
+    for (size_t offset = 0U; offset < sentence_length; offset += chunk_size) {
+        size_t remaining = sentence_length - offset;
+        size_t chunk_length = remaining < chunk_size ? remaining : chunk_size;
+        struct os_mbuf *packet =
+            ble_hs_mbuf_from_flat(&sentence[offset], (uint16_t) chunk_length);
+        int rc = 0;
+
+        if (packet == NULL) {
+            record_notify_result(false, BLE_HS_ENOMEM);
+            return ESP_ERR_NO_MEM;
+        }
+        rc = ble_gatts_notify_custom(handle, nus_tx_value_handle, packet);
+        if (rc != 0) {
+            record_notify_result(false, rc);
+            return ESP_FAIL;
+        }
+    }
+
+    record_notify_result(true, 0);
+    return ESP_OK;
+}
+
+void ble_vario_get_diagnostics(ble_vario_diagnostics_t *diagnostics) {
+    if (diagnostics == NULL) {
+        return;
+    }
+
+    portENTER_CRITICAL(&ble_state_lock);
+    diagnostics->sentence_count = sentence_count;
+    diagnostics->dropped_sentence_count = dropped_sentence_count;
+    diagnostics->last_notify_error = last_notify_error;
+    diagnostics->last_notify_success_us = last_notify_success_us;
+    diagnostics->connected =
+        connection_handle != BLE_HS_CONN_HANDLE_NONE;
+    diagnostics->subscribed = notification_subscribed;
+    portEXIT_CRITICAL(&ble_state_lock);
 }

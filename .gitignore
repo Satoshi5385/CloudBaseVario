@@ -34,6 +34,9 @@ flasher_args.json
 /managed_components/
 /components/.idf/
 **/components/.idf/
+/components/esp_tinyusb/.component_hash
+/components/esp_tinyusb/CHECKSUMS.json
+/components/esp_tinyusb/test_apps/
 /.espressif/
 
 # CMake generated files
@@ -74,5 +77,6 @@ env/
 .agents/
 .codex/
 
-# Local planning notes; public roadmap is maintained in README.md
-DOC/TODO.txt
+# Local test, validation, and planning work
+/tests/
+
