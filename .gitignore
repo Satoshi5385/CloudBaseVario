@@ -63,9 +63,7 @@ env/
 .ccls-cache/
 
 # User-specific IDE configuration
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
+.vscode/
 .devcontainer/
 *.code-workspace
 *.workspace
