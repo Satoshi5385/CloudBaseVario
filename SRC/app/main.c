@@ -154,9 +154,14 @@ void app_main(void) {
     bool nvs_ready = false;
     bool update_confirmation_required = false;
     bool usb_start_deferred = false;
+    bool imu_accel_calibration_required = false;
     esp_err_t storage_result = ESP_OK;
     esp_err_t usb_result = ESP_OK;
     firmware_update_diagnostics_t update_diagnostics = {0};
+    imu_accel_calibration_t imu_accel_calibration = {0};
+    imu_calibration_storage_diagnostics_t imu_calibration_diagnostics = {
+        .result = IMU_CALIBRATION_STORAGE_MISSING,
+    };
 
     if (ret != ESP_OK) {
         app_tasks_run_fatal_fallback();
@@ -192,6 +197,27 @@ void app_main(void) {
                  esp_err_to_name(storage_result));
     }
 
+#if CONFIG_CBV_IMU_HXY_ENABLE
+    if (storage_result == ESP_OK) {
+        imu_calibration_storage_result_t calibration_result =
+            usb_device_load_imu_calibration(
+                &imu_accel_calibration, &imu_calibration_diagnostics);
+
+        imu_accel_calibration_required =
+            calibration_result != IMU_CALIBRATION_STORAGE_VALID &&
+            calibration_result != IMU_CALIBRATION_STORAGE_RECOVERED;
+        ESP_LOGI(TAG, "mc_data.json=%s",
+                 imu_calibration_storage_result_name(calibration_result));
+    } else {
+        imu_calibration_diagnostics.result =
+            IMU_CALIBRATION_STORAGE_IO_ERROR;
+        imu_calibration_diagnostics.io_error = (int32_t) storage_result;
+        imu_accel_calibration_required = true;
+    }
+    app_tasks_set_imu_accel_calibration(&imu_accel_calibration,
+                                        &imu_calibration_diagnostics);
+#endif
+
     ret = firmware_update_process_boot(system_io_external_power_present());
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE &&
         ret != ESP_ERR_NOT_FOUND) {
@@ -203,7 +229,8 @@ void app_main(void) {
         update_diagnostics.confirmation_required;
     usb_start_deferred =
         update_confirmation_required ||
-        update_diagnostics.state == FIRMWARE_UPDATE_PENDING_CONFIRMATION;
+        update_diagnostics.state == FIRMWARE_UPDATE_PENDING_CONFIRMATION ||
+        imu_accel_calibration_required;
     ret = firmware_update_begin_confirmation();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "OTA confirmation task unavailable: %s",
@@ -219,7 +246,7 @@ void app_main(void) {
         }
     } else {
         ESP_LOGI(TAG,
-                 "TinyUSB start deferred until OTA confirmation and cleanup");
+                 "TinyUSB start deferred until OTA and IMU calibration gates clear");
     }
 
     ret = app_resources_init();
@@ -284,9 +311,6 @@ void app_main(void) {
         usb_result == ESP_OK) {
         usb_result = firmware_update_wait_for_confirmation(
             UPDATE_CONFIRMATION_USB_WAIT_MS);
-        if (usb_result == ESP_OK) {
-            usb_result = usb_device_start();
-        }
         if (usb_result != ESP_OK) {
             ESP_LOGE(TAG,
                      "TinyUSB remains disabled until OTA cleanup succeeds: %s",
@@ -300,6 +324,34 @@ void app_main(void) {
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "NimBLE initialization failed: %s", esp_err_to_name(ret));
             post_peripheral_failure(ret);
+        }
+    }
+
+#if CONFIG_CBV_IMU_HXY_ENABLE
+    if (usb_start_deferred && imu_accel_calibration_required &&
+        usb_result == ESP_OK) {
+        EventGroupHandle_t event_group = app_resources_event_group();
+        EventBits_t bits = event_group == NULL
+                               ? APP_EVENT_FATAL_STATE
+                               : xEventGroupWaitBits(
+                                     event_group,
+                                     APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED |
+                                         APP_EVENT_STOP_REQUEST |
+                                         APP_EVENT_FATAL_STATE,
+                                     pdFALSE, pdFALSE, portMAX_DELAY);
+
+        if ((bits & APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED) == 0U) {
+            usb_result = ESP_ERR_INVALID_STATE;
+        }
+    }
+#endif
+
+    if (usb_start_deferred && usb_result == ESP_OK) {
+        usb_result = usb_device_start();
+        if (usb_result != ESP_OK) {
+            ESP_LOGE(TAG, "TinyUSB deferred start failed: %s",
+                     esp_err_to_name(usb_result));
+            post_peripheral_failure(usb_result);
         }
     }
 

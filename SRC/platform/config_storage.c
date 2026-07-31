@@ -11,7 +11,8 @@
 
 #include "cJSON.h"
 
-#define CONFIG_FORMAT_VERSION 1
+#define CONFIG_FORMAT_VERSION 2
+#define CONFIG_LEGACY_FORMAT_VERSION 1
 #define CONFIG_MAX_FILE_BYTES (32U * 1024U)
 #define CONFIG_PATH_BUFFER_SIZE 96U
 
@@ -160,6 +161,8 @@ static bool parse_config_json(const char *json, size_t json_length,
     app_config_t candidate = {0};
     bool *seen = NULL;
     bool valid = false;
+    bool legacy_accel_min_seen = false;
+    bool legacy_accel_max_seen = false;
     unsigned int version_count = 0U;
     unsigned int parameters_count = 0U;
 
@@ -226,7 +229,8 @@ static bool parse_config_json(const char *json, size_t json_length,
         version->valuedouble <= (double) INT32_MAX && diagnostics != NULL) {
         diagnostics->format_version = (int32_t) version->valuedouble;
     }
-    if (version->valuedouble != CONFIG_FORMAT_VERSION) {
+    if (version->valuedouble != CONFIG_FORMAT_VERSION &&
+        version->valuedouble != CONFIG_LEGACY_FORMAT_VERSION) {
         set_diagnostics(diagnostics,
                         CONFIG_VALIDATION_UNSUPPORTED_FORMAT_VERSION,
                         "format_version", 0);
@@ -256,6 +260,9 @@ static bool parse_config_json(const char *json, size_t json_length,
         goto cleanup;
     }
     app_config_set_defaults(&candidate);
+    if (version->valuedouble == CONFIG_LEGACY_FORMAT_VERSION) {
+        candidate.imu_mahony_ki = 0.0f;
+    }
 
     for (cJSON *child = parameters->child; child != NULL;
          child = child->next) {
@@ -266,6 +273,30 @@ static bool parse_config_json(const char *json, size_t json_length,
             set_diagnostics(diagnostics,
                             CONFIG_VALIDATION_UNKNOWN_PARAMETER, NULL, 0);
             goto cleanup;
+        }
+        if (version->valuedouble == CONFIG_LEGACY_FORMAT_VERSION &&
+            (strcmp(child->string, "imu_accel_correction_min_g") == 0 ||
+             strcmp(child->string, "imu_accel_correction_max_g") == 0)) {
+            bool *legacy_seen =
+                strcmp(child->string, "imu_accel_correction_min_g") == 0
+                    ? &legacy_accel_min_seen
+                    : &legacy_accel_max_seen;
+
+            if (*legacy_seen) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_DUPLICATE_KEY,
+                                child->string, 0);
+                goto cleanup;
+            }
+            if (!cJSON_IsNumber(child) ||
+                !isfinite(child->valuedouble)) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_PARAMETER_TYPE,
+                                child->string, 0);
+                goto cleanup;
+            }
+            *legacy_seen = true;
+            continue;
         }
         if (!parameter_index_by_name(child->string, &index, &info)) {
             set_diagnostics(diagnostics,

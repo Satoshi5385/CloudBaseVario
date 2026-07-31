@@ -7,6 +7,7 @@
 #include "domain/app_config.h"
 #include "esp_err.h"
 #include "platform/config_storage.h"
+#include "platform/imu_calibration_storage.h"
 
 typedef enum {
     USB_STORAGE_UNAVAILABLE = 0,
@@ -51,6 +52,15 @@ esp_err_t usb_device_start(void);
 
 /** Save parameters while the application owns the FAT volume. */
 esp_err_t usb_device_save_config(const app_config_t *config);
+
+/** Load the private per-unit IMU calibration while the app owns the FAT. */
+imu_calibration_storage_result_t usb_device_load_imu_calibration(
+    imu_accel_calibration_t *calibration,
+    imu_calibration_storage_diagnostics_t *diagnostics);
+
+/** Atomically save the private per-unit IMU calibration. */
+esp_err_t usb_device_save_imu_calibration(
+    const imu_accel_calibration_t *calibration);
 
 /** Receive available CDC bytes without blocking. */
 bool usb_device_read(uint8_t *buffer, size_t capacity, size_t *length);

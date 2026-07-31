@@ -47,10 +47,8 @@ static const app_parameter_descriptor_t parameter_table[] = {
     PARAM_ENUM(filter_mode, APP_FILTER_MODE_AUTO),
     PARAM_UINT(i2c_reinit_error_count, 10, 1.0, 100.0),
     PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0),
-    PARAM_FLOAT(imu_accel_correction_min_g, 0.75f, 0.5, 1.0),
-    PARAM_FLOAT(imu_accel_correction_max_g, 1.25f, 1.0, 1.5),
     PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0),
-    PARAM_FLOAT(imu_mahony_ki, 0.0f, 0.0, 5.0),
+    PARAM_FLOAT(imu_mahony_ki, 0.05f, 0.0, 5.0),
     PARAM_UINT(imu_accel_x_source, 0, 0.0, 2.0),
     PARAM_UINT(imu_accel_y_source, 1, 0.0, 2.0),
     PARAM_UINT(imu_accel_z_source, 2, 0.0, 2.0),
@@ -213,10 +211,6 @@ bool app_config_validate(const app_config_t *config) {
         return false;
     }
     if (config->predictive_min_mps > config->predictive_max_mps) {
-        return false;
-    }
-    if (config->imu_accel_correction_min_g >=
-        config->imu_accel_correction_max_g) {
         return false;
     }
     if (!axis_map_is_permutation(config->imu_accel_x_source,

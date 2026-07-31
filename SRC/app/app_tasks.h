@@ -5,6 +5,12 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "platform/imu_calibration_storage.h"
+
+/** Provide the startup mc_data.json result before app_tasks_start(). */
+void app_tasks_set_imu_accel_calibration(
+    const imu_accel_calibration_t *calibration,
+    const imu_calibration_storage_diagnostics_t *diagnostics);
 
 /**
  * @brief Create application tasks and wait for the required BMP581 startup initialization.

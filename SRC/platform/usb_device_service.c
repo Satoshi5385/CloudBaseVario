@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "platform/board.h"
+#include "platform/imu_calibration_storage.h"
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_console.h"
@@ -51,7 +52,7 @@ static usb_device_diagnostics_t usb_diagnostics = {
     .config = {
         .source = CONFIG_SOURCE_BUILTIN_DEFAULT,
         .validation = CONFIG_VALIDATION_IO_ERROR,
-        .format_version = 1,
+        .format_version = 2,
     },
     .last_storage_error = ESP_ERR_INVALID_STATE,
     .last_save_result = ESP_ERR_INVALID_STATE,
@@ -497,6 +498,43 @@ esp_err_t usb_device_save_config(const app_config_t *config) {
     portENTER_CRITICAL(&state_lock);
     usb_diagnostics.last_save_result = ret;
     portEXIT_CRITICAL(&state_lock);
+    return ret;
+}
+
+imu_calibration_storage_result_t usb_device_load_imu_calibration(
+    imu_accel_calibration_t *calibration,
+    imu_calibration_storage_diagnostics_t *diagnostics) {
+    esp_err_t ret = usb_device_storage_begin_app_io(
+        STORAGE_MUTEX_TIMEOUT_MS);
+    imu_calibration_storage_result_t result =
+        IMU_CALIBRATION_STORAGE_IO_ERROR;
+
+    if (calibration == NULL) {
+        return IMU_CALIBRATION_STORAGE_IO_ERROR;
+    }
+    if (ret != ESP_OK) {
+        memset(calibration, 0, sizeof(*calibration));
+        if (diagnostics != NULL) {
+            diagnostics->result = IMU_CALIBRATION_STORAGE_IO_ERROR;
+            diagnostics->io_error = (int32_t) ret;
+        }
+        return IMU_CALIBRATION_STORAGE_IO_ERROR;
+    }
+    result = imu_calibration_storage_load(CONFIG_MOUNT_PATH, calibration,
+                                          diagnostics);
+    usb_device_storage_end_app_io();
+    return result;
+}
+
+esp_err_t usb_device_save_imu_calibration(
+    const imu_accel_calibration_t *calibration) {
+    esp_err_t ret = usb_device_storage_begin_app_io(
+        STORAGE_MUTEX_TIMEOUT_MS);
+
+    if (ret == ESP_OK) {
+        ret = imu_calibration_storage_save(CONFIG_MOUNT_PATH, calibration);
+        usb_device_storage_end_app_io();
+    }
     return ret;
 }
 

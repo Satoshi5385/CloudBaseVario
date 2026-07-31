@@ -14,8 +14,6 @@ typedef struct {
     app_filter_mode_t filter_mode;
     uint32_t i2c_reinit_error_count;
     uint32_t imu_gyro_calibration_samples;
-    float imu_accel_correction_min_g;
-    float imu_accel_correction_max_g;
     float imu_mahony_kp;
     float imu_mahony_ki;
     uint32_t imu_accel_x_source;

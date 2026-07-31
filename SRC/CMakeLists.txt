@@ -15,6 +15,7 @@ idf_component_register(
         "platform/config_storage.c"
         "platform/firmware_update.c"
         "platform/icm42688_hxy.c"
+        "platform/imu_calibration_storage.c"
         "platform/sensor_bus.c"
         "platform/system_io.c"
         "platform/usb_device_service.c"

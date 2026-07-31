@@ -61,6 +61,9 @@ typedef struct {
     bool enabled;
     bool online;
     bool configured;
+    bool accel_calibrated;
+    bool accel_calibration_persisted;
+    bool accel_calibration_save_pending;
     bool calibrated;
     bool attitude_valid;
     bool fusion_active;
@@ -73,13 +76,22 @@ typedef struct {
     uint32_t sample_count;
     uint32_t consecutive_error_count;
     uint32_t calibration_sample_count;
+    uint32_t accel_calibration_sample_count;
     uint32_t missed_interrupt_count;
     float accel_norm_g;
+    float accel_offset_mps2[3];
     float gyro_bias_radps[3];
+    float confidence;
+    float vibration_rms_g;
+    float kp_effective;
+    float ki_effective;
     float quaternion[4];
     float roll_deg;
     float pitch_deg;
     float yaw_deg;
+    int32_t accel_calibration_storage_result;
+    int32_t accel_calibration_storage_error;
+    bool ki_active;
 } imu_diagnostics_t;
 
 typedef enum {
