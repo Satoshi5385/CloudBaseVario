@@ -57,6 +57,7 @@
 #define BATTERY_SAMPLE_PERIOD_MS UINT32_C(100)
 #define SWITCH_DEBOUNCE_MS UINT32_C(30)
 #define POWER_OFF_HOLD_MS UINT32_C(3000)
+#define IMU_CALIBRATION_SKIP_HOLD_MS UINT32_C(3000)
 #define SHUTDOWN_DEADLINE_MS UINT32_C(15000)
 #define SAFE_STOP_PERIOD_MS UINT32_C(10)
 #define SYSTEM_SOUND_LOW_HZ UINT32_C(700)
@@ -123,6 +124,7 @@ typedef struct {
     float estimator_reference_pressure_pa;
     bool imu_config_valid;
     bool imu_accel_calibration_save_pending;
+    bool imu_accel_calibration_skipped;
     int64_t next_imu_accel_calibration_save_us;
     bool estimator_reference_valid;
 } sensor_task_state_t;
@@ -232,7 +234,6 @@ static void set_bmp581_recovering(bool recovering) {
     }
 }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
 static void set_imu_lifecycle_state(bool calibrating, bool degraded) {
     EventGroupHandle_t event_group = app_resources_event_group();
     const EventBits_t lifecycle_mask =
@@ -262,7 +263,6 @@ static void set_imu_lifecycle_state(bool calibrating, bool degraded) {
         (void) xEventGroupClearBits(event_group, bits_to_clear);
     }
 }
-#endif
 
 static bool led_first_phase(uint32_t elapsed_ms, uint32_t phase_ms) {
     uint32_t cycle_ms = phase_ms * UINT32_C(2);
@@ -419,6 +419,24 @@ static void apply_audio_overrides(app_config_t *config,
     }
 }
 
+static void toggle_sink_override(system_snapshot_t *snapshot) {
+    app_config_t config = {0};
+    bool current;
+
+    if (snapshot == NULL) {
+        return;
+    }
+    current = snapshot->sink_enabled_override;
+    if (!snapshot->sink_override_active) {
+        if (!app_resources_copy_config(&config)) {
+            app_config_set_defaults(&config);
+        }
+        current = config.sink_enabled;
+    }
+    snapshot->sink_enabled_override = !current;
+    snapshot->sink_override_active = true;
+}
+
 static bool debounce_button(button_debounce_t *state, bool pressed) {
     if (state == NULL) {
         return false;
@@ -485,7 +503,6 @@ static void sensor_record_bmp_error(sensor_task_state_t *state,
     }
 }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
 static void sensor_record_imu_error(sensor_task_state_t *state,
                                     esp_err_t error) {
     if (state == NULL) {
@@ -508,6 +525,7 @@ static void sensor_try_initialize_imu(sensor_task_state_t *state,
     esp_err_t ret = ESP_OK;
 
     if (state == NULL || bus_handle == NULL || state->imu_ready ||
+        state->imu_accel_calibration_skipped ||
         now_us < state->next_imu_retry_us) {
         return;
     }
@@ -551,7 +569,6 @@ static void sensor_try_initialize_imu(sensor_task_state_t *state,
     }
     (void) app_resources_publish_imu_diagnostics(&state->imu_diagnostics);
 }
-#endif
 
 static void sensor_shutdown_devices(void) {
     esp_err_t bmp_ret = bmp581_deinit();
@@ -559,7 +576,6 @@ static void sensor_shutdown_devices(void) {
     if (bmp_ret != ESP_OK) {
         ESP_LOGW(TAG, "sensor shutdown incomplete: bmp=%s", esp_err_to_name(bmp_ret));
     }
-#if CONFIG_CBV_IMU_HXY_ENABLE
     {
         esp_err_t imu_ret = icm42688_hxy_deinit();
 
@@ -568,7 +584,6 @@ static void sensor_shutdown_devices(void) {
                      esp_err_to_name(imu_ret));
         }
     }
-#endif
 }
 
 static void sensor_invalidate_estimate(sensor_task_state_t *state,
@@ -587,7 +602,6 @@ static void sensor_invalidate_estimate(sensor_task_state_t *state,
     vario_estimator_reset(&state->estimator);
 }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
 static void sensor_invalidate_imu(sensor_task_state_t *state, bool stale) {
     if (state == NULL) {
         return;
@@ -621,14 +635,11 @@ static void sensor_invalidate_imu(sensor_task_state_t *state, bool stale) {
     vario_estimator_disable_fusion(&state->estimator);
     set_imu_lifecycle_state(false, true);
 }
-#endif
 
 static bool sensor_recover_shared_bus(sensor_task_state_t *state, int64_t now_us) {
     esp_err_t ret = ESP_OK;
-#if CONFIG_CBV_IMU_HXY_ENABLE
     esp_err_t imu_ret = ESP_OK;
     bool imu_was_ready = false;
-#endif
 
     if (state == NULL || !state->bus_timeout_detected) {
         return false;
@@ -636,7 +647,6 @@ static bool sensor_recover_shared_bus(sensor_task_state_t *state, int64_t now_us
 
     ESP_LOGW(TAG, "recovering shared I2C bus after transaction timeout");
     (void) bmp581_deinit();
-#if CONFIG_CBV_IMU_HXY_ENABLE
     imu_was_ready = state->imu_ready;
     imu_ret = icm42688_hxy_deinit();
     if (imu_ret != ESP_OK) {
@@ -652,7 +662,6 @@ static bool sensor_recover_shared_bus(sensor_task_state_t *state, int64_t now_us
             state->imu_diagnostics.last_error = (int32_t) imu_ret;
         }
     }
-#endif
     ret = sensor_bus_recover();
 
     state->bmp_ready = false;
@@ -664,19 +673,13 @@ static bool sensor_recover_shared_bus(sensor_task_state_t *state, int64_t now_us
     state->bus_timeout_detected = false;
     if (ret == ESP_OK) {
         state->next_bmp_retry_us = now_us;
-#if CONFIG_CBV_IMU_HXY_ENABLE
         state->next_imu_retry_us = now_us;
-#endif
     } else {
         ESP_LOGW(TAG, "I2C recovery failed: %s", esp_err_to_name(ret));
         state->next_bmp_retry_us = now_us + SENSOR_RETRY_INTERVAL_US;
-#if CONFIG_CBV_IMU_HXY_ENABLE
         state->next_imu_retry_us = now_us + SENSOR_RETRY_INTERVAL_US;
-#endif
     }
-#if CONFIG_CBV_IMU_HXY_ENABLE
     (void) app_resources_publish_imu_diagnostics(&state->imu_diagnostics);
-#endif
     return true;
 }
 
@@ -723,16 +726,13 @@ static bool sensor_try_initialize_devices(sensor_task_state_t *state, int64_t no
         changed = true;
     }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
     if (!state->bus_timeout_detected) {
         sensor_try_initialize_imu(state, bus_handle, now_us);
     }
-#endif
 
     return changed;
 }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
 static bool imu_configs_match(const app_config_t *left,
                               const app_config_t *right) {
     if (left == NULL || right == NULL) {
@@ -741,19 +741,7 @@ static bool imu_configs_match(const app_config_t *left,
     return left->imu_gyro_calibration_samples ==
                right->imu_gyro_calibration_samples &&
            left->imu_mahony_kp == right->imu_mahony_kp &&
-           left->imu_mahony_ki == right->imu_mahony_ki &&
-           left->imu_accel_x_source == right->imu_accel_x_source &&
-           left->imu_accel_y_source == right->imu_accel_y_source &&
-           left->imu_accel_z_source == right->imu_accel_z_source &&
-           left->imu_accel_x_sign == right->imu_accel_x_sign &&
-           left->imu_accel_y_sign == right->imu_accel_y_sign &&
-           left->imu_accel_z_sign == right->imu_accel_z_sign &&
-           left->imu_gyro_x_source == right->imu_gyro_x_source &&
-           left->imu_gyro_y_source == right->imu_gyro_y_source &&
-           left->imu_gyro_z_source == right->imu_gyro_z_source &&
-           left->imu_gyro_x_sign == right->imu_gyro_x_sign &&
-           left->imu_gyro_y_sign == right->imu_gyro_y_sign &&
-           left->imu_gyro_z_sign == right->imu_gyro_z_sign;
+           left->imu_mahony_ki == right->imu_mahony_ki;
 }
 
 static void sensor_restart_imu_fusion(sensor_task_state_t *state,
@@ -800,10 +788,14 @@ static void sensor_sync_accel_calibration_diagnostics(
         state->imu_diagnostics.accel_calibrated;
     state->imu_diagnostics.accel_calibration_save_pending =
         state->imu_accel_calibration_save_pending;
+    state->imu_diagnostics.accel_calibration_skipped =
+        state->imu_accel_calibration_skipped;
     state->imu_diagnostics.accel_calibration_sample_count =
         state->imu_accel_calibration_save_pending
             ? IMU_ACCEL_CALIBRATION_SAMPLE_COUNT
             : state->imu_accel_calibrator.sample_count;
+    state->imu_diagnostics.accel_norm_g =
+        state->imu_accel_calibrator.accel_norm_g;
     memset(state->imu_diagnostics.accel_offset_mps2, 0,
            sizeof(state->imu_diagnostics.accel_offset_mps2));
     if (calibration != NULL) {
@@ -838,6 +830,10 @@ static bool sensor_try_save_accel_calibration(sensor_task_state_t *state,
         imu_fusion_reset(&state->imu_fusion);
         state->imu_config_valid = false;
         if (event_group != NULL) {
+            (void) xEventGroupClearBits(
+                event_group,
+                APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED |
+                    APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST);
             (void) xEventGroupSetBits(
                 event_group, APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED);
         }
@@ -854,16 +850,79 @@ static bool sensor_try_save_accel_calibration(sensor_task_state_t *state,
     return true;
 }
 
+static bool sensor_handle_accel_calibration_skip(
+    sensor_task_state_t *state) {
+    EventGroupHandle_t event_group = app_resources_event_group();
+    EventBits_t bits =
+        event_group == NULL ? 0U : xEventGroupGetBits(event_group);
+
+    if (state == NULL || state->imu_accel_calibration_skipped ||
+        (bits & APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST) == 0U ||
+        imu_accel_calibration_validate(&state->imu_accel_calibration)) {
+        return false;
+    }
+
+    if (state->imu_ready) {
+        esp_err_t ret = icm42688_hxy_deinit();
+
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "IMU deinitialization after calibration skip failed: %s",
+                     esp_err_to_name(ret));
+        }
+    }
+    state->imu_ready = false;
+    state->imu_interrupt_pending = false;
+    state->imu_config_valid = false;
+    state->imu_accel_calibration_skipped = true;
+    state->imu_accel_calibration_save_pending = false;
+    state->next_imu_accel_calibration_save_us = 0;
+    memset(&state->pending_imu_accel_calibration, 0,
+           sizeof(state->pending_imu_accel_calibration));
+    imu_accel_calibrator_reset(&state->imu_accel_calibrator);
+    imu_fusion_reset(&state->imu_fusion);
+    vario_estimator_disable_fusion(&state->estimator);
+
+    state->result.imu_online = false;
+    state->result.imu_calibrated = false;
+    state->result.imu_stale = true;
+    state->result.imu_fusion_active = false;
+    state->result.vertical_accel_valid = false;
+    state->result.vertical_accel_mps2 = 0.0f;
+    state->imu_diagnostics.online = false;
+    state->imu_diagnostics.configured = false;
+    state->imu_diagnostics.calibrated = false;
+    state->imu_diagnostics.attitude_valid = false;
+    state->imu_diagnostics.fusion_active = false;
+    state->imu_diagnostics.stale = true;
+    sensor_sync_accel_calibration_diagnostics(state);
+    (void) app_resources_publish_imu_diagnostics(
+        &state->imu_diagnostics);
+    set_imu_lifecycle_state(false, true);
+
+    if (event_group != NULL) {
+        (void) xEventGroupClearBits(
+            event_group,
+            APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED |
+                APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST);
+        (void) xEventGroupSetBits(
+            event_group, APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED);
+    }
+    ESP_LOGW(TAG,
+             "IMU accelerometer calibration skipped for this boot; pressure-only mode active");
+    return true;
+}
+
 static bool sensor_process_factory_accel_calibration(
     sensor_task_state_t *state, const imu_sample_t *sensor_sample,
-    const app_config_t *config, int64_t now_us) {
-    if (state == NULL || sensor_sample == NULL || config == NULL ||
+    int64_t now_us) {
+    if (state == NULL || sensor_sample == NULL ||
         imu_accel_calibration_validate(&state->imu_accel_calibration)) {
         return false;
     }
     if (!state->imu_accel_calibration_save_pending &&
         imu_accel_calibrator_update(
-            &state->imu_accel_calibrator, sensor_sample, config,
+            &state->imu_accel_calibrator, sensor_sample,
+            board_imu_axis_map(),
             &state->pending_imu_accel_calibration)) {
         state->imu_accel_calibration_save_pending = true;
         state->next_imu_accel_calibration_save_us = now_us;
@@ -933,7 +992,6 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     state->imu_diagnostics.consecutive_error_count = 0U;
     state->imu_diagnostics.data_status = hxy_sample.data_status;
     add_saturating_u32(&state->imu_diagnostics.sample_count, 1U);
-
     if (!app_resources_copy_config(&config)) {
         app_config_set_defaults(&config);
     }
@@ -949,14 +1007,27 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     sensor_sample.timestamp_us = hxy_sample.timestamp_us;
     sensor_sample.valid = hxy_sample.valid;
     if (!imu_accel_calibration_validate(&state->imu_accel_calibration)) {
+        if (state->imu_accel_calibration_skipped) {
+            state->result.imu_calibrated = false;
+            state->result.vertical_accel_valid = false;
+            state->result.imu_fusion_active = false;
+            state->imu_diagnostics.calibrated = false;
+            state->imu_diagnostics.attitude_valid = false;
+            state->imu_diagnostics.fusion_active = false;
+            set_imu_lifecycle_state(false, true);
+            (void) app_resources_publish_imu_diagnostics(
+                &state->imu_diagnostics);
+            return true;
+        }
         (void) sensor_process_factory_accel_calibration(
-            state, &sensor_sample, &config, now_us);
+            state, &sensor_sample, now_us);
         (void) app_resources_publish_imu_diagnostics(
             &state->imu_diagnostics);
         return true;
     }
     if (!imu_fusion_apply_calibration_and_axis_map(
-            &sensor_sample, &config, &state->imu_accel_calibration,
+            &sensor_sample, board_imu_axis_map(),
+            &state->imu_accel_calibration,
             &board_sample) ||
         !imu_fusion_update(&state->imu_fusion, &board_sample, &config,
                            &fusion_output)) {
@@ -1000,6 +1071,8 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
             if (!vario_estimator_update_imu(
                     &state->estimator,
                     fusion_output.vertical_accel_mps2,
+                    fusion_output.confidence,
+                    fusion_output.vibration_rms_g,
                     board_sample.timestamp_us)) {
                 state->result.vertical_accel_valid = false;
             }
@@ -1023,7 +1096,6 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
         &state->imu_diagnostics);
     return true;
 }
-#endif
 
 static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
     bmp581_sample_t sample = {0};
@@ -1138,7 +1210,6 @@ static bool sensor_check_stale(sensor_task_state_t *state, int64_t now_us) {
         set_bmp581_recovering(true);
         changed = true;
     }
-#if CONFIG_CBV_IMU_HXY_ENABLE
     if (state->imu_ready &&
         now_us - state->last_imu_valid_us > IMU_STALE_TIMEOUT_US) {
         ESP_LOGW(TAG, "HXY IMU stale; falling back to pressure-only mode");
@@ -1151,8 +1222,30 @@ static bool sensor_check_stale(sensor_task_state_t *state, int64_t now_us) {
             &state->imu_diagnostics);
         changed = true;
     }
-#endif
     return changed;
+}
+
+static void sensor_sync_estimator_diagnostics(sensor_task_state_t *state) {
+    vario_estimator_diagnostics_t diagnostics = {0};
+
+    if (state == NULL ||
+        !vario_estimator_get_diagnostics(&state->estimator,
+                                         &diagnostics)) {
+        return;
+    }
+    state->result.kalman_accel_bias_mps2 = diagnostics.accel_bias_mps2;
+    state->result.kalman_baro_innovation_m =
+        diagnostics.baro_innovation_m;
+    state->result.kalman_accel_innovation_mps2 =
+        diagnostics.accel_innovation_mps2;
+    state->result.kalman_baro_r_m2 =
+        diagnostics.baro_measurement_variance_m2;
+    state->result.kalman_accel_r_m2_s4 =
+        diagnostics.accel_measurement_variance_m2_s4;
+    state->result.kalman_baro_innovation_valid =
+        diagnostics.baro_innovation_valid;
+    state->result.kalman_accel_innovation_valid =
+        diagnostics.accel_innovation_valid;
 }
 
 static TickType_t sensor_wait_ticks(const sensor_task_state_t *state, int64_t now_us) {
@@ -1172,7 +1265,6 @@ static TickType_t sensor_wait_ticks(const sensor_task_state_t *state, int64_t no
     if (state->bmp_ready && state->last_bmp_valid_us + SENSOR_STALE_TIMEOUT_US < wake_time_us) {
         wake_time_us = state->last_bmp_valid_us + SENSOR_STALE_TIMEOUT_US;
     }
-#if CONFIG_CBV_IMU_HXY_ENABLE
     if (state->imu_accel_calibration_save_pending &&
         state->next_imu_accel_calibration_save_us < wake_time_us) {
         wake_time_us = state->next_imu_accel_calibration_save_us;
@@ -1185,7 +1277,6 @@ static TickType_t sensor_wait_ticks(const sensor_task_state_t *state, int64_t no
                state->next_imu_retry_us < wake_time_us) {
         wake_time_us = state->next_imu_retry_us;
     }
-#endif
 
     wait_us = wake_time_us - now_us;
     if (wait_us <= 0) {
@@ -1204,15 +1295,15 @@ static bool sensor_execute_work(sensor_task_state_t *state, int64_t now_us) {
         block_safe_stop_light_sleep();
     }
 
+    changed |= sensor_handle_accel_calibration_skip(state);
     changed |= sensor_try_initialize_devices(state, now_us);
-#if CONFIG_CBV_IMU_HXY_ENABLE
     changed |= sensor_process_imu(state, esp_timer_get_time());
     changed |= sensor_try_save_accel_calibration(
         state, esp_timer_get_time());
-#endif
     changed |= sensor_process_bmp581(state, esp_timer_get_time());
     changed |= sensor_check_stale(state, esp_timer_get_time());
     changed |= sensor_recover_shared_bus(state, esp_timer_get_time());
+    sensor_sync_estimator_diagnostics(state);
 
     if (power_ret == ESP_OK) {
         power_ret = app_power_sensor_work_end();
@@ -1241,7 +1332,6 @@ static void sensor_task(void *context) {
     state.next_bmp_retry_us = esp_timer_get_time();
     state.next_imu_retry_us = state.next_bmp_retry_us;
     state.result.timestamp_us = state.next_bmp_retry_us;
-#if CONFIG_CBV_IMU_HXY_ENABLE
     state.imu_diagnostics.enabled = true;
     state.imu_diagnostics.last_error = (int32_t) ESP_ERR_NOT_FOUND;
     state.imu_accel_calibration = initial_imu_accel_calibration;
@@ -1252,10 +1342,6 @@ static void sensor_task(void *context) {
     imu_accel_calibrator_reset(&state.imu_accel_calibrator);
     sensor_sync_accel_calibration_diagnostics(&state);
     imu_fusion_reset(&state.imu_fusion);
-#else
-    state.imu_diagnostics.enabled = false;
-    state.imu_diagnostics.last_error = (int32_t) ESP_ERR_NOT_SUPPORTED;
-#endif
     (void) app_resources_publish_imu_diagnostics(&state.imu_diagnostics);
 
     if (sensor_execute_work(&state, state.next_bmp_retry_us)) {
@@ -1301,7 +1387,6 @@ static void sensor_task(void *context) {
         now_us = esp_timer_get_time();
         notification_count =
             ulTaskNotifyTake(pdTRUE, sensor_wait_ticks(&state, now_us));
-#if CONFIG_CBV_IMU_HXY_ENABLE
         if (notification_count > 0U) {
             state.imu_interrupt_pending = true;
             if (notification_count > 1U) {
@@ -1314,9 +1399,6 @@ static void sensor_task(void *context) {
                     missed_count);
             }
         }
-#else
-        (void) notification_count;
-#endif
         now_us = esp_timer_get_time();
 
         snapshot_changed |= sensor_execute_work(&state, now_us);
@@ -1689,16 +1771,20 @@ static void request_power_off(system_snapshot_t *snapshot) {
 }
 
 static void system_task(void *context) {
+    EventGroupHandle_t event_group = app_resources_event_group();
     button_debounce_t sw1 = {0};
     button_debounce_t sw2 = {0};
     button_debounce_t sw3 = {0};
     system_snapshot_t snapshot = {0};
     uint32_t sw1_hold_time_ms = 0U;
+    uint32_t sw3_hold_time_ms = 0U;
     uint32_t battery_elapsed_ms = BATTERY_SAMPLE_PERIOD_MS;
     uint32_t led_elapsed_ms = 0U;
     bool sw1_was_released = false;
     bool previous_sw2_pressed = false;
     bool previous_sw3_pressed = false;
+    bool sw3_short_press_pending = false;
+    bool sw3_skip_request_issued = false;
 
     (void) context;
     ESP_LOGI(TAG, "system_task started on core %d", xPortGetCoreID());
@@ -1713,6 +1799,11 @@ static void system_task(void *context) {
     previous_sw3_pressed = sw3.stable_pressed;
 
     for (;;) {
+        EventBits_t event_bits =
+            event_group == NULL ? 0U : xEventGroupGetBits(event_group);
+        bool imu_accel_calibration_required =
+            (event_bits & APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED) != 0U;
+
         snapshot.timestamp_us = esp_timer_get_time();
         snapshot.sw1_pressed = debounce_button(&sw1, board_is_sw1_pressed());
         snapshot.sw2_pressed = debounce_button(&sw2, system_io_sw2_pressed());
@@ -1748,20 +1839,48 @@ static void system_task(void *context) {
             snapshot.volume_level = next_volume_level(current);
             snapshot.volume_override_active = true;
         }
-        if (sw3.stable_valid && snapshot.sw3_pressed &&
-            !previous_sw3_pressed) {
-            app_config_t config = {0};
-            bool current = snapshot.sink_enabled_override;
-
-            if (!snapshot.sink_override_active) {
-                if (!app_resources_copy_config(&config)) {
-                    app_config_set_defaults(&config);
+        if (sw3.stable_valid && snapshot.sw3_pressed) {
+            if (!previous_sw3_pressed) {
+                sw3_hold_time_ms = 0U;
+                sw3_skip_request_issued = false;
+                sw3_short_press_pending =
+                    imu_accel_calibration_required;
+                if (!imu_accel_calibration_required) {
+                    toggle_sink_override(&snapshot);
                 }
-                current = config.sink_enabled;
             }
-            snapshot.sink_enabled_override = !current;
-            snapshot.sink_override_active = true;
+            if (imu_accel_calibration_required &&
+                sw3_short_press_pending &&
+                !sw3_skip_request_issued) {
+                if (UINT32_MAX - sw3_hold_time_ms <
+                    SYSTEM_SAMPLE_PERIOD_MS) {
+                    sw3_hold_time_ms = UINT32_MAX;
+                } else {
+                    sw3_hold_time_ms += SYSTEM_SAMPLE_PERIOD_MS;
+                }
+                if (sw3_hold_time_ms >=
+                    IMU_CALIBRATION_SKIP_HOLD_MS) {
+                    if (event_group != NULL) {
+                        (void) xEventGroupSetBits(
+                            event_group,
+                            APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST);
+                    }
+                    sw3_skip_request_issued = true;
+                    sw3_short_press_pending = false;
+                    ESP_LOGW(TAG,
+                             "SW3 long press requested initial IMU calibration skip");
+                }
+            }
+        } else if (sw3.stable_valid && previous_sw3_pressed) {
+            if (sw3_short_press_pending &&
+                !sw3_skip_request_issued) {
+                toggle_sink_override(&snapshot);
+            }
+            sw3_hold_time_ms = 0U;
+            sw3_short_press_pending = false;
+            sw3_skip_request_issued = false;
         }
+        snapshot.sw3_hold_ms = sw3_hold_time_ms;
         previous_sw2_pressed = snapshot.sw2_pressed;
         previous_sw3_pressed = snapshot.sw3_pressed;
 
@@ -1880,14 +1999,26 @@ static bool console_write_monitor_line(void) {
         " ble_available=%d ble_notify=%d"
         " imu_online=%d imu_calibrated=%d imu_attitude_valid=%d"
         " imu_accel_calibrated=%d imu_accel_cal_persisted=%d"
+        " imu_accel_cal_skipped=%d"
         " imu_stale=%d q_w=%.5f q_x=%.5f q_y=%.5f q_z=%.5f"
         " roll_deg=%.2f pitch_deg=%.2f yaw_deg=%.2f"
         " vertical_accel_mps2=%.3f vertical_accel_valid=%d"
-        " fusion_active=%d imu_samples=%" PRIu32
+        " fusion_active=%d"
+        " kalman_accel_bias_mps2=%.4f"
+        " kalman_baro_innovation_m=%.4f"
+        " kalman_baro_innovation_valid=%d"
+        " kalman_accel_innovation_mps2=%.4f"
+        " kalman_accel_innovation_valid=%d"
+        " kalman_baro_r_m2=%.5f kalman_accel_r_m2_s4=%.5f"
+        " imu_samples=%" PRIu32
         " imu_missed=%" PRIu32
         " imu_confidence=%.3f imu_vibration_rms_g=%.4f"
         " imu_kp_effective=%.4f imu_ki_effective=%.4f"
-        " imu_ki_active=%d stream_drops=%" PRIu32 "\r\n",
+        " imu_ki_active=%d"
+        " imu_cal_samples=%" PRIu32
+        " imu_cal_save_pending=%d imu_cal_storage=%s"
+        " imu_cal_storage_error=%" PRId32
+        " stream_drops=%" PRIu32 "\r\n",
         vario.sequence, vario.timestamp_us, vario.bmp581_online,
         vario.pressure_valid, vario.raw_temperature, vario.raw_pressure,
         (double) vario.temperature_c_x100 / 100.0,
@@ -1900,16 +2031,30 @@ static bool console_write_monitor_line(void) {
         ble_fields.sentence_available, ble_vario_can_notify(),
         imu.online, imu.calibrated, imu.attitude_valid,
         imu.accel_calibrated, imu.accel_calibration_persisted,
+        imu.accel_calibration_skipped,
         imu.stale,
         (double) imu.quaternion[0], (double) imu.quaternion[1],
         (double) imu.quaternion[2], (double) imu.quaternion[3],
         (double) imu.roll_deg, (double) imu.pitch_deg,
         (double) imu.yaw_deg, (double) vario.vertical_accel_mps2,
         vario.vertical_accel_valid, vario.imu_fusion_active,
+        (double) vario.kalman_accel_bias_mps2,
+        (double) vario.kalman_baro_innovation_m,
+        vario.kalman_baro_innovation_valid,
+        (double) vario.kalman_accel_innovation_mps2,
+        vario.kalman_accel_innovation_valid,
+        (double) vario.kalman_baro_r_m2,
+        (double) vario.kalman_accel_r_m2_s4,
         imu.sample_count, vario.missed_imu_sample_count,
         (double) imu.confidence, (double) imu.vibration_rms_g,
         (double) imu.kp_effective, (double) imu.ki_effective,
         imu.ki_active,
+        imu.accel_calibration_sample_count,
+        imu.accel_calibration_save_pending,
+        imu_calibration_storage_result_name(
+            (imu_calibration_storage_result_t)
+                imu.accel_calibration_storage_result),
+        imu.accel_calibration_storage_error,
         serial_monitor_drop_count);
 }
 
@@ -1937,6 +2082,11 @@ static void console_diag_status(void) {
         "vertical_accel_valid=%d debug=%d pressure_pa=%.2f "
         "raw_temp=%" PRId32 " raw_pressure=%" PRIu32
         " altitude_m=%.2f climb_mps=%.2f vertical_accel_mps2=%.3f "
+        "kalman_accel_bias_mps2=%.4f "
+        "kalman_baro_innovation_m=%.4f kalman_baro_innovation_valid=%d "
+        "kalman_accel_innovation_mps2=%.4f "
+        "kalman_accel_innovation_valid=%d "
+        "kalman_baro_r_m2=%.5f kalman_accel_r_m2_s4=%.5f "
         "i2c_errors=%" PRIu32 " bmp_overruns=%" PRIu32
         " imu_missed=%" PRIu32 "\r\n",
         vario.bmp581_online, vario.pressure_valid, vario.climb_rate_valid,
@@ -1945,11 +2095,20 @@ static void console_diag_status(void) {
         (double) vario.pressure_pa_x100 / 100.0,
         vario.raw_temperature, vario.raw_pressure,
         (double) vario.altitude_m, (double) vario.climb_rate_mps,
-        (double) vario.vertical_accel_mps2, vario.i2c_error_count,
+        (double) vario.vertical_accel_mps2,
+        (double) vario.kalman_accel_bias_mps2,
+        (double) vario.kalman_baro_innovation_m,
+        vario.kalman_baro_innovation_valid,
+        (double) vario.kalman_accel_innovation_mps2,
+        vario.kalman_accel_innovation_valid,
+        (double) vario.kalman_baro_r_m2,
+        (double) vario.kalman_accel_r_m2_s4,
+        vario.i2c_error_count,
         vario.bmp_period_overrun_count, vario.missed_imu_sample_count);
     console_writef(
         "IMU enabled=%d online=%d configured=%d calibrated=%d "
         "accel_calibrated=%d accel_persisted=%d accel_save_pending=%d "
+        "accel_skipped=%d "
         "attitude=%d stale=%d fusion=%d target_address=0x%02x "
         "address=0x%02x who_am_i=0x%02x status=0x%02x "
         "retries=%" PRIu32 " samples=%" PRIu32 " calibration=%" PRIu32
@@ -1964,7 +2123,8 @@ static void console_diag_status(void) {
         "yaw_deg=%.2f last_error=%s(%" PRId32 ")\r\n",
         imu.enabled, imu.online, imu.configured, imu.calibrated,
         imu.accel_calibrated, imu.accel_calibration_persisted,
-        imu.accel_calibration_save_pending, imu.attitude_valid,
+        imu.accel_calibration_save_pending,
+        imu.accel_calibration_skipped, imu.attitude_valid,
         imu.stale, imu.fusion_active,
         ICM42688_HXY_I2C_ADDRESS, imu.address, imu.who_am_i,
         imu.data_status, imu.retry_count, imu.sample_count,
@@ -1995,6 +2155,7 @@ static void console_diag_status(void) {
         " battery_adc_mv=%" PRId32 " battery_samples=%" PRIu32
         " battery_errors=%" PRIu32 " battery_saturations=%" PRIu32
         " ext_power=%d sw=%d,%d,%d sw1_hold_ms=%" PRIu32
+        " sw3_hold_ms=%" PRIu32
         " volume_override=%d volume_level=%d sink_override=%d"
         " sink_enabled=%d power_off=%d\r\n",
         system.battery_valid, (double) system.battery_voltage_v,
@@ -2002,11 +2163,12 @@ static void console_diag_status(void) {
         system.battery_sample_count, system.battery_error_count,
         system.battery_saturation_count, system.external_power_present,
         system.sw1_pressed, system.sw2_pressed, system.sw3_pressed,
-        system.sw1_hold_ms, system.volume_override_active,
+        system.sw1_hold_ms, system.sw3_hold_ms,
+        system.volume_override_active,
         (int) system.volume_level, system.sink_override_active,
         system.sink_enabled_override, system.power_off_requested);
     console_writef(
-        "USB tinyusb=%d cdc=%d msc_driver=%d msc_media=%d"
+        "USB tinyusb=%d cdc=%d msc_driver=%d msc_enabled=%d msc_media=%d"
         " attached=%d dtr=%d vbus=%d storage=%d owner=%s load=%d"
         " config_source=%s config_validation=%s config_version=%" PRId32
         " config_key=%s config_io_error=%" PRId32 " "
@@ -2016,6 +2178,7 @@ static void console_diag_status(void) {
         " tx_errors=%" PRIu32
         " stream_drops=%" PRIu32 "\r\n",
         usb.driver_ready, usb.cdc_ready, usb.msc_driver_ready,
+        usb.msc_enabled,
         usb.msc_media_ready, usb.device_attached, usb.cdc_connected,
         usb.vbus_present, usb.storage_ready,
         usb_device_storage_owner_name(usb.storage_owner),

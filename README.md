@@ -59,7 +59,9 @@ idf.py -p <PORT> flash
 
 以後の通常のファームウェア更新では `flash` だけを実行します。通常起動またはFAT mount失敗時に自動formatは行いません。FATをmountできない場合もバリオ、BLE、音声およびTinyUSB CDCは起動を継続し、MSCは「メディアなし」として安全に応答します。この状態は `DIAG STATUS` の `msc_driver=1 msc_media=0` と `storage_error` で確認できます。FATを復旧するには、SW2とSW3による起動時初期化または `config-flash` を実行してください。
 
-FATが正常な場合は、同じUSB接続がTinyUSB CDCのCOMポートとMSCドライブとして認識されます。MSCをhostが所有している間、`PARAM SAVE`は `ERR SAVE BUSY`を返します。安全な取り外しまたはUSB切断後にESP32側へremountします。
+FATが正常な場合、TinyUSB CDCのCOMポートは起動処理の早い段階から利用できます。初回IMU校正、OTA確認および起動時ファイル処理が完了するまでは、config FATをESP32側の`APP_OWNED`に維持し、MSC媒体はhostへ公開しません。全ゲート完了後、同じUSB接続のMSCドライブを有効化して`HOST_OWNED`へ切り替えます。MSCをhostが所有している間、`PARAM SAVE`は `ERR SAVE BUSY`を返します。安全な取り外しまたはUSB切断後にESP32側へremountします。
+
+`mc_data.json`がない初回水平校正中にSW3を3秒長押しすると、その起動に限って校正をスキップします。未保存の校正候補は破棄され、IMUを停止して気圧単独で動作し、正式ビルドではMSC媒体を公開します。`mc_data.json`や設定ファイルへスキップ状態を保存しないため、次回起動では初回水平校正を再び要求します。校正中の3秒未満のSW3操作は、ボタンを離した時点で従来のシンク音ON/OFFとして処理します。
 
 wear levelling Performance modeを使用していた旧ファームウェアから更新した実機では、Safety modeへの変更により既存FATをmountできない場合があります。その場合は必要な設定値を事前に控え、SW2とSW3による起動時初期化または `config-flash` を実行してください。
 
@@ -71,7 +73,7 @@ TinyUSB CDCのCOMポートを指定してモニターを開始します。
 idf.py -p <PORT> monitor
 ```
 
-接続中は `BARO` で始まる `key=value` 形式の1行が10 Hzで連続出力されます。BMP581の生値・変換値、LK8EX1へ渡す5フィールド、IMUのクォータニオン／roll／pitch／yaw、姿勢補正済み鉛直加速度および各valid状態を同じ時点のsnapshotから確認できます。6DoF推定のyawは磁気方位ではなく、起動後の相対角でドリフトを含みます。
+接続中は `BARO` で始まる `key=value` 形式の1行が10 Hzで連続出力されます。BMP581の生値・変換値、LK8EX1へ渡す5フィールド、IMUのクォータニオン／roll／pitch／yaw、姿勢補正済み鉛直加速度、カルマンフィルタの加速度バイアス・innovation・実効観測分散、および各valid状態を同じ時点のsnapshotから確認できます。6DoF推定のyawは磁気方位ではなく、起動後の相対角でドリフトを含みます。
 
 ### MSCファームウェア更新
 
@@ -83,7 +85,7 @@ idf.py -p <PORT> monitor
 
 MSCの各WRITE(10)はwear levelling領域への実書込みが完了してからhostへ成功応答し、SCSI SYNCHRONIZE CACHEにも応答します。このため、安全な取り外しの完了時点では端末側に未完了の遅延書込みを残しません。
 
-次回起動時、通常task開始前にESP32-S3用application imageとproject名を検証し、inactive OTA slotへ書き込みます。成功後は更新firmwareで再起動し、必須taskが生成されて10秒動作すると確定します。初回bootの確認中はTinyUSB CDC + MSCを開始しません。確定後に `UPDATE.TXT`を `CONFIRMED`へ更新して `UPDATE.PND`を削除し、その完了後にだけUSBを公開します。確定前のresetまたはcrashでは以前のfirmwareへrollbackします。
+次回起動時、通常task開始前にESP32-S3用application imageとproject名を検証し、inactive OTA slotへ書き込みます。成功後は更新firmwareで再起動し、必須taskが生成されて10秒動作すると確定します。初回bootの確認中もTinyUSB CDC診断は開始しますが、config FATは`APP_OWNED`のままとしてMSC媒体を公開しません。確定後に `UPDATE.TXT`を `CONFIRMED`へ更新して `UPDATE.PND`を削除し、その完了後にだけMSC媒体を公開します。確定前のresetまたはcrashでは以前のfirmwareへrollbackします。
 
 同じドライブに `parameters.json`と更新ファイルを共存できます。`UPDATE.PND`は確認待ち、`UPDATE.BAD`は拒否・rollbackされたimage、`UPDATE.TXT`はASCIIの状態表示です。USB DFU classは使用せず、MSC更新が使えない場合の最終復旧手段はGPIO0 + resetのROM download modeです。同一versionとdowngradeは許可し、secure boot／署名検証は現時点では行いません。
 

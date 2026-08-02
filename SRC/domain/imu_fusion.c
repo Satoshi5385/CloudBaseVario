@@ -13,8 +13,8 @@
 #define IMU_DEGREES_TO_RADIANS 0.017453292519943295f
 #define IMU_ACCEL_OFFSET_MAX_G 0.20f
 #define IMU_FACTORY_LEVEL_XY_MAX_G 0.10f
-#define IMU_FACTORY_LEVEL_Z_MIN_G 0.85f
-#define IMU_FACTORY_LEVEL_Z_MAX_G 1.15f
+#define IMU_FACTORY_POSE_Z_MIN_G 0.75f
+#define IMU_FACTORY_POSE_Z_MAX_G 1.25f
 #define IMU_FACTORY_VIBRATION_MAX_G 0.02f
 #define IMU_VIBRATION_TIME_CONSTANT_SECONDS 0.25f
 #define IMU_ACCEL_CONFIDENCE_ZERO_ERROR_G 0.15f
@@ -175,28 +175,30 @@ static void reset_accel_calibration_samples(
 
 bool imu_accel_calibrator_update(
     imu_accel_calibrator_t *calibrator, const imu_sample_t *sensor_sample,
-    const app_config_t *config, imu_accel_calibration_t *calibration) {
+    const imu_axis_map_t *axis_map, imu_accel_calibration_t *calibration) {
     imu_sample_t board_sample = {0};
     float accel_norm_g = 0.0f;
     float expected_board_mps2[IMU_AXIS_COUNT] = {
         0.0f, 0.0f, IMU_STANDARD_GRAVITY_MPS2};
     float expected_sensor_mps2[IMU_AXIS_COUNT] = {0};
-    const uint32_t accel_source[IMU_AXIS_COUNT] = {
-        config == NULL ? 0U : config->imu_accel_x_source,
-        config == NULL ? 0U : config->imu_accel_y_source,
-        config == NULL ? 0U : config->imu_accel_z_source};
-    const float accel_sign[IMU_AXIS_COUNT] = {
-        config == NULL ? 0.0f : config->imu_accel_x_sign,
-        config == NULL ? 0.0f : config->imu_accel_y_sign,
-        config == NULL ? 0.0f : config->imu_accel_z_sign};
 
-    if (calibrator == NULL || sensor_sample == NULL || config == NULL ||
-        calibration == NULL ||
-        !imu_fusion_apply_axis_map(sensor_sample, config, &board_sample)) {
+    if (calibrator == NULL || calibration == NULL) {
         return false;
+    }
+    if (sensor_sample == NULL || axis_map == NULL ||
+        !imu_fusion_apply_axis_map(sensor_sample, axis_map, &board_sample)) {
+        reset_accel_calibration_samples(calibrator);
+        return false;
+    }
+    for (size_t board_axis = 0U; board_axis < IMU_AXIS_COUNT;
+         board_axis++) {
+        expected_sensor_mps2[axis_map->accel_source[board_axis]] =
+            expected_board_mps2[board_axis] *
+            axis_map->accel_sign[board_axis];
     }
     accel_norm_g =
         vector_norm(board_sample.accel_mps2) / IMU_STANDARD_GRAVITY_MPS2;
+    calibrator->accel_norm_g = accel_norm_g;
     update_vibration_estimate(
         accel_norm_g, board_sample.timestamp_us,
         &calibrator->vibration_mean_g,
@@ -206,14 +208,23 @@ bool imu_accel_calibrator_update(
         &calibrator->vibration_initialized);
 
     if (fabsf(board_sample.accel_mps2[0]) >
-            IMU_FACTORY_LEVEL_XY_MAX_G * IMU_STANDARD_GRAVITY_MPS2 ||
-        fabsf(board_sample.accel_mps2[1]) >
-            IMU_FACTORY_LEVEL_XY_MAX_G * IMU_STANDARD_GRAVITY_MPS2 ||
-        board_sample.accel_mps2[2] <
-            IMU_FACTORY_LEVEL_Z_MIN_G * IMU_STANDARD_GRAVITY_MPS2 ||
+        IMU_FACTORY_LEVEL_XY_MAX_G * IMU_STANDARD_GRAVITY_MPS2) {
+        reset_accel_calibration_samples(calibrator);
+        return false;
+    }
+    if (fabsf(board_sample.accel_mps2[1]) >
+        IMU_FACTORY_LEVEL_XY_MAX_G * IMU_STANDARD_GRAVITY_MPS2) {
+        reset_accel_calibration_samples(calibrator);
+        return false;
+    }
+    if (board_sample.accel_mps2[2] <
+            IMU_FACTORY_POSE_Z_MIN_G * IMU_STANDARD_GRAVITY_MPS2 ||
         board_sample.accel_mps2[2] >
-            IMU_FACTORY_LEVEL_Z_MAX_G * IMU_STANDARD_GRAVITY_MPS2 ||
-        calibrator->vibration_rms_g > IMU_FACTORY_VIBRATION_MAX_G) {
+            IMU_FACTORY_POSE_Z_MAX_G * IMU_STANDARD_GRAVITY_MPS2) {
+        reset_accel_calibration_samples(calibrator);
+        return false;
+    }
+    if (calibrator->vibration_rms_g > IMU_FACTORY_VIBRATION_MAX_G) {
         reset_accel_calibration_samples(calibrator);
         return false;
     }
@@ -234,15 +245,10 @@ bool imu_accel_calibrator_update(
     }
 
     memset(calibration, 0, sizeof(*calibration));
-    for (size_t board_axis = 0U; board_axis < IMU_AXIS_COUNT;
-         board_axis++) {
-        expected_sensor_mps2[accel_source[board_axis]] =
-            expected_board_mps2[board_axis] * accel_sign[board_axis];
-    }
     for (size_t axis = 0U; axis < IMU_AXIS_COUNT; axis++) {
         calibration->offset_mps2[axis] =
             (float) (calibrator->sensor_accel_sum[axis] /
-                     (double) IMU_ACCEL_CALIBRATION_SAMPLE_COUNT) -
+                     (double) calibrator->sample_count) -
             expected_sensor_mps2[axis];
     }
     calibration->sample_count = IMU_ACCEL_CALIBRATION_SAMPLE_COUNT;
@@ -542,39 +548,46 @@ static bool populate_attitude_output(const imu_fusion_t *fusion,
            isfinite(output->yaw_deg);
 }
 
-bool imu_fusion_apply_axis_map(const imu_sample_t *input,
-                               const app_config_t *config,
-                               imu_sample_t *output) {
-    uint32_t accel_source[IMU_AXIS_COUNT] = {0};
-    uint32_t gyro_source[IMU_AXIS_COUNT] = {0};
-    float accel_sign[IMU_AXIS_COUNT] = {0};
-    float gyro_sign[IMU_AXIS_COUNT] = {0};
+bool imu_axis_map_validate(const imu_axis_map_t *axis_map) {
+    uint32_t accel_axes = 0U;
+    uint32_t gyro_axes = 0U;
 
-    if (input == NULL || config == NULL || output == NULL || !input->valid ||
-        !app_config_validate(config) ||
+    if (axis_map == NULL) {
+        return false;
+    }
+    for (size_t axis = 0U; axis < IMU_AXIS_COUNT; axis++) {
+        if (axis_map->accel_source[axis] >= IMU_AXIS_COUNT ||
+            axis_map->gyro_source[axis] >= IMU_AXIS_COUNT ||
+            (axis_map->accel_sign[axis] != -1.0f &&
+             axis_map->accel_sign[axis] != 1.0f) ||
+            (axis_map->gyro_sign[axis] != -1.0f &&
+             axis_map->gyro_sign[axis] != 1.0f)) {
+            return false;
+        }
+        accel_axes |= UINT32_C(1) << axis_map->accel_source[axis];
+        gyro_axes |= UINT32_C(1) << axis_map->gyro_source[axis];
+    }
+    return accel_axes == UINT32_C(0x07) && gyro_axes == UINT32_C(0x07);
+}
+
+bool imu_fusion_apply_axis_map(const imu_sample_t *input,
+                               const imu_axis_map_t *axis_map,
+                               imu_sample_t *output) {
+    if (input == NULL || axis_map == NULL || output == NULL || !input->valid ||
+        !imu_axis_map_validate(axis_map) ||
         !vector_is_finite(input->accel_mps2) ||
         !vector_is_finite(input->gyro_radps)) {
         return false;
     }
-    accel_source[0] = config->imu_accel_x_source;
-    accel_source[1] = config->imu_accel_y_source;
-    accel_source[2] = config->imu_accel_z_source;
-    gyro_source[0] = config->imu_gyro_x_source;
-    gyro_source[1] = config->imu_gyro_y_source;
-    gyro_source[2] = config->imu_gyro_z_source;
-    accel_sign[0] = config->imu_accel_x_sign;
-    accel_sign[1] = config->imu_accel_y_sign;
-    accel_sign[2] = config->imu_accel_z_sign;
-    gyro_sign[0] = config->imu_gyro_x_sign;
-    gyro_sign[1] = config->imu_gyro_y_sign;
-    gyro_sign[2] = config->imu_gyro_z_sign;
 
     memset(output, 0, sizeof(*output));
     for (size_t index = 0U; index < IMU_AXIS_COUNT; index++) {
         output->accel_mps2[index] =
-            input->accel_mps2[accel_source[index]] * accel_sign[index];
+            input->accel_mps2[axis_map->accel_source[index]] *
+            axis_map->accel_sign[index];
         output->gyro_radps[index] =
-            input->gyro_radps[gyro_source[index]] * gyro_sign[index];
+            input->gyro_radps[axis_map->gyro_source[index]] *
+            axis_map->gyro_sign[index];
     }
     output->timestamp_us = input->timestamp_us;
     output->valid = true;
@@ -582,11 +595,11 @@ bool imu_fusion_apply_axis_map(const imu_sample_t *input,
 }
 
 bool imu_fusion_apply_calibration_and_axis_map(
-    const imu_sample_t *input, const app_config_t *config,
+    const imu_sample_t *input, const imu_axis_map_t *axis_map,
     const imu_accel_calibration_t *calibration, imu_sample_t *output) {
     imu_sample_t corrected = {0};
 
-    if (input == NULL || config == NULL || calibration == NULL ||
+    if (input == NULL || axis_map == NULL || calibration == NULL ||
         output == NULL || !imu_accel_calibration_validate(calibration)) {
         return false;
     }
@@ -594,7 +607,7 @@ bool imu_fusion_apply_calibration_and_axis_map(
     for (size_t axis = 0U; axis < IMU_AXIS_COUNT; axis++) {
         corrected.accel_mps2[axis] -= calibration->offset_mps2[axis];
     }
-    return imu_fusion_apply_axis_map(&corrected, config, output);
+    return imu_fusion_apply_axis_map(&corrected, axis_map, output);
 }
 
 bool imu_fusion_update(imu_fusion_t *fusion, const imu_sample_t *sample,

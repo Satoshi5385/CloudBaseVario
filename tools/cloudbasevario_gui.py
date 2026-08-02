@@ -20,14 +20,20 @@ except ImportError:
 
 try:
     from .cloudbasevario_protocol import (
+        DisplayItem,
         TelemetrySample,
+        TelemetryGroup,
+        build_telemetry_view,
         format_command,
         parse_parameter_line,
         parse_telemetry_line,
     )
 except ImportError:
     from cloudbasevario_protocol import (
+        DisplayItem,
         TelemetrySample,
+        TelemetryGroup,
+        build_telemetry_view,
         format_command,
         parse_parameter_line,
         parse_telemetry_line,
@@ -51,6 +57,14 @@ COLOR_YELLOW = "#facc15"
 COLOR_RED = "#fb7185"
 COLOR_BLUE = "#60a5fa"
 COLOR_GRID = "#334155"
+
+DISPLAY_COLORS = {
+    "normal": COLOR_GREEN,
+    "inactive": COLOR_MUTED,
+    "warning": COLOR_YELLOW,
+    "error": COLOR_RED,
+    "unavailable": COLOR_MUTED,
+}
 
 
 class SerialWorker:
@@ -148,6 +162,7 @@ class MetricCard(tk.Frame):
             padx=12,
             pady=9,
         )
+        self.unit = unit
         self.value_var = tk.StringVar(value="--")
         tk.Label(
             self,
@@ -158,13 +173,14 @@ class MetricCard(tk.Frame):
         ).pack(anchor="w")
         value_row = tk.Frame(self, bg=COLOR_PANEL)
         value_row.pack(fill="x", pady=(3, 0))
-        tk.Label(
+        self.value_label = tk.Label(
             value_row,
             textvariable=self.value_var,
             bg=COLOR_PANEL,
             fg=COLOR_TEXT,
             font=("Segoe UI Semibold", 18),
-        ).pack(side="left")
+        )
+        self.value_label.pack(side="left")
         tk.Label(
             value_row,
             text=unit,
@@ -175,6 +191,16 @@ class MetricCard(tk.Frame):
 
     def set(self, value: str) -> None:
         self.value_var.set(value)
+
+    def set_item(self, item: DisplayItem) -> None:
+        value = item.value
+        unit_suffix = f" {self.unit}" if self.unit else ""
+        if unit_suffix and value.endswith(unit_suffix):
+            value = value[: -len(unit_suffix)]
+        self.set(value)
+        self.value_label.configure(
+            fg=DISPLAY_COLORS.get(item.state, COLOR_TEXT)
+        )
 
 
 class StatusBadge(tk.Label):
@@ -197,8 +223,53 @@ class StatusBadge(tk.Label):
             fg=COLOR_GREEN if active else COLOR_RED,
         )
 
+    def set_item(self, item: DisplayItem) -> None:
+        self.configure(
+            text=f"{self.title}: {item.value}",
+            fg=DISPLAY_COLORS.get(item.state, COLOR_MUTED),
+        )
+
     def unknown(self) -> None:
         self.configure(text=f"{self.title}: --", fg=COLOR_MUTED)
+
+
+class DiagnosticTable(ttk.Labelframe):
+    """Compact, color-coded current-value table for one telemetry domain."""
+
+    def __init__(self, parent: tk.Misc, title: str) -> None:
+        super().__init__(parent, text=title, padding=(8, 6))
+        self.items: dict[str, str] = {}
+        self.tree = ttk.Treeview(
+            self,
+            columns=("field", "value"),
+            show="headings",
+            height=9,
+        )
+        self.tree.heading("field", text="Field")
+        self.tree.heading("value", text="Current value")
+        self.tree.column("field", width=220, anchor="w", stretch=True)
+        self.tree.column("value", width=150, anchor="e", stretch=False)
+        for state, color in DISPLAY_COLORS.items():
+            self.tree.tag_configure(state, foreground=color)
+        scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+    def update_group(self, group: TelemetryGroup) -> None:
+        visible_keys = {item.key for item in group.items}
+        for key, row in tuple(self.items.items()):
+            if key not in visible_keys:
+                self.tree.delete(row)
+                del self.items[key]
+        for item in group.items:
+            row = self.items.get(item.key)
+            values = (item.label, item.value)
+            if row is None:
+                row = self.tree.insert("", "end", values=values, tags=(item.state,))
+                self.items[item.key] = row
+            else:
+                self.tree.item(row, values=values, tags=(item.state,))
 
 
 class StripChart(tk.Frame):
@@ -470,8 +541,8 @@ class CloudBaseVarioApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1280x820")
-        self.root.minsize(1000, 680)
+        self.root.geometry("1360x900")
+        self.root.minsize(1100, 720)
         self.root.configure(bg=COLOR_BACKGROUND)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -608,15 +679,18 @@ class CloudBaseVarioApp:
         notebook.pack(fill="both", expand=True, padx=12, pady=(0, 8))
 
         dashboard = ttk.Frame(notebook)
+        diagnostics = ttk.Frame(notebook)
         detail = ttk.Frame(notebook)
         parameters = ttk.Frame(notebook)
         log_tab = ttk.Frame(notebook)
         notebook.add(dashboard, text="Telemetry")
+        notebook.add(diagnostics, text="Diagnostics")
         notebook.add(detail, text="All fields")
         notebook.add(parameters, text="Parameters")
         notebook.add(log_tab, text="Serial log")
 
         self._build_dashboard(dashboard)
+        self._build_diagnostics_tab(diagnostics)
         self._build_detail_tab(detail)
         self._build_parameter_tab(parameters)
         self._build_log_tab(log_tab)
@@ -680,44 +754,39 @@ class CloudBaseVarioApp:
         for column in range(5):
             metrics.grid_columnconfigure(column, weight=1)
 
-        self.pressure_card = MetricCard(metrics, "Pressure", "Pa")
-        self.altitude_card = MetricCard(metrics, "Altitude", "m")
-        self.climb_card = MetricCard(metrics, "Climb rate", "m/s")
-        self.vertical_accel_card = MetricCard(
-            metrics, "Vertical accel", "m/s²"
+        flight_card_specs = (
+            ("pressure_pa", "Pressure", "Pa"),
+            ("altitude_m", "Altitude", "m"),
+            ("climb_mps", "Climb rate", "m/s"),
+            ("vertical_accel_mps2", "Vertical accel", "m/s²"),
+            ("temp_c", "Temperature", "°C"),
         )
-        self.battery_card = MetricCard(metrics, "BLE battery", "V")
-        cards = (
-            self.pressure_card,
-            self.altitude_card,
-            self.climb_card,
-            self.vertical_accel_card,
-            self.battery_card,
-        )
-        for column, card in enumerate(cards):
+        self.flight_cards: dict[str, MetricCard] = {}
+        for column, (key, title, unit) in enumerate(flight_card_specs):
+            card = MetricCard(metrics, title, unit)
+            self.flight_cards[key] = card
             card.grid(
                 row=0,
                 column=column,
                 sticky="nsew",
                 padx=(0 if column == 0 else 4, 0 if column == 4 else 4),
-            )
+        )
 
         badges = tk.Frame(parent, bg=COLOR_BACKGROUND)
         badges.pack(fill="x", pady=(0, 8))
-        self.baro_badge = StatusBadge(badges, "BARO")
-        self.imu_badge = StatusBadge(badges, "IMU")
-        self.calibration_badge = StatusBadge(badges, "CAL")
-        self.attitude_badge = StatusBadge(badges, "ATT")
-        self.fusion_badge = StatusBadge(badges, "FUSION")
-        self.ble_badge = StatusBadge(badges, "BLE")
-        for badge in (
-            self.baro_badge,
-            self.imu_badge,
-            self.calibration_badge,
-            self.attitude_badge,
-            self.fusion_badge,
-            self.ble_badge,
+        self.status_badges: dict[str, StatusBadge] = {}
+        for key, title in (
+            ("baro", "BARO"),
+            ("estimate", "EST"),
+            ("imu", "IMU"),
+            ("calibration", "CAL"),
+            ("attitude", "ATT"),
+            ("fusion", "FUSION"),
+            ("ble", "BLE"),
+            ("stream", "STREAM"),
         ):
+            badge = StatusBadge(badges, title)
+            self.status_badges[key] = badge
             badge.pack(side="left", padx=(0, 6))
 
         content = tk.Frame(parent, bg=COLOR_BACKGROUND)
@@ -774,6 +843,29 @@ class CloudBaseVarioApp:
             fg=COLOR_MUTED,
             font=("Consolas", 9),
         ).pack(fill="x", padx=10, pady=(0, 10))
+
+    def _build_diagnostics_tab(self, parent: ttk.Frame) -> None:
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_columnconfigure(1, weight=1)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_rowconfigure(1, weight=1)
+
+        self.diagnostic_tables = {
+            "quality": DiagnosticTable(container, "Sensor / estimator quality"),
+            "imu": DiagnosticTable(container, "IMU / calibration"),
+            "ble": DiagnosticTable(container, "BLE / stream health"),
+        }
+        self.diagnostic_tables["quality"].grid(
+            row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 5)
+        )
+        self.diagnostic_tables["imu"].grid(
+            row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 5)
+        )
+        self.diagnostic_tables["ble"].grid(
+            row=1, column=0, columnspan=2, sticky="nsew", pady=(5, 0)
+        )
 
     def _build_detail_tab(self, parent: ttk.Frame) -> None:
         container = ttk.Frame(parent)
@@ -1040,14 +1132,7 @@ class CloudBaseVarioApp:
         )
         self._update_command_controls()
         if not connected:
-            for badge in (
-                self.baro_badge,
-                self.imu_badge,
-                self.calibration_badge,
-                self.attitude_badge,
-                self.fusion_badge,
-                self.ble_badge,
-            ):
+            for badge in self.status_badges.values():
                 badge.unknown()
 
     def _update_command_controls(self) -> None:
@@ -1245,7 +1330,7 @@ class CloudBaseVarioApp:
             and time.monotonic() - self.last_telemetry_time > 1.0
         ):
             self.connection_var.set("Connected — telemetry stale")
-            self.baro_badge.set(False, "STALE")
+            self.status_badges["baro"].set(False, "STALE")
         self.root.after(GUI_POLL_MS, self._poll_events)
 
     def _process_serial_line(self, line: str) -> None:
@@ -1272,6 +1357,7 @@ class CloudBaseVarioApp:
 
     def _handle_telemetry(self, sample: TelemetrySample) -> None:
         now = time.monotonic()
+        view = build_telemetry_view(sample)
         self.last_telemetry_time = now
         self.telemetry_arrivals.append(now)
         if len(self.telemetry_arrivals) >= 2:
@@ -1301,23 +1387,16 @@ class CloudBaseVarioApp:
         pitch = sample.number("pitch_deg")
         yaw = sample.number("yaw_deg")
 
-        self.pressure_card.set(f"{pressure:.2f}" if pressure_valid else "--")
-        self.altitude_card.set(
-            f"{altitude:.2f}" if sample.flag("estimate_valid") else "--"
-        )
-        self.climb_card.set(f"{climb:+.3f}" if climb_valid else "--")
-        self.vertical_accel_card.set(
-            f"{vertical_accel:+.3f}" if vertical_accel_valid else "--"
-        )
-        battery = sample.text("ble_battery", "999")
-        self.battery_card.set("--" if battery == "999" else battery)
-
-        self.baro_badge.set(sample.flag("online"))
-        self.imu_badge.set(sample.flag("imu_online"))
-        self.calibration_badge.set(sample.flag("imu_calibrated"))
-        self.attitude_badge.set(attitude_valid)
-        self.fusion_badge.set(sample.flag("fusion_active"))
-        self.ble_badge.set(sample.flag("ble_notify"))
+        for item in view.flight:
+            self.flight_cards[item.key].set_item(item)
+        for item in view.statuses:
+            badge = self.status_badges.get(item.key)
+            if badge is not None:
+                badge.set_item(item)
+        for group in view.diagnostics:
+            table = self.diagnostic_tables.get(group.key)
+            if table is not None:
+                table.update_group(group)
 
         self.attitude_indicator.update_attitude(
             roll, pitch, attitude_valid

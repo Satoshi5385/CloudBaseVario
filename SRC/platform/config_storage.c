@@ -16,6 +16,13 @@
 #define CONFIG_MAX_FILE_BYTES (32U * 1024U)
 #define CONFIG_PATH_BUFFER_SIZE 96U
 
+static const char *const legacy_board_axis_parameters[] = {
+    "imu_accel_x_source", "imu_accel_y_source", "imu_accel_z_source",
+    "imu_accel_x_sign",   "imu_accel_y_sign",   "imu_accel_z_sign",
+    "imu_gyro_x_source",  "imu_gyro_y_source",  "imu_gyro_z_source",
+    "imu_gyro_x_sign",    "imu_gyro_y_sign",    "imu_gyro_z_sign",
+};
+
 static void set_diagnostics(config_storage_diagnostics_t *diagnostics,
                             config_validation_result_t validation,
                             const char *key, int32_t io_error) {
@@ -59,6 +66,25 @@ static bool parameter_index_by_name(const char *name, size_t *index_out,
             }
             if (info_out != NULL) {
                 *info_out = info;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool legacy_board_axis_parameter_index(const char *name,
+                                              size_t *index_out) {
+    if (name == NULL) {
+        return false;
+    }
+    for (size_t index = 0U;
+         index < sizeof(legacy_board_axis_parameters) /
+                     sizeof(legacy_board_axis_parameters[0]);
+         index++) {
+        if (strcmp(name, legacy_board_axis_parameters[index]) == 0) {
+            if (index_out != NULL) {
+                *index_out = index;
             }
             return true;
         }
@@ -163,6 +189,9 @@ static bool parse_config_json(const char *json, size_t json_length,
     bool valid = false;
     bool legacy_accel_min_seen = false;
     bool legacy_accel_max_seen = false;
+    bool legacy_board_axis_seen[
+        sizeof(legacy_board_axis_parameters) /
+        sizeof(legacy_board_axis_parameters[0])] = {false};
     unsigned int version_count = 0U;
     unsigned int parameters_count = 0U;
 
@@ -267,12 +296,23 @@ static bool parse_config_json(const char *json, size_t json_length,
     for (cJSON *child = parameters->child; child != NULL;
          child = child->next) {
         size_t index = 0U;
+        size_t legacy_axis_index = 0U;
         app_parameter_info_t info = {0};
 
         if (child->string == NULL) {
             set_diagnostics(diagnostics,
                             CONFIG_VALIDATION_UNKNOWN_PARAMETER, NULL, 0);
             goto cleanup;
+        }
+        if (legacy_board_axis_parameter_index(child->string,
+                                              &legacy_axis_index)) {
+            if (legacy_board_axis_seen[legacy_axis_index]) {
+                set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
+                                child->string, 0);
+                goto cleanup;
+            }
+            legacy_board_axis_seen[legacy_axis_index] = true;
+            continue;
         }
         if (version->valuedouble == CONFIG_LEGACY_FORMAT_VERSION &&
             (strcmp(child->string, "imu_accel_correction_min_g") == 0 ||

@@ -1,7 +1,8 @@
 #include "app/app_resources.h"
 
-#include <stddef.h>
+#include <float.h>
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "freertos/semphr.h"
@@ -26,8 +27,11 @@ static system_snapshot_t latest_system;
 static app_config_t latest_config;
 static struct {
     float climb_rate_mps;
+    float altitude_m;
+    int64_t altitude_timestamp_us;
     int32_t pressure_pa_x100;
     bool pressure_override_valid;
+    bool altitude_valid;
     bool active;
 } debug_vario;
 
@@ -243,6 +247,11 @@ bool app_resources_set_debug_vario(float climb_rate_mps,
                        pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
         return false;
     }
+    if (!debug_vario.active) {
+        debug_vario.altitude_m = 0.0f;
+        debug_vario.altitude_timestamp_us = 0;
+        debug_vario.altitude_valid = false;
+    }
     debug_vario.climb_rate_mps = climb_rate_mps;
     debug_vario.pressure_pa_x100 = pressure_pa_x100;
     debug_vario.pressure_override_valid = pressure_override_valid;
@@ -272,7 +281,31 @@ bool app_resources_apply_debug_vario(vario_result_t *result,
     }
     active = debug_vario.active;
     if (active) {
+        if (!debug_vario.altitude_valid) {
+            debug_vario.altitude_m =
+                result->estimate_valid && isfinite(result->altitude_m)
+                    ? result->altitude_m
+                    : 0.0f;
+            debug_vario.altitude_timestamp_us = current_time_us;
+            debug_vario.altitude_valid = true;
+        } else if (current_time_us > debug_vario.altitude_timestamp_us) {
+            double elapsed_seconds =
+                (double) (current_time_us -
+                          debug_vario.altitude_timestamp_us) /
+                1000000.0;
+            double altitude_m =
+                (double) debug_vario.altitude_m +
+                (double) debug_vario.climb_rate_mps * elapsed_seconds;
+
+            if (isfinite(altitude_m) &&
+                altitude_m >= -(double) FLT_MAX &&
+                altitude_m <= (double) FLT_MAX) {
+                debug_vario.altitude_m = (float) altitude_m;
+            }
+            debug_vario.altitude_timestamp_us = current_time_us;
+        }
         result->timestamp_us = current_time_us;
+        result->altitude_m = debug_vario.altitude_m;
         result->climb_rate_mps = debug_vario.climb_rate_mps;
         result->climb_rate_valid = true;
         result->estimate_valid = true;

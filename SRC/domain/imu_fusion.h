@@ -16,6 +16,13 @@ typedef struct {
 } imu_sample_t;
 
 typedef struct {
+    uint32_t accel_source[IMU_AXIS_COUNT];
+    float accel_sign[IMU_AXIS_COUNT];
+    uint32_t gyro_source[IMU_AXIS_COUNT];
+    float gyro_sign[IMU_AXIS_COUNT];
+} imu_axis_map_t;
+
+typedef struct {
     float offset_mps2[IMU_AXIS_COUNT];
     uint32_t sample_count;
     bool valid;
@@ -23,6 +30,7 @@ typedef struct {
 
 typedef struct {
     double sensor_accel_sum[IMU_AXIS_COUNT];
+    float accel_norm_g;
     float vibration_mean_g;
     float vibration_variance_g2;
     float vibration_rms_g;
@@ -91,22 +99,25 @@ bool imu_accel_calibration_validate(
  */
 bool imu_accel_calibrator_update(
     imu_accel_calibrator_t *calibrator, const imu_sample_t *sensor_sample,
-    const app_config_t *config, imu_accel_calibration_t *calibration);
+    const imu_axis_map_t *axis_map, imu_accel_calibration_t *calibration);
+
+/** Validate a sensor-to-board axis permutation and its signs. */
+bool imu_axis_map_validate(const imu_axis_map_t *axis_map);
 
 /**
  * @brief Apply the configured sensor-to-board axis permutation and signs.
  * @param[in] input Physical sample in HXY sensor coordinates.
- * @param[in] config Valid runtime axis configuration.
+ * @param[in] axis_map Valid board-specific axis configuration.
  * @param[out] output Physical sample in board coordinates.
  * @return true when the map and sample are valid.
  */
 bool imu_fusion_apply_axis_map(const imu_sample_t *input,
-                               const app_config_t *config,
+                               const imu_axis_map_t *axis_map,
                                imu_sample_t *output);
 
 /** Subtract persisted sensor-coordinate acceleration offsets, then map axes. */
 bool imu_fusion_apply_calibration_and_axis_map(
-    const imu_sample_t *input, const app_config_t *config,
+    const imu_sample_t *input, const imu_axis_map_t *axis_map,
     const imu_accel_calibration_t *calibration, imu_sample_t *output);
 
 /**

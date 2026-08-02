@@ -153,10 +153,12 @@ void app_main(void) {
     bool config_format_requested = false;
     bool nvs_ready = false;
     bool update_confirmation_required = false;
-    bool usb_start_deferred = false;
+    bool usb_msc_gate_required = false;
+    bool usb_composite_active = false;
     bool imu_accel_calibration_required = false;
     esp_err_t storage_result = ESP_OK;
     esp_err_t usb_result = ESP_OK;
+    esp_err_t startup_gate_result = ESP_OK;
     firmware_update_diagnostics_t update_diagnostics = {0};
     imu_accel_calibration_t imu_accel_calibration = {0};
     imu_calibration_storage_diagnostics_t imu_calibration_diagnostics = {
@@ -197,7 +199,6 @@ void app_main(void) {
                  esp_err_to_name(storage_result));
     }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
     if (storage_result == ESP_OK) {
         imu_calibration_storage_result_t calibration_result =
             usb_device_load_imu_calibration(
@@ -216,7 +217,6 @@ void app_main(void) {
     }
     app_tasks_set_imu_accel_calibration(&imu_accel_calibration,
                                         &imu_calibration_diagnostics);
-#endif
 
     ret = firmware_update_process_boot(system_io_external_power_present());
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE &&
@@ -227,7 +227,7 @@ void app_main(void) {
     firmware_update_get_diagnostics(&update_diagnostics);
     update_confirmation_required =
         update_diagnostics.confirmation_required;
-    usb_start_deferred =
+    usb_msc_gate_required =
         update_confirmation_required ||
         update_diagnostics.state == FIRMWARE_UPDATE_PENDING_CONFIRMATION ||
         imu_accel_calibration_required;
@@ -235,24 +235,32 @@ void app_main(void) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "OTA confirmation task unavailable: %s",
                  esp_err_to_name(ret));
-        usb_result = ret;
+        startup_gate_result = ret;
     }
 
-    if (!usb_start_deferred) {
-        usb_result = usb_device_start();
-        if (usb_result != ESP_OK) {
-            ESP_LOGW(TAG, "TinyUSB CDC+MSC degraded: %s",
-                     esp_err_to_name(usb_result));
-        }
-    } else {
+    usb_result = usb_device_start();
+    usb_composite_active = usb_result == ESP_OK;
+    if (usb_result != ESP_OK) {
+        ESP_LOGW(TAG, "early TinyUSB CDC diagnostics unavailable: %s",
+                 esp_err_to_name(usb_result));
+    } else if (usb_msc_gate_required) {
         ESP_LOGI(TAG,
-                 "TinyUSB start deferred until OTA and IMU calibration gates clear");
+                 "USB CDC started; MSC medium remains APP-owned until startup gates clear");
     }
 
     ret = app_resources_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "RTOS resource initialization failed: %s", esp_err_to_name(ret));
         app_tasks_run_fatal_fallback();
+    }
+    if (imu_accel_calibration_required) {
+        EventGroupHandle_t event_group = app_resources_event_group();
+
+        if (event_group != NULL) {
+            (void) xEventGroupSetBits(
+                event_group,
+            APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED);
+        }
     }
 
     ret = initialize_nvs();
@@ -268,6 +276,11 @@ void app_main(void) {
     }
     if (usb_result != ESP_OK && usb_result != storage_result) {
         post_peripheral_failure(usb_result);
+    }
+    if (startup_gate_result != ESP_OK &&
+        startup_gate_result != storage_result &&
+        startup_gate_result != usb_result) {
+        post_peripheral_failure(startup_gate_result);
     }
     if (!app_resources_publish_config(&runtime_config)) {
         ESP_LOGW(TAG, "runtime parameter configuration rejected; defaults retained");
@@ -307,15 +320,15 @@ void app_main(void) {
         return;
     }
 
-    if (usb_start_deferred && update_confirmation_required &&
-        usb_result == ESP_OK) {
-        usb_result = firmware_update_wait_for_confirmation(
+    if (usb_msc_gate_required && update_confirmation_required &&
+        startup_gate_result == ESP_OK) {
+        startup_gate_result = firmware_update_wait_for_confirmation(
             UPDATE_CONFIRMATION_USB_WAIT_MS);
-        if (usb_result != ESP_OK) {
+        if (startup_gate_result != ESP_OK) {
             ESP_LOGE(TAG,
-                     "TinyUSB remains disabled until OTA cleanup succeeds: %s",
-                     esp_err_to_name(usb_result));
-            post_peripheral_failure(usb_result);
+                     "MSC remains disabled until OTA cleanup succeeds: %s",
+                     esp_err_to_name(startup_gate_result));
+            post_peripheral_failure(startup_gate_result);
         }
     }
 
@@ -327,29 +340,34 @@ void app_main(void) {
         }
     }
 
-#if CONFIG_CBV_IMU_HXY_ENABLE
-    if (usb_start_deferred && imu_accel_calibration_required &&
-        usb_result == ESP_OK) {
+    if (usb_msc_gate_required && imu_accel_calibration_required &&
+        startup_gate_result == ESP_OK) {
         EventGroupHandle_t event_group = app_resources_event_group();
         EventBits_t bits = event_group == NULL
                                ? APP_EVENT_FATAL_STATE
                                : xEventGroupWaitBits(
                                      event_group,
                                      APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED |
+                                         APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED |
                                          APP_EVENT_STOP_REQUEST |
                                          APP_EVENT_FATAL_STATE,
                                      pdFALSE, pdFALSE, portMAX_DELAY);
 
-        if ((bits & APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED) == 0U) {
-            usb_result = ESP_ERR_INVALID_STATE;
+        if ((bits & (APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED |
+                     APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED)) == 0U) {
+            startup_gate_result = ESP_ERR_INVALID_STATE;
+            post_peripheral_failure(startup_gate_result);
+        } else if ((bits & APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED) != 0U) {
+            ESP_LOGW(TAG,
+                     "initial IMU calibration skipped; enabling MSC in pressure-only mode");
         }
     }
-#endif
 
-    if (usb_start_deferred && usb_result == ESP_OK) {
-        usb_result = usb_device_start();
+    if (usb_result == ESP_OK && startup_gate_result == ESP_OK &&
+        usb_composite_active) {
+        usb_result = usb_device_enable_msc();
         if (usb_result != ESP_OK) {
-            ESP_LOGE(TAG, "TinyUSB deferred start failed: %s",
+            ESP_LOGE(TAG, "USB MSC enable failed: %s",
                      esp_err_to_name(usb_result));
             post_peripheral_failure(usb_result);
         }

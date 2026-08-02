@@ -49,25 +49,15 @@ static const app_parameter_descriptor_t parameter_table[] = {
     PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0),
     PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0),
     PARAM_FLOAT(imu_mahony_ki, 0.05f, 0.0, 5.0),
-    PARAM_UINT(imu_accel_x_source, 0, 0.0, 2.0),
-    PARAM_UINT(imu_accel_y_source, 1, 0.0, 2.0),
-    PARAM_UINT(imu_accel_z_source, 2, 0.0, 2.0),
-    PARAM_FLOAT(imu_accel_x_sign, 1.0f, -1.0, 1.0),
-    PARAM_FLOAT(imu_accel_y_sign, 1.0f, -1.0, 1.0),
-    PARAM_FLOAT(imu_accel_z_sign, 1.0f, -1.0, 1.0),
-    PARAM_UINT(imu_gyro_x_source, 0, 0.0, 2.0),
-    PARAM_UINT(imu_gyro_y_source, 1, 0.0, 2.0),
-    PARAM_UINT(imu_gyro_z_source, 2, 0.0, 2.0),
-    PARAM_FLOAT(imu_gyro_x_sign, 1.0f, -1.0, 1.0),
-    PARAM_FLOAT(imu_gyro_y_sign, 1.0f, -1.0, 1.0),
-    PARAM_FLOAT(imu_gyro_z_sign, 1.0f, -1.0, 1.0),
     PARAM_BOOL(audio_enabled, true),
     PARAM_BOOL(sink_enabled, true),
     PARAM_BOOL(predictive_buzzer_enabled, false),
     PARAM_FLOAT(lift_start_mps, 0.10f, -1.0, 5.0),
     PARAM_FLOAT(lift_end_mps, 0.05f, -1.0, 5.0),
+    PARAM_FLOAT(lift_confirm_distance_m, 0.5f, 0.0, 10.0),
     PARAM_FLOAT(sink_start_mps, -1.00f, -10.0, 0.0),
     PARAM_FLOAT(sink_end_mps, -0.80f, -10.0, 0.0),
+    PARAM_FLOAT(sink_confirm_distance_m, 0.5f, 0.0, 10.0),
     PARAM_UINT(audio_state_hold_ms, 60, 0.0, 1000.0),
     PARAM_UINT(audio_stale_ms, 500, 100.0, 500.0),
     PARAM_UINT(lift_freq_base_hz, 600, 200.0, 5000.0),
@@ -171,16 +161,6 @@ void app_config_set_defaults(app_config_t *config) {
     }
 }
 
-static bool axis_map_is_permutation(uint32_t x_source, uint32_t y_source,
-                                    uint32_t z_source) {
-    return x_source != y_source && x_source != z_source &&
-           y_source != z_source;
-}
-
-static bool axis_sign_is_valid(float sign) {
-    return sign == -1.0f || sign == 1.0f;
-}
-
 bool app_config_validate(const app_config_t *config) {
     if (config == NULL) {
         return false;
@@ -211,22 +191,6 @@ bool app_config_validate(const app_config_t *config) {
         return false;
     }
     if (config->predictive_min_mps > config->predictive_max_mps) {
-        return false;
-    }
-    if (!axis_map_is_permutation(config->imu_accel_x_source,
-                                 config->imu_accel_y_source,
-                                 config->imu_accel_z_source) ||
-        !axis_map_is_permutation(config->imu_gyro_x_source,
-                                 config->imu_gyro_y_source,
-                                 config->imu_gyro_z_source)) {
-        return false;
-    }
-    if (!axis_sign_is_valid(config->imu_accel_x_sign) ||
-        !axis_sign_is_valid(config->imu_accel_y_sign) ||
-        !axis_sign_is_valid(config->imu_accel_z_sign) ||
-        !axis_sign_is_valid(config->imu_gyro_x_sign) ||
-        !axis_sign_is_valid(config->imu_gyro_y_sign) ||
-        !axis_sign_is_valid(config->imu_gyro_z_sign)) {
         return false;
     }
     return true;

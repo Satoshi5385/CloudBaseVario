@@ -23,6 +23,12 @@
 
 static const char *TAG = "board";
 static bool green_led_pwm_initialized = false;
+static const imu_axis_map_t aohazuku_rev0_imu_axis_map = {
+    .accel_source = {0U, 1U, 2U},
+    .accel_sign = {1.0f, 1.0f, 1.0f},
+    .gyro_source = {0U, 1U, 2U},
+    .gyro_sign = {1.0f, 1.0f, 1.0f},
+};
 
 _Static_assert(PIN_PWR_HOLD == GPIO_NUM_47, "Unexpected power-hold GPIO");
 _Static_assert(PIN_LED_1 == GPIO_NUM_16, "Unexpected green LED GPIO");
@@ -167,8 +173,16 @@ bool board_config_is_valid(void) {
         ESP_LOGE(TAG, "invalid battery divider scale");
         return false;
     }
+    if (!imu_axis_map_validate(&aohazuku_rev0_imu_axis_map)) {
+        ESP_LOGE(TAG, "invalid IMU axis map");
+        return false;
+    }
 
     return true;
+}
+
+const imu_axis_map_t *board_imu_axis_map(void) {
+    return &aohazuku_rev0_imu_axis_map;
 }
 
 void board_set_safe_indicators(void) {

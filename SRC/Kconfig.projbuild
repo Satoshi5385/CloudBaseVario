@@ -16,18 +16,6 @@ menu "CloudBaseVario application"
             Retry an unavailable BMP581 or HXY IMU without
             blocking the sensor task between attempts.
 
-    config CBV_IMU_HXY_ENABLE
-        bool "Enable ICM-42688P-HXY sampling and vario fusion"
-        default y
-        help
-            Configure the SDO-Low device at address 0x18 using the HXY
-            register map, sample acceleration and angular rate at 400 Hz
-            from GPIO14 Data Ready, apply the per-unit mc_data.json
-            accelerometer calibration, calibrate gyro/attitude, and fuse
-            vertical acceleration with BMP581 pressure altitude. Probe and
-            runtime failures remain non-fatal and fall back to pressure-only
-            mode; first-boot USB stays deferred until calibration is saved.
-
     config CBV_SENSOR_CONSECUTIVE_ERROR_LIMIT
         int "Consecutive sensor I2C error limit"
         range 1 100

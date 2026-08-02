@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
 #include "driver/ledc.h"
+#include "domain/imu_fusion.h"
 #include "esp_err.h"
 
 #if !CONFIG_CBV_BOARD_AOHAZUKU_REV0
@@ -76,6 +77,9 @@ esp_err_t board_init_safe_gpio(void);
  * @return true when the selected board definition is internally consistent.
  */
 bool board_config_is_valid(void);
+
+/** Return the fixed sensor-to-board IMU axis map for this board revision. */
+const imu_axis_map_t *board_imu_axis_map(void);
 
 /**
  * @brief Force both LEDs and the PAM8904E controls to their safe off levels.

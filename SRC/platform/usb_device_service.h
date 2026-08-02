@@ -20,6 +20,7 @@ typedef struct {
     bool driver_ready;
     bool cdc_ready;
     bool msc_driver_ready;
+    bool msc_enabled;
     bool msc_media_ready;
     bool device_attached;
     bool cdc_connected;
@@ -49,6 +50,13 @@ esp_err_t usb_device_storage_init(app_config_t *config,
 
 /** Start the self-powered TinyUSB CDC + MSC composite device. */
 esp_err_t usb_device_start(void);
+
+/**
+ * Allow the already-enumerated composite device to expose its MSC medium.
+ * Until this is called, USB attach events return the FAT volume to APP ownership
+ * so startup calibration, OTA cleanup, and configuration writes can complete.
+ */
+esp_err_t usb_device_enable_msc(void);
 
 /** Save parameters while the application owns the FAT volume. */
 esp_err_t usb_device_save_config(const app_config_t *config);

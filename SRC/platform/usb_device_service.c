@@ -33,7 +33,9 @@
 static const char *TAG = "usb_device";
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t storage_io_mutex;
+static SemaphoreHandle_t msc_policy_mutex;
 static bool storage_transition_locked;
+static bool msc_exposure_enabled;
 static wl_handle_t wear_levelling_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t msc_storage;
 static char serial_number[USB_SERIAL_NUMBER_LENGTH];
@@ -140,25 +142,68 @@ static void make_serial_number(void) {
 }
 
 static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
+    bool restore_app_ownership = false;
+    bool policy_locked = false;
+    usb_storage_owner_t owner;
+    esp_err_t storage_error;
+    esp_err_t ret;
+
     (void) arg;
     if (event == NULL) {
         return;
+    }
+    if (msc_policy_mutex != NULL) {
+        policy_locked =
+            xSemaphoreTake(msc_policy_mutex, portMAX_DELAY) == pdTRUE;
     }
 
     portENTER_CRITICAL(&state_lock);
     if (event->id == TINYUSB_EVENT_ATTACHED) {
         usb_diagnostics.device_attached = true;
+        restore_app_ownership = !msc_exposure_enabled &&
+                                msc_storage != NULL;
         if (usb_diagnostics.attach_count < UINT32_MAX) {
             usb_diagnostics.attach_count++;
         }
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         usb_diagnostics.device_attached = false;
         usb_diagnostics.cdc_connected = false;
+        restore_app_ownership = msc_storage != NULL &&
+                                usb_diagnostics.storage_owner !=
+                                    USB_STORAGE_APP_OWNED &&
+                                usb_diagnostics.storage_owner !=
+                                    USB_STORAGE_UNAVAILABLE;
         if (usb_diagnostics.detach_count < UINT32_MAX) {
             usb_diagnostics.detach_count++;
         }
     }
     portEXIT_CRITICAL(&state_lock);
+
+    /*
+     * esp_tinyusb globally moves every registered MSC storage to USB ownership
+     * from tud_mount_cb(). Keep startup storage application-owned until the
+     * firmware explicitly opens the MSC gate.
+     */
+    if (restore_app_ownership) {
+        ret = tinyusb_msc_set_storage_mount_point(
+            msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP);
+        portENTER_CRITICAL(&state_lock);
+        owner = usb_diagnostics.storage_owner;
+        storage_error = usb_diagnostics.last_storage_error;
+        portEXIT_CRITICAL(&state_lock);
+        if (ret != ESP_OK || owner != USB_STORAGE_APP_OWNED) {
+            esp_err_t effective_error =
+                ret != ESP_OK
+                    ? ret
+                    : (storage_error == ESP_OK ? ESP_FAIL : storage_error);
+            ESP_LOGE(TAG, "failed to retain APP storage ownership: %s",
+                     esp_err_to_name(effective_error));
+            set_storage_unavailable(effective_error);
+        }
+    }
+    if (policy_locked) {
+        (void) xSemaphoreGive(msc_policy_mutex);
+    }
 }
 
 static void cdc_line_state_changed(int itf, cdcacm_event_t *event) {
@@ -240,6 +285,13 @@ esp_err_t usb_device_storage_init(app_config_t *config,
 
     storage_io_mutex = xSemaphoreCreateMutex();
     if (storage_io_mutex == NULL) {
+        set_storage_unavailable(ESP_ERR_NO_MEM);
+        return ESP_ERR_NO_MEM;
+    }
+    msc_policy_mutex = xSemaphoreCreateMutex();
+    if (msc_policy_mutex == NULL) {
+        vSemaphoreDelete(storage_io_mutex);
+        storage_io_mutex = NULL;
         set_storage_unavailable(ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
@@ -377,13 +429,18 @@ esp_err_t usb_device_storage_init(app_config_t *config,
 esp_err_t usb_device_start(void) {
     esp_err_t first_error = ESP_OK;
     esp_err_t ret;
+    bool driver_ready;
     bool msc_driver_ready;
     bool media_ready;
     esp_err_t storage_error;
 
     portENTER_CRITICAL(&state_lock);
+    driver_ready = usb_diagnostics.driver_ready;
     msc_driver_ready = usb_diagnostics.msc_driver_ready;
     portEXIT_CRITICAL(&state_lock);
+    if (driver_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!msc_driver_ready) {
         ESP_LOGW(TAG,
                  "TinyUSB composite not started because MSC driver is unavailable");
@@ -449,6 +506,71 @@ esp_err_t usb_device_start(void) {
                  esp_err_to_name(storage_error));
     }
     return first_error;
+}
+
+esp_err_t usb_device_enable_msc(void) {
+    bool attached;
+    bool driver_ready;
+    bool msc_driver_ready;
+    usb_storage_owner_t owner;
+    esp_err_t storage_error;
+    esp_err_t ret;
+
+    if (msc_policy_mutex == NULL ||
+        xSemaphoreTake(msc_policy_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&state_lock);
+    attached = usb_diagnostics.device_attached;
+    driver_ready = usb_diagnostics.driver_ready;
+    msc_driver_ready = usb_diagnostics.msc_driver_ready;
+    owner = usb_diagnostics.storage_owner;
+    if (driver_ready && msc_driver_ready &&
+        msc_storage != NULL &&
+        (owner == USB_STORAGE_APP_OWNED ||
+         owner == USB_STORAGE_HOST_OWNED)) {
+        msc_exposure_enabled = true;
+        usb_diagnostics.msc_enabled = true;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    if (!driver_ready || !msc_driver_ready ||
+        msc_storage == NULL ||
+        (owner != USB_STORAGE_APP_OWNED &&
+         owner != USB_STORAGE_HOST_OWNED)) {
+        (void) xSemaphoreGive(msc_policy_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!attached) {
+        ESP_LOGI(TAG, "MSC medium enabled; waiting for USB host attachment");
+        (void) xSemaphoreGive(msc_policy_mutex);
+        return ESP_OK;
+    }
+    if (owner == USB_STORAGE_HOST_OWNED) {
+        ESP_LOGI(TAG, "MSC medium already owned by USB host");
+        (void) xSemaphoreGive(msc_policy_mutex);
+        return ESP_OK;
+    }
+
+    ret = tinyusb_msc_set_storage_mount_point(
+        msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB);
+    portENTER_CRITICAL(&state_lock);
+    owner = usb_diagnostics.storage_owner;
+    storage_error = usb_diagnostics.last_storage_error;
+    if (ret != ESP_OK || owner != USB_STORAGE_HOST_OWNED) {
+        msc_exposure_enabled = false;
+        usb_diagnostics.msc_enabled = false;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    (void) xSemaphoreGive(msc_policy_mutex);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (owner != USB_STORAGE_HOST_OWNED) {
+        return storage_error == ESP_OK ? ESP_FAIL : storage_error;
+    }
+    ESP_LOGI(TAG, "MSC medium enabled for USB host");
+    return ESP_OK;
 }
 
 esp_err_t usb_device_storage_begin_app_io(uint32_t timeout_ms) {

@@ -22,6 +22,9 @@
 #define FUSION_INITIAL_ACCEL_VARIANCE_M2_S4 100.0f
 #define FUSION_INITIAL_BIAS_VARIANCE_M2_S4 4.0f
 #define FUSION_ACCEL_ADAPT_FACTOR 0.25f
+#define FUSION_ACCEL_CONFIDENCE_FLOOR 0.05f
+#define FUSION_ACCEL_VIBRATION_GRAVITY_MPS2 9.80665f
+#define FUSION_ACCEL_MEAS_VARIANCE_MAX_M2_S4 10000.0f
 
 static bool pressure_to_altitude(float pressure_pa, float sea_level_pressure_pa,
                                  float *altitude_m) {
@@ -61,9 +64,15 @@ void vario_estimator_disable_fusion(vario_estimator_t *estimator) {
     estimator->fusion_accel_mps2 = 0.0f;
     estimator->fusion_accel_bias_mps2 = 0.0f;
     estimator->latest_vertical_accel_mps2 = 0.0f;
+    estimator->fusion_baro_innovation_m = 0.0f;
+    estimator->fusion_accel_innovation_mps2 = 0.0f;
+    estimator->fusion_baro_measurement_variance_m2 = 0.0f;
+    estimator->fusion_accel_measurement_variance_m2_s4 = 0.0f;
     estimator->fusion_timestamp_us = 0;
     estimator->fusion_accel_available = false;
     estimator->fusion_initialized = false;
+    estimator->fusion_baro_innovation_valid = false;
+    estimator->fusion_accel_innovation_valid = false;
     memset(estimator->fusion_covariance, 0,
            sizeof(estimator->fusion_covariance));
 }
@@ -159,7 +168,8 @@ static bool fusion_predict_to(vario_estimator_t *estimator,
 
 static bool fusion_update_scalar(vario_estimator_t *estimator,
                                  size_t observed_state, float measurement,
-                                 float measurement_variance) {
+                                 float measurement_variance,
+                                 float *innovation_out) {
     float state[FUSION_STATE_COUNT] = {0};
     float gain[FUSION_STATE_COUNT] = {0};
     float covariance[FUSION_STATE_COUNT][FUSION_STATE_COUNT] = {0};
@@ -216,7 +226,13 @@ static bool fusion_update_scalar(vario_estimator_t *estimator,
     estimator->fusion_accel_bias_mps2 = state[3];
     memcpy(estimator->fusion_covariance, covariance,
            sizeof(estimator->fusion_covariance));
-    return fusion_state_is_valid(estimator);
+    if (!fusion_state_is_valid(estimator)) {
+        return false;
+    }
+    if (innovation_out != NULL) {
+        *innovation_out = innovation;
+    }
+    return true;
 }
 
 static void fusion_seed_from_baro(vario_estimator_t *estimator,
@@ -243,13 +259,48 @@ static void fusion_seed_from_baro(vario_estimator_t *estimator,
     estimator->fusion_initialized = true;
 }
 
+static bool fusion_accel_measurement_variance(
+    float vertical_accel_mps2, float imu_confidence,
+    float vibration_rms_g, float *measurement_variance) {
+    float confidence = 0.0f;
+    float vibration_mps2 = 0.0f;
+    float variance = 0.0f;
+
+    if (measurement_variance == NULL || !isfinite(vertical_accel_mps2) ||
+        !isfinite(imu_confidence) || imu_confidence < 0.0f ||
+        imu_confidence > 1.0f || !isfinite(vibration_rms_g) ||
+        vibration_rms_g < 0.0f) {
+        return false;
+    }
+    confidence = fmaxf(imu_confidence, FUSION_ACCEL_CONFIDENCE_FLOOR);
+    vibration_mps2 =
+        vibration_rms_g * FUSION_ACCEL_VIBRATION_GRAVITY_MPS2;
+    variance =
+        (FUSION_ACCEL_MEAS_VARIANCE_M2_S4 +
+         FUSION_ACCEL_ADAPT_FACTOR * vertical_accel_mps2 *
+             vertical_accel_mps2) /
+            (confidence * confidence) +
+        vibration_mps2 * vibration_mps2;
+    if (!isfinite(variance) || variance <= 0.0f) {
+        return false;
+    }
+    *measurement_variance =
+        fminf(variance, FUSION_ACCEL_MEAS_VARIANCE_MAX_M2_S4);
+    return true;
+}
+
 bool vario_estimator_update_imu(vario_estimator_t *estimator,
                                 float vertical_accel_mps2,
+                                float imu_confidence,
+                                float vibration_rms_g,
                                 int64_t timestamp_us) {
-    float accel_variance = FUSION_ACCEL_MEAS_VARIANCE_M2_S4;
+    float accel_variance = 0.0f;
+    float accel_innovation = 0.0f;
 
-    if (estimator == NULL || !isfinite(vertical_accel_mps2) ||
-        timestamp_us <= 0) {
+    if (estimator == NULL || timestamp_us <= 0 ||
+        !fusion_accel_measurement_variance(
+            vertical_accel_mps2, imu_confidence, vibration_rms_g,
+            &accel_variance)) {
         if (estimator != NULL) {
             vario_estimator_disable_fusion(estimator);
         }
@@ -262,6 +313,8 @@ bool vario_estimator_update_imu(vario_estimator_t *estimator,
     }
 
     estimator->latest_vertical_accel_mps2 = vertical_accel_mps2;
+    estimator->fusion_accel_measurement_variance_m2_s4 = accel_variance;
+    estimator->fusion_accel_innovation_valid = false;
     estimator->fusion_accel_available = true;
     if (!estimator->fusion_initialized) {
         estimator->fusion_timestamp_us = timestamp_us;
@@ -271,14 +324,36 @@ bool vario_estimator_update_imu(vario_estimator_t *estimator,
         vario_estimator_disable_fusion(estimator);
         return false;
     }
-    accel_variance +=
-        FUSION_ACCEL_ADAPT_FACTOR *
-        vertical_accel_mps2 * vertical_accel_mps2;
     if (!fusion_update_scalar(estimator, 2U, vertical_accel_mps2,
-                              accel_variance)) {
+                              accel_variance, &accel_innovation)) {
         vario_estimator_disable_fusion(estimator);
         return false;
     }
+    estimator->fusion_accel_innovation_mps2 = accel_innovation;
+    estimator->fusion_accel_innovation_valid = true;
+    return true;
+}
+
+bool vario_estimator_get_diagnostics(
+    const vario_estimator_t *estimator,
+    vario_estimator_diagnostics_t *diagnostics) {
+    if (estimator == NULL || diagnostics == NULL) {
+        return false;
+    }
+    memset(diagnostics, 0, sizeof(*diagnostics));
+    diagnostics->accel_bias_mps2 = estimator->fusion_accel_bias_mps2;
+    diagnostics->baro_innovation_m = estimator->fusion_baro_innovation_m;
+    diagnostics->accel_innovation_mps2 =
+        estimator->fusion_accel_innovation_mps2;
+    diagnostics->baro_measurement_variance_m2 =
+        estimator->fusion_baro_measurement_variance_m2;
+    diagnostics->accel_measurement_variance_m2_s4 =
+        estimator->fusion_accel_measurement_variance_m2_s4;
+    diagnostics->initialized = estimator->fusion_initialized;
+    diagnostics->baro_innovation_valid =
+        estimator->fusion_baro_innovation_valid;
+    diagnostics->accel_innovation_valid =
+        estimator->fusion_accel_innovation_valid;
     return true;
 }
 
@@ -291,6 +366,7 @@ bool vario_estimator_update(vario_estimator_t *estimator,
     float pressure_pa = (float) pressure_pa_x100 / 100.0f;
     float measured_altitude_m = 0.0f;
     float dt_seconds = 0.0f;
+    float baro_innovation_m = 0.0f;
 
     if (estimator == NULL || estimate == NULL) {
         return false;
@@ -361,7 +437,12 @@ bool vario_estimator_update(vario_estimator_t *estimator,
         }
         if (estimator->fusion_initialized &&
             fusion_update_scalar(estimator, 0U, measured_altitude_m,
-                                 FUSION_ALTITUDE_MEAS_VARIANCE_M2)) {
+                                 FUSION_ALTITUDE_MEAS_VARIANCE_M2,
+                                 &baro_innovation_m)) {
+            estimator->fusion_baro_innovation_m = baro_innovation_m;
+            estimator->fusion_baro_measurement_variance_m2 =
+                FUSION_ALTITUDE_MEAS_VARIANCE_M2;
+            estimator->fusion_baro_innovation_valid = true;
             estimate->altitude_m = estimator->fusion_altitude_m;
             estimate->climb_rate_mps =
                 estimator->fusion_climb_rate_mps;

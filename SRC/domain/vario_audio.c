@@ -61,6 +61,81 @@ static uint32_t sink_frequency_hz(const app_config_t *config,
     return (uint32_t) lroundf(frequency);
 }
 
+static int8_t vertical_direction(float climb_rate_mps) {
+    if (climb_rate_mps > 0.0f) {
+        return INT8_C(1);
+    }
+    if (climb_rate_mps < 0.0f) {
+        return INT8_C(-1);
+    }
+    return INT8_C(0);
+}
+
+static void clear_altitude_reference(vario_audio_state_t *state) {
+    state->reference_altitude_m = 0.0f;
+    state->vertical_direction = INT8_C(0);
+    state->reference_altitude_valid = false;
+}
+
+static void update_altitude_reference(vario_audio_state_t *state,
+                                      const vario_result_t *result) {
+    int8_t direction = INT8_C(0);
+
+    if (!state->input_source_valid ||
+        state->last_debug_input_active != result->debug_input_active) {
+        clear_altitude_reference(state);
+        state->last_debug_input_active = result->debug_input_active;
+        state->input_source_valid = true;
+    }
+    if (!result->estimate_valid || !result->climb_rate_valid ||
+        !isfinite(result->altitude_m) ||
+        !isfinite(result->climb_rate_mps)) {
+        clear_altitude_reference(state);
+        return;
+    }
+
+    direction = vertical_direction(result->climb_rate_mps);
+    if (!state->reference_altitude_valid) {
+        state->reference_altitude_m = result->altitude_m;
+        state->vertical_direction = direction;
+        state->reference_altitude_valid = true;
+        return;
+    }
+
+    if (direction == INT8_C(0)) {
+        return;
+    }
+    if (state->vertical_direction != INT8_C(0) &&
+        direction != state->vertical_direction) {
+        state->reference_altitude_m = result->altitude_m;
+    }
+    state->vertical_direction = direction;
+}
+
+static bool lift_distance_confirmed(const vario_audio_state_t *state,
+                                    const app_config_t *config,
+                                    const vario_result_t *result) {
+    if (config->lift_confirm_distance_m == 0.0f) {
+        return true;
+    }
+    return state->reference_altitude_valid && result->estimate_valid &&
+           isfinite(result->altitude_m) &&
+           result->altitude_m - state->reference_altitude_m >
+               config->lift_confirm_distance_m;
+}
+
+static bool sink_distance_confirmed(const vario_audio_state_t *state,
+                                    const app_config_t *config,
+                                    const vario_result_t *result) {
+    if (config->sink_confirm_distance_m == 0.0f) {
+        return true;
+    }
+    return state->reference_altitude_valid && result->estimate_valid &&
+           isfinite(result->altitude_m) &&
+           state->reference_altitude_m - result->altitude_m >
+               config->sink_confirm_distance_m;
+}
+
 void vario_audio_reset(vario_audio_state_t *state) {
     if (state != NULL) {
         memset(state, 0, sizeof(*state));
@@ -68,10 +143,12 @@ void vario_audio_reset(vario_audio_state_t *state) {
     }
 }
 
-static vario_audio_mode_t requested_mode(vario_audio_mode_t current,
+static vario_audio_mode_t requested_mode(const vario_audio_state_t *state,
                                          const app_config_t *config,
-                                         float climb_rate_mps) {
-    switch (current) {
+                                         const vario_result_t *result) {
+    float climb_rate_mps = result->climb_rate_mps;
+
+    switch (state->mode) {
     case VARIO_AUDIO_LIFT:
         if (climb_rate_mps < config->lift_end_mps) {
             return VARIO_AUDIO_SILENT;
@@ -91,11 +168,13 @@ static vario_audio_mode_t requested_mode(vario_audio_mode_t current,
         return VARIO_AUDIO_PREDICTIVE;
     case VARIO_AUDIO_SILENT:
     default:
-        if (climb_rate_mps > config->lift_start_mps) {
+        if (climb_rate_mps > config->lift_start_mps &&
+            lift_distance_confirmed(state, config, result)) {
             return VARIO_AUDIO_LIFT;
         }
         if (config->sink_enabled &&
-            climb_rate_mps < config->sink_start_mps) {
+            climb_rate_mps < config->sink_start_mps &&
+            sink_distance_confirmed(state, config, result)) {
             return VARIO_AUDIO_SINK;
         }
         if (config->predictive_buzzer_enabled &&
@@ -132,7 +211,8 @@ void vario_audio_step(vario_audio_state_t *state,
         return;
     }
 
-    requested = requested_mode(state->mode, config, result->climb_rate_mps);
+    update_altitude_reference(state, result);
+    requested = requested_mode(state, config, result);
     if (state->mode == VARIO_AUDIO_LIFT &&
         requested != VARIO_AUDIO_LIFT && state->phase_on) {
         int64_t elapsed_us = now_us - state->phase_started_us;

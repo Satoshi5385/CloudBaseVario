@@ -13,6 +13,11 @@ typedef struct {
     float altitude_m;
     float climb_rate_mps;
     float vertical_accel_mps2;
+    float kalman_accel_bias_mps2;
+    float kalman_baro_innovation_m;
+    float kalman_accel_innovation_mps2;
+    float kalman_baro_r_m2;
+    float kalman_accel_r_m2_s4;
     bool pressure_valid;
     bool climb_rate_valid;
     bool estimate_valid;
@@ -23,6 +28,8 @@ typedef struct {
     bool imu_stale;
     bool imu_fusion_active;
     bool vertical_accel_valid;
+    bool kalman_baro_innovation_valid;
+    bool kalman_accel_innovation_valid;
     bool debug_input_active;
     uint32_t i2c_error_count;
     uint32_t bmp_period_overrun_count;
@@ -50,6 +57,7 @@ typedef struct {
     bool sw2_pressed;
     bool sw3_pressed;
     uint32_t sw1_hold_ms;
+    uint32_t sw3_hold_ms;
     bool volume_override_active;
     audio_volume_level_t volume_level;
     bool sink_override_active;
@@ -64,6 +72,7 @@ typedef struct {
     bool accel_calibrated;
     bool accel_calibration_persisted;
     bool accel_calibration_save_pending;
+    bool accel_calibration_skipped;
     bool calibrated;
     bool attitude_valid;
     bool fusion_active;
