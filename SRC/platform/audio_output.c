@@ -34,7 +34,7 @@ esp_err_t audio_output_init(void) {
     };
     esp_err_t ret = ESP_OK;
 
-    board_set_safe_indicators();
+    board_set_audio_shutdown();
     ret = ledc_timer_config(&timer_config);
     if (ret != ESP_OK) {
         return ret;

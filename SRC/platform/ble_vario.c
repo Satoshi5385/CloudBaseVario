@@ -34,12 +34,39 @@
 #error "CloudBaseVario is BLE-only and does not use software coexistence"
 #endif
 
+#if CONFIG_BT_NIMBLE_BAS_SERVICE
+#error "CloudBaseVario registers its own Battery Service 1.1"
+#endif
+
+#if CONFIG_BT_NIMBLE_MAX_CCCDS < 2
+#error "CloudBaseVario requires CCCDs for NUS TX and Battery Level Status"
+#endif
+
 #define BLE_DEVICE_NAME "CloudBaseVario"
 #define BLE_ADVERTISING_INTERVAL_MS UINT32_C(250)
 #define BLE_CONNECTION_INTERVAL_MIN_MS UINT32_C(30)
 #define BLE_CONNECTION_INTERVAL_MAX_MS UINT32_C(50)
 #define BLE_CONNECTION_LATENCY UINT16_C(1)
 #define BLE_SUPERVISION_TIMEOUT_MS UINT32_C(4000)
+
+#define BATTERY_SERVICE_UUID UINT16_C(0x180F)
+#define BATTERY_LEVEL_UUID UINT16_C(0x2A19)
+#define BATTERY_LEVEL_STATUS_UUID UINT16_C(0x2BED)
+#define BATTERY_LEVEL_EMPTY_V 3.0f
+#define BATTERY_LEVEL_FULL_V 4.2f
+#define BATTERY_LEVEL_MAX_PERCENT 100.0f
+#define BATTERY_POWER_STATE_PRESENT UINT16_C(0x0001)
+#define BATTERY_POWER_STATE_WIRED_EXTERNAL UINT16_C(0x0002)
+#define BATTERY_POWER_STATE_CHARGING UINT16_C(0x0020)
+#define BATTERY_POWER_STATE_DISCHARGING_ACTIVE UINT16_C(0x0040)
+
+_Static_assert((BATTERY_POWER_STATE_PRESENT |
+                BATTERY_POWER_STATE_WIRED_EXTERNAL |
+                BATTERY_POWER_STATE_CHARGING) == UINT16_C(0x0023),
+               "Unexpected charging power-state encoding");
+_Static_assert((BATTERY_POWER_STATE_PRESENT |
+                BATTERY_POWER_STATE_DISCHARGING_ACTIVE) == UINT16_C(0x0041),
+               "Unexpected discharging power-state encoding");
 
 #define NUS_SERVICE_UUID_BYTES                                                                     \
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e
@@ -52,12 +79,24 @@ static const char *TAG = "ble_vario";
 static const ble_uuid128_t nus_service_uuid = BLE_UUID128_INIT(NUS_SERVICE_UUID_BYTES);
 static const ble_uuid128_t nus_rx_uuid = BLE_UUID128_INIT(NUS_RX_UUID_BYTES);
 static const ble_uuid128_t nus_tx_uuid = BLE_UUID128_INIT(NUS_TX_UUID_BYTES);
+static const ble_uuid16_t battery_service_uuid = BLE_UUID16_INIT(BATTERY_SERVICE_UUID);
+static const ble_uuid16_t battery_level_uuid = BLE_UUID16_INIT(BATTERY_LEVEL_UUID);
+static const ble_uuid16_t battery_level_status_uuid =
+    BLE_UUID16_INIT(BATTERY_LEVEL_STATUS_UUID);
 
 /* BLE connection state is shared between the NimBLE host and system tasks. */
 static portMUX_TYPE ble_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint16_t connection_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t nus_tx_value_handle = 0U;
+static uint16_t battery_level_status_value_handle = 0U;
 static uint8_t own_address_type = 0U;
+static uint8_t battery_level_percent = 0U;
+static uint8_t battery_level_status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE] = {
+    0U,
+    (uint8_t) BATTERY_POWER_STATE_DISCHARGING_ACTIVE |
+        (uint8_t) BATTERY_POWER_STATE_PRESENT,
+    0U,
+};
 static bool notification_subscribed = false;
 static bool nimble_initialized = false;
 static bool stop_requested = false;
@@ -108,6 +147,43 @@ static int nus_access_callback(uint16_t connection, uint16_t attribute,
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int battery_access_callback(
+    uint16_t connection, uint16_t attribute,
+    struct ble_gatt_access_ctxt *context, void *callback_context) {
+    uint8_t value[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE] = {0};
+    uint16_t uuid = 0U;
+    size_t value_size = 0U;
+
+    (void) connection;
+    (void) attribute;
+    (void) callback_context;
+
+    if (context == NULL || context->chr == NULL) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (context->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    }
+
+    uuid = ble_uuid_u16(context->chr->uuid);
+    portENTER_CRITICAL(&ble_state_lock);
+    if (uuid == BATTERY_LEVEL_UUID) {
+        value[0] = battery_level_percent;
+        value_size = 1U;
+    } else if (uuid == BATTERY_LEVEL_STATUS_UUID) {
+        memcpy(value, battery_level_status, sizeof(battery_level_status));
+        value_size = sizeof(battery_level_status);
+    }
+    portEXIT_CRITICAL(&ble_state_lock);
+
+    if (value_size == 0U) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    return os_mbuf_append(context->om, value, (uint16_t) value_size) == 0
+               ? 0
+               : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_chr_def nus_characteristics[] = {
     {
         .uuid = &nus_rx_uuid.u,
@@ -128,6 +204,30 @@ static const struct ble_gatt_svc_def nus_services[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &nus_service_uuid.u,
         .characteristics = nus_characteristics,
+    },
+    {0},
+};
+
+static const struct ble_gatt_chr_def battery_characteristics[] = {
+    {
+        .uuid = &battery_level_uuid.u,
+        .access_cb = battery_access_callback,
+        .flags = BLE_GATT_CHR_F_READ,
+    },
+    {
+        .uuid = &battery_level_status_uuid.u,
+        .access_cb = battery_access_callback,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = &battery_level_status_value_handle,
+    },
+    {0},
+};
+
+static const struct ble_gatt_svc_def battery_services[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &battery_service_uuid.u,
+        .characteristics = battery_characteristics,
     },
     {0},
 };
@@ -158,6 +258,9 @@ static int ble_start_advertising(void) {
     scan_response_fields.uuids128 = (ble_uuid128_t *) &nus_service_uuid;
     scan_response_fields.num_uuids128 = 1U;
     scan_response_fields.uuids128_is_complete = 1U;
+    scan_response_fields.uuids16 = (ble_uuid16_t *) &battery_service_uuid;
+    scan_response_fields.num_uuids16 = 1U;
+    scan_response_fields.uuids16_is_complete = 1U;
     rc = ble_gap_adv_rsp_set_fields(&scan_response_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "failed to set scan response: %d", rc);
@@ -239,6 +342,10 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *context) {
             bool subscribed = event->subscribe.cur_notify != 0U;
             ble_set_connection_state(event->subscribe.conn_handle, subscribed);
             ESP_LOGI(TAG, "NUS notifications enabled=%d", subscribed);
+        } else if (event->subscribe.attr_handle ==
+                   battery_level_status_value_handle) {
+            ESP_LOGI(TAG, "Battery Level Status notifications enabled=%d",
+                     event->subscribe.cur_notify != 0U);
         }
         break;
 
@@ -328,7 +435,13 @@ esp_err_t ble_vario_init(void) {
 
     rc = ble_gatts_count_cfg(nus_services);
     if (rc == 0) {
+        rc = ble_gatts_count_cfg(battery_services);
+    }
+    if (rc == 0) {
         rc = ble_gatts_add_svcs(nus_services);
+    }
+    if (rc == 0) {
+        rc = ble_gatts_add_svcs(battery_services);
     }
     if (rc != 0) {
         (void) nimble_port_deinit();
@@ -426,6 +539,86 @@ bool ble_vario_notify_active(void) {
     portEXIT_CRITICAL(&ble_state_lock);
     return active && now_us >= success_us &&
            now_us - success_us <= INT64_C(500000);
+}
+
+uint8_t ble_vario_battery_level_from_voltage(float battery_voltage_v) {
+    float level = 0.0f;
+
+    if (!isfinite(battery_voltage_v) ||
+        battery_voltage_v <= BATTERY_LEVEL_EMPTY_V) {
+        return 0U;
+    }
+    if (battery_voltage_v >= BATTERY_LEVEL_FULL_V) {
+        return (uint8_t) BATTERY_LEVEL_MAX_PERCENT;
+    }
+
+    level = (battery_voltage_v - BATTERY_LEVEL_EMPTY_V) *
+            BATTERY_LEVEL_MAX_PERCENT /
+            (BATTERY_LEVEL_FULL_V - BATTERY_LEVEL_EMPTY_V);
+    return (uint8_t) lroundf(level);
+}
+
+void ble_vario_format_battery_level_status(
+    bool external_power_present,
+    uint8_t status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE]) {
+    uint16_t power_state = BATTERY_POWER_STATE_PRESENT;
+
+    if (status == NULL) {
+        return;
+    }
+    if (external_power_present) {
+        power_state |= BATTERY_POWER_STATE_WIRED_EXTERNAL |
+                       BATTERY_POWER_STATE_CHARGING;
+    } else {
+        power_state |= BATTERY_POWER_STATE_DISCHARGING_ACTIVE;
+    }
+
+    status[0] = 0U;
+    status[1] = (uint8_t) (power_state & UINT16_C(0x00FF));
+    status[2] = (uint8_t) (power_state >> 8U);
+}
+
+void ble_vario_update_battery(const system_snapshot_t *system) {
+    uint8_t next_status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE] = {0};
+    uint8_t next_level = 0U;
+    uint16_t status_handle = 0U;
+    bool level_valid = false;
+    bool status_changed = false;
+    bool notify_status = false;
+
+    if (system == NULL) {
+        return;
+    }
+    ble_vario_format_battery_level_status(
+        system->external_power_present, next_status);
+    level_valid = system->battery_valid &&
+                  isfinite(system->battery_voltage_v) &&
+                  system->battery_voltage_v >= 0.0f;
+    if (level_valid) {
+        next_level =
+            ble_vario_battery_level_from_voltage(system->battery_voltage_v);
+    }
+
+    portENTER_CRITICAL(&ble_state_lock);
+    if (level_valid) {
+        battery_level_percent = next_level;
+    }
+    status_changed =
+        memcmp(battery_level_status, next_status,
+               sizeof(battery_level_status)) != 0;
+    if (status_changed) {
+        memcpy(battery_level_status, next_status,
+               sizeof(battery_level_status));
+    }
+    notify_status = status_changed && nimble_initialized &&
+                    !stop_requested &&
+                    battery_level_status_value_handle != 0U;
+    status_handle = battery_level_status_value_handle;
+    portEXIT_CRITICAL(&ble_state_lock);
+
+    if (notify_status) {
+        ble_gatts_chr_updated(status_handle);
+    }
 }
 
 static uint8_t lk8ex1_checksum(const char *body) {

@@ -14,6 +14,7 @@
 #include "app/app_resources.h"
 #include "domain/app_config.h"
 #include "domain/app_types.h"
+#include "domain/auto_power_off.h"
 #include "domain/imu_fusion.h"
 #include "domain/vario_audio.h"
 #include "domain/vario_estimator.h"
@@ -33,6 +34,7 @@
 #include "platform/imu_calibration_storage.h"
 #include "platform/sensor_bus.h"
 #include "platform/system_io.h"
+#include "platform/switch_preferences.h"
 #include "platform/usb_device_service.h"
 
 #define SENSOR_TASK_PRIORITY ((UBaseType_t) 20U)
@@ -56,7 +58,7 @@
 #define SERIAL_MONITOR_PERIOD_US INT64_C(100000)
 #define BATTERY_SAMPLE_PERIOD_MS UINT32_C(100)
 #define SWITCH_DEBOUNCE_MS UINT32_C(30)
-#define POWER_OFF_HOLD_MS UINT32_C(3000)
+#define POWER_OFF_HOLD_MS UINT32_C(2000)
 #define IMU_CALIBRATION_SKIP_HOLD_MS UINT32_C(3000)
 #define SHUTDOWN_DEADLINE_MS UINT32_C(15000)
 #define SAFE_STOP_PERIOD_MS UINT32_C(10)
@@ -65,15 +67,17 @@
 #define SYSTEM_SOUND_SILENCE_MS UINT32_C(80)
 #define SYSTEM_SOUND_HIGH_HZ UINT32_C(1200)
 #define SYSTEM_SOUND_HIGH_MS UINT32_C(120)
-#define SHUTDOWN_SOUND_TOTAL_MS                                                        \
-    (SYSTEM_SOUND_HIGH_MS + SYSTEM_SOUND_SILENCE_MS + SYSTEM_SOUND_LOW_MS)
-#define STARTUP_SOUND_WAIT_MS UINT32_C(1000)
+#define BUTTON_SOUND_HZ UINT32_C(1000)
+#define BUTTON_SOUND_MS UINT32_C(80)
+#define BUTTON_SOUND_SILENCE_MS UINT32_C(80)
+#define SHUTDOWN_SOUND_TOTAL_MS (SYSTEM_SOUND_HIGH_MS + SYSTEM_SOUND_SILENCE_MS + SYSTEM_SOUND_LOW_MS)
 #define SYSTEM_SOUND_DUTY_PERCENT UINT32_C(50)
-#define SYSTEM_SOUND_AMPLIFIER_MODE UINT32_C(1)
 #define FATAL_LED_PHASE_MS UINT32_C(500)
 #define BMP_RECOVERY_LED_PHASE_MS UINT32_C(1000)
 #define IMU_CALIBRATION_LED_CYCLE_MS UINT32_C(2000)
 #define IMU_DEGRADED_LED_CYCLE_MS UINT32_C(1000)
+#define LOW_BATTERY_LED_CYCLE_MS UINT32_C(1000)
+#define LOW_BATTERY_THRESHOLD_V 3.4f
 
 #define BMP581_SAMPLE_PERIOD_US INT64_C(10000)
 #define SENSOR_STALE_TIMEOUT_US INT64_C(100000)
@@ -139,6 +143,19 @@ static TaskHandle_t ble_tx_task_handle = NULL;
 static TaskHandle_t console_task_handle = NULL;
 static EventBits_t active_ack_mask = 0U;
 static uint32_t serial_monitor_drop_count = 0U;
+static app_config_profiles_t system_profile_snapshot;
+static app_config_profiles_t console_profile_snapshot;
+static auto_power_off_state_t system_auto_power_off_state;
+static app_config_t system_auto_power_off_config;
+static vario_result_t system_auto_power_off_vario;
+static uint32_t system_auto_power_off_config_revision = 0U;
+static bool system_auto_power_off_config_revision_valid = false;
+static switch_preferences_t initial_switch_preferences = {
+    .volume_level = AUDIO_VOLUME_SMALL,
+    .sink_enabled = true,
+    .parameter_number = 1U,
+};
+static bool initial_switch_preferences_dirty = false;
 static imu_accel_calibration_t initial_imu_accel_calibration;
 static imu_calibration_storage_diagnostics_t
     initial_imu_accel_calibration_diagnostics = {
@@ -163,9 +180,20 @@ void app_tasks_set_imu_accel_calibration(
     }
 }
 
+void app_tasks_set_switch_preferences(
+    const switch_preferences_t *preferences, bool dirty) {
+    switch_preferences_set_defaults(&initial_switch_preferences);
+    initial_switch_preferences_dirty = dirty;
+    if (preferences != NULL &&
+        preferences->volume_level >= AUDIO_VOLUME_SMALL &&
+        preferences->volume_level <= AUDIO_VOLUME_MUTE &&
+        preferences->parameter_number >= APP_CONFIG_PROFILE_MIN_NUMBER &&
+        preferences->parameter_number <= APP_CONFIG_PROFILE_MAX_NUMBER) {
+        initial_switch_preferences = *preferences;
+    }
+}
+
 _Static_assert(configMAX_PRIORITIES >= 25, "SW_spec.md requires at least 25 priorities");
-_Static_assert(SHUTDOWN_SOUND_TOTAL_MS < STARTUP_SOUND_WAIT_MS,
-               "Startup sound wait must exceed the complete sound sequence");
 
 static const system_sound_step_t startup_sound_steps[] = {
     {SYSTEM_SOUND_LOW_HZ, SYSTEM_SOUND_LOW_MS},
@@ -176,6 +204,18 @@ static const system_sound_step_t startup_sound_steps[] = {
 static const system_sound_step_t shutdown_sound_steps[] = {
     {SYSTEM_SOUND_HIGH_HZ, SYSTEM_SOUND_HIGH_MS},
     {0U, SYSTEM_SOUND_SILENCE_MS},
+    {SYSTEM_SOUND_LOW_HZ, SYSTEM_SOUND_LOW_MS},
+};
+
+static const system_sound_step_t button_sound_steps[] = {
+    {BUTTON_SOUND_HZ, BUTTON_SOUND_MS},
+};
+
+static const system_sound_step_t sink_enabled_sound_steps[] = {
+    {SYSTEM_SOUND_HIGH_HZ, SYSTEM_SOUND_HIGH_MS},
+};
+
+static const system_sound_step_t sink_disabled_sound_steps[] = {
     {SYSTEM_SOUND_LOW_HZ, SYSTEM_SOUND_LOW_MS},
 };
 
@@ -281,6 +321,14 @@ static uint32_t led_firefly_brightness_percent(uint32_t elapsed_ms,
     return (position_ms - half_cycle_ms) * 100U / half_cycle_ms;
 }
 
+static uint32_t low_battery_led_brightness_percent(uint32_t elapsed_ms) {
+    uint32_t firefly_brightness_percent =
+        led_firefly_brightness_percent(elapsed_ms,
+                                       LOW_BATTERY_LED_CYCLE_MS);
+
+    return 50U + firefly_brightness_percent / 2U;
+}
+
 static void set_fatal_leds(uint32_t elapsed_ms, bool bmp581_startup_failure) {
     bool first_phase = led_first_phase(elapsed_ms, FATAL_LED_PHASE_MS);
 
@@ -298,7 +346,16 @@ static uint32_t sw1_green_brightness_percent(uint32_t hold_ms) {
     return 100U - hold_ms * 100U / POWER_OFF_HOLD_MS;
 }
 
-static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms) {
+static uint32_t power_on_green_brightness_percent(uint32_t hold_ms) {
+    if (hold_ms >= POWER_ON_HOLD_MS) {
+        return 100U;
+    }
+    return hold_ms * 100U / POWER_ON_HOLD_MS;
+}
+
+static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms,
+                               bool external_power_present,
+                               bool battery_valid, float battery_voltage_v) {
     EventBits_t bits = app_event_bits();
     vario_result_t result = {0};
     uint32_t green_brightness_percent = 100U;
@@ -312,7 +369,7 @@ static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms) {
         return;
     }
     if ((bits & APP_EVENT_BMP581_STARTUP_COMPLETE) == 0U) {
-        board_set_status_leds(false, false);
+        board_set_status_leds_brightness(100U, false);
         return;
     }
 
@@ -328,13 +385,6 @@ static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms) {
             green_selected = true;
             yellow_selected = true;
         }
-        if (!green_selected && result.estimator_warming_up) {
-            green_brightness_percent =
-                led_first_phase(elapsed_ms, BMP_RECOVERY_LED_PHASE_MS)
-                    ? 100U
-                    : 0U;
-            green_selected = true;
-        }
     }
     if (!green_selected && recovering) {
         green_brightness_percent =
@@ -348,9 +398,23 @@ static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms) {
             elapsed_ms, IMU_CALIBRATION_LED_CYCLE_MS);
         green_selected = true;
     }
+    if (!green_selected && result.estimator_warming_up) {
+        green_brightness_percent =
+            led_first_phase(elapsed_ms, BMP_RECOVERY_LED_PHASE_MS)
+                ? 100U
+                : 0U;
+        green_selected = true;
+    }
     if (!green_selected && (bits & APP_EVENT_IMU_DEGRADED) != 0U) {
         green_brightness_percent = led_firefly_brightness_percent(
             elapsed_ms, IMU_DEGRADED_LED_CYCLE_MS);
+        green_selected = true;
+    }
+    if (!green_selected && !external_power_present && battery_valid &&
+        isfinite(battery_voltage_v) &&
+        battery_voltage_v <= LOW_BATTERY_THRESHOLD_V) {
+        green_brightness_percent =
+            low_battery_led_brightness_percent(elapsed_ms);
         green_selected = true;
     }
     if (!yellow_selected && ble_vario_notify_active()) {
@@ -400,6 +464,79 @@ static audio_volume_level_t next_volume_level(
     }
 }
 
+static audio_volume_level_t selected_volume_level(
+    const system_snapshot_t *system) {
+    app_config_t config = {0};
+
+    if (system != NULL && system->volume_override_active) {
+        switch (system->volume_level) {
+        case AUDIO_VOLUME_SMALL:
+        case AUDIO_VOLUME_MEDIUM:
+        case AUDIO_VOLUME_LARGE:
+        case AUDIO_VOLUME_MUTE:
+            return system->volume_level;
+        default:
+            return AUDIO_VOLUME_MUTE;
+        }
+    }
+    if (!app_resources_copy_config(&config)) {
+        app_config_set_defaults(&config);
+    }
+    return config_volume_level(&config);
+}
+
+static uint32_t volume_amplifier_mode(audio_volume_level_t volume_level) {
+    switch (volume_level) {
+    case AUDIO_VOLUME_SMALL:
+    case AUDIO_VOLUME_MEDIUM:
+    case AUDIO_VOLUME_LARGE:
+        return (uint32_t) volume_level + UINT32_C(1);
+    case AUDIO_VOLUME_MUTE:
+    default:
+        return 0U;
+    }
+}
+
+static void request_button_sound(audio_volume_level_t volume_level,
+                                 uint8_t repeat_count) {
+    QueueHandle_t queue = app_resources_button_sound_queue();
+    audio_notification_request_t request = {
+        .kind = AUDIO_NOTIFICATION_BUTTON,
+        .volume_level = volume_level,
+        .repeat_count = repeat_count,
+    };
+
+    if (volume_level == AUDIO_VOLUME_MUTE || repeat_count == 0U ||
+        repeat_count > APP_CONFIG_PROFILE_MAX_NUMBER) {
+        return;
+    }
+    if (queue == NULL) {
+        ESP_LOGW(TAG, "button sound request queue unavailable");
+        return;
+    }
+    (void) xQueueOverwrite(queue, &request);
+}
+
+static void request_sink_status_sound(audio_volume_level_t volume_level,
+                                      bool sink_enabled) {
+    QueueHandle_t queue = app_resources_button_sound_queue();
+    audio_notification_request_t request = {
+        .kind = sink_enabled ? AUDIO_NOTIFICATION_SINK_ENABLED
+                             : AUDIO_NOTIFICATION_SINK_DISABLED,
+        .volume_level = volume_level,
+        .repeat_count = 1U,
+    };
+
+    if (volume_level == AUDIO_VOLUME_MUTE) {
+        return;
+    }
+    if (queue == NULL) {
+        ESP_LOGW(TAG, "button sound request queue unavailable");
+        return;
+    }
+    (void) xQueueOverwrite(queue, &request);
+}
+
 static void apply_audio_overrides(app_config_t *config,
                                   const system_snapshot_t *system) {
     if (config == NULL || system == NULL) {
@@ -437,6 +574,31 @@ static void toggle_sink_override(system_snapshot_t *snapshot) {
     snapshot->sink_override_active = true;
 }
 
+static void update_switch_preferences_dirty(
+    system_snapshot_t *snapshot,
+    const switch_preferences_t *baseline, bool force_dirty) {
+    if (snapshot == NULL || baseline == NULL) {
+        return;
+    }
+    snapshot->switch_preferences_dirty =
+        force_dirty ||
+        snapshot->volume_level != baseline->volume_level ||
+        snapshot->sink_enabled_override != baseline->sink_enabled ||
+        snapshot->parameter_number != baseline->parameter_number;
+}
+
+static bool select_next_parameter_set(system_snapshot_t *snapshot) {
+    if (snapshot == NULL ||
+        !app_resources_select_next_config(&snapshot->parameter_number,
+                                          &snapshot->parameter_set_count)) {
+        ESP_LOGW(TAG, "parameter set switch failed");
+        return false;
+    }
+    request_button_sound(selected_volume_level(snapshot),
+                         snapshot->parameter_number);
+    return true;
+}
+
 static bool debounce_button(button_debounce_t *state, bool pressed) {
     if (state == NULL) {
         return false;
@@ -444,7 +606,8 @@ static bool debounce_button(button_debounce_t *state, bool pressed) {
 
     if (pressed != state->candidate_pressed) {
         state->candidate_pressed = pressed;
-        state->stable_time_ms = SYSTEM_SAMPLE_PERIOD_MS;
+        /* The edge sample starts the interval; it does not consume 10 ms. */
+        state->stable_time_ms = 0U;
         return state->stable_pressed;
     }
 
@@ -1446,10 +1609,17 @@ static bool system_sound_delay(uint32_t duration_ms,
 
 static system_sound_result_t play_system_sound(
     const system_sound_step_t *steps, size_t step_count,
-    EventBits_t abort_mask, bool watchdog_registered) {
+    EventBits_t abort_mask, bool watchdog_registered,
+    uint32_t amplifier_mode, esp_err_t *output_error) {
     system_sound_result_t result = SYSTEM_SOUND_COMPLETE;
 
     audio_output_shutdown();
+    if (output_error != NULL) {
+        *output_error = ESP_OK;
+    }
+    if (amplifier_mode == 0U) {
+        return result;
+    }
     for (size_t index = 0U; index < step_count; index++) {
         if (system_sound_abort_requested(abort_mask)) {
             result = SYSTEM_SOUND_ABORTED;
@@ -1460,9 +1630,12 @@ static system_sound_result_t play_system_sound(
         } else {
             esp_err_t ret = audio_output_apply(
                 steps[index].frequency_hz, SYSTEM_SOUND_DUTY_PERCENT,
-                SYSTEM_SOUND_AMPLIFIER_MODE);
+                amplifier_mode);
 
             if (ret != ESP_OK) {
+                if (output_error != NULL) {
+                    *output_error = ret;
+                }
                 ESP_LOGW(TAG,
                          "system sound step %u could not start: %s",
                          (unsigned int) index, esp_err_to_name(ret));
@@ -1483,13 +1656,81 @@ static system_sound_result_t play_system_sound(
     return result;
 }
 
+esp_err_t app_tasks_play_startup_sound(
+    audio_volume_level_t volume_level) {
+    esp_err_t output_error = ESP_OK;
+    system_sound_result_t result = play_system_sound(
+        startup_sound_steps,
+        sizeof(startup_sound_steps) / sizeof(startup_sound_steps[0]),
+        0U, false, volume_amplifier_mode(volume_level), &output_error);
+
+    if (result == SYSTEM_SOUND_OUTPUT_ERROR) {
+        return output_error == ESP_OK ? ESP_FAIL : output_error;
+    }
+    return result == SYSTEM_SOUND_COMPLETE ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+static void play_latest_button_notification(
+    QueueHandle_t queue, audio_notification_request_t request,
+    bool watchdog_registered) {
+    uint8_t completed = 0U;
+
+    while (completed < request.repeat_count) {
+        audio_notification_request_t newer = {0};
+        const system_sound_step_t *steps = button_sound_steps;
+        size_t step_count =
+            sizeof(button_sound_steps) / sizeof(button_sound_steps[0]);
+
+        if (request.kind == AUDIO_NOTIFICATION_SINK_ENABLED) {
+            steps = sink_enabled_sound_steps;
+            step_count = sizeof(sink_enabled_sound_steps) /
+                         sizeof(sink_enabled_sound_steps[0]);
+        } else if (request.kind == AUDIO_NOTIFICATION_SINK_DISABLED) {
+            steps = sink_disabled_sound_steps;
+            step_count = sizeof(sink_disabled_sound_steps) /
+                         sizeof(sink_disabled_sound_steps[0]);
+        }
+
+        if (play_system_sound(
+                steps, step_count,
+                APP_EVENT_STOP_REQUEST | APP_EVENT_FATAL_STATE,
+                watchdog_registered,
+                volume_amplifier_mode(request.volume_level), NULL) !=
+            SYSTEM_SOUND_COMPLETE) {
+            break;
+        }
+        completed++;
+        if (xQueueReceive(queue, &newer, 0U) == pdTRUE) {
+            request = newer;
+            completed = 0U;
+            continue;
+        }
+        if (completed < request.repeat_count &&
+            !system_sound_delay(BUTTON_SOUND_SILENCE_MS,
+                                APP_EVENT_STOP_REQUEST |
+                                    APP_EVENT_FATAL_STATE,
+                                watchdog_registered)) {
+            break;
+        }
+        if (xQueueReceive(queue, &newer, 0U) == pdTRUE) {
+            request = newer;
+            completed = 0U;
+        }
+    }
+    audio_output_shutdown();
+}
+
 static void audio_task(void *context) {
     QueueHandle_t queue = app_resources_audio_queue();
+    QueueHandle_t button_sound_queue = app_resources_button_sound_queue();
     vario_result_t result = {0};
     system_snapshot_t system = {0};
     app_config_t config = {0};
-    vario_audio_state_t audio_state = {0};
+    static vario_audio_state_t audio_state;
     vario_audio_command_t command = {0};
+    uint32_t config_revision = 0U;
+    uint32_t previous_config_revision = 0U;
+    bool config_revision_valid = false;
     bool watchdog_registered = false;
 
     (void) context;
@@ -1510,13 +1751,9 @@ static void audio_task(void *context) {
 
             audio_output_shutdown();
             if (event_group != NULL) {
-                (void) xEventGroupClearBits(
-                    event_group, APP_EVENT_STARTUP_SOUND_REQUEST);
                 (void) xEventGroupSetBits(
                     event_group,
-                    APP_EVENT_AUDIO_QUIESCED |
-                        APP_EVENT_STARTUP_SOUND_ABORT |
-                        APP_EVENT_STARTUP_SOUND_DONE);
+                    APP_EVENT_AUDIO_QUIESCED);
             }
             for (;;) {
                 EventBits_t bits = event_group == NULL
@@ -1527,12 +1764,15 @@ static void audio_task(void *context) {
                     break;
                 }
                 if ((bits & APP_EVENT_SHUTDOWN_SOUND_REQUEST) != 0U) {
+                    (void) app_resources_copy_system(&system);
                     sound_result = play_system_sound(
                         shutdown_sound_steps,
                         sizeof(shutdown_sound_steps) /
                             sizeof(shutdown_sound_steps[0]),
                         APP_EVENT_SHUTDOWN_SOUND_ABORT,
-                        watchdog_registered);
+                        watchdog_registered,
+                        volume_amplifier_mode(
+                            selected_volume_level(&system)), NULL);
                     break;
                 }
                 if (watchdog_registered) {
@@ -1561,33 +1801,17 @@ static void audio_task(void *context) {
             vTaskDelay(pdMS_TO_TICKS(AUDIO_EVALUATION_PERIOD_MS));
             continue;
         }
-        EventGroupHandle_t event_group = app_resources_event_group();
-        EventBits_t event_bits =
-            event_group == NULL ? 0U : xEventGroupGetBits(event_group);
+        if (button_sound_queue != NULL) {
+            audio_notification_request_t notification = {0};
 
-        if ((event_bits & APP_EVENT_STARTUP_SOUND_REQUEST) != 0U) {
-            system_sound_result_t sound_result = play_system_sound(
-                startup_sound_steps,
-                sizeof(startup_sound_steps) /
-                    sizeof(startup_sound_steps[0]),
-                APP_EVENT_STARTUP_SOUND_ABORT | APP_EVENT_STOP_REQUEST |
-                    APP_EVENT_FATAL_STATE,
-                watchdog_registered);
-
-            audio_output_shutdown();
-            vario_audio_reset(&audio_state);
-            if (sound_result == SYSTEM_SOUND_OUTPUT_ERROR) {
-                ESP_LOGW(TAG, "startup sound output failed; continuing startup");
+            if (xQueueReceive(button_sound_queue, &notification, 0U) ==
+                pdTRUE) {
+                play_latest_button_notification(
+                    button_sound_queue, notification,
+                    watchdog_registered);
+                vario_audio_reset(&audio_state);
+                continue;
             }
-            if (event_group != NULL) {
-                (void) xEventGroupClearBits(
-                    event_group,
-                    APP_EVENT_STARTUP_SOUND_REQUEST |
-                        APP_EVENT_STARTUP_SOUND_ABORT);
-                (void) xEventGroupSetBits(event_group,
-                                          APP_EVENT_STARTUP_SOUND_DONE);
-            }
-            continue;
         }
 
         if (queue != NULL) {
@@ -1597,7 +1821,15 @@ static void audio_task(void *context) {
         }
         (void) app_resources_apply_debug_vario(&result,
                                                esp_timer_get_time());
-        (void) app_resources_copy_config(&config);
+        if (app_resources_copy_config_with_revision(&config,
+                                                    &config_revision)) {
+            if (config_revision_valid &&
+                config_revision != previous_config_revision) {
+                vario_audio_reset(&audio_state);
+            }
+            previous_config_revision = config_revision;
+            config_revision_valid = true;
+        }
         if (app_resources_copy_system(&system)) {
             apply_audio_overrides(&config, &system);
         }
@@ -1655,9 +1887,11 @@ static void run_safe_stop_loop(EventGroupHandle_t event_group,
 
     sw1.candidate_pressed = board_is_sw1_pressed();
     sw1.stable_pressed = sw1.candidate_pressed;
+    vTaskDelay(pdMS_TO_TICKS(SYSTEM_SAMPLE_PERIOD_MS));
 
     for (;;) {
         bool pressed = debounce_button(&sw1, board_is_sw1_pressed());
+        bool power_on_hold_active = false;
 
         if (sw1.stable_valid && !pressed) {
             was_released = true;
@@ -1668,8 +1902,15 @@ static void run_safe_stop_loop(EventGroupHandle_t event_group,
             } else {
                 hold_time_ms += SYSTEM_SAMPLE_PERIOD_MS;
             }
+            power_on_hold_active = true;
         }
-        if (was_released && hold_time_ms >= POWER_OFF_HOLD_MS) {
+        if (power_on_hold_active) {
+            board_set_status_leds_brightness(
+                power_on_green_brightness_percent(hold_time_ms), false);
+        } else {
+            board_set_safe_indicators();
+        }
+        if (power_on_hold_active && hold_time_ms >= POWER_ON_HOLD_MS) {
             esp_restart();
         }
 
@@ -1683,9 +1924,14 @@ static void run_safe_stop_loop(EventGroupHandle_t event_group,
                 safe_sleep_enabled = app_power_enter_safe_stop() == ESP_OK;
             }
         }
-        board_set_safe_indicators();
         vTaskDelay(pdMS_TO_TICKS(SAFE_STOP_PERIOD_MS));
     }
+}
+
+void app_tasks_run_safe_stop(void) {
+    board_set_safe_indicators();
+    (void) board_set_power_hold(false);
+    run_safe_stop_loop(NULL, 0U, false);
 }
 
 static void request_power_off(system_snapshot_t *snapshot) {
@@ -1776,13 +2022,19 @@ static void system_task(void *context) {
     button_debounce_t sw2 = {0};
     button_debounce_t sw3 = {0};
     system_snapshot_t snapshot = {0};
+    switch_preferences_t persisted_preferences =
+        initial_switch_preferences;
+    bool force_preferences_save = initial_switch_preferences_dirty;
     uint32_t sw1_hold_time_ms = 0U;
     uint32_t sw3_hold_time_ms = 0U;
     uint32_t battery_elapsed_ms = BATTERY_SAMPLE_PERIOD_MS;
     uint32_t led_elapsed_ms = 0U;
     bool sw1_was_released = false;
+    bool previous_sw1_pressed = false;
     bool previous_sw2_pressed = false;
     bool previous_sw3_pressed = false;
+    bool sw1_short_press_pending = false;
+    bool sw1_power_off_issued = false;
     bool sw3_short_press_pending = false;
     bool sw3_skip_request_issued = false;
 
@@ -1795,14 +2047,32 @@ static void system_task(void *context) {
     sw2.stable_pressed = sw2.candidate_pressed;
     sw3.candidate_pressed = system_io_sw3_pressed();
     sw3.stable_pressed = sw3.candidate_pressed;
+    previous_sw1_pressed = sw1.stable_pressed;
     previous_sw2_pressed = sw2.stable_pressed;
     previous_sw3_pressed = sw3.stable_pressed;
+    snapshot.volume_override_active = true;
+    snapshot.volume_level = persisted_preferences.volume_level;
+    snapshot.sink_override_active = true;
+    snapshot.sink_enabled_override = persisted_preferences.sink_enabled;
+    snapshot.parameter_number = persisted_preferences.parameter_number;
+    if (app_resources_copy_config_profiles(&system_profile_snapshot)) {
+        snapshot.parameter_set_count =
+            (uint8_t) system_profile_snapshot.count;
+    }
+    snapshot.switch_preferences_dirty = initial_switch_preferences_dirty;
+    vTaskDelay(pdMS_TO_TICKS(SYSTEM_SAMPLE_PERIOD_MS));
 
     for (;;) {
         EventBits_t event_bits =
             event_group == NULL ? 0U : xEventGroupGetBits(event_group);
         bool imu_accel_calibration_required =
             (event_bits & APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED) != 0U;
+        bool auto_power_off_issued = false;
+        bool auto_power_off_config_valid = false;
+        bool auto_power_off_altitude_valid = false;
+        uint32_t auto_power_off_minutes = 0U;
+        uint32_t auto_power_off_config_revision = 0U;
+        float auto_power_off_altitude_m = 0.0f;
 
         snapshot.timestamp_us = esp_timer_get_time();
         snapshot.sw1_pressed = debounce_button(&sw1, board_is_sw1_pressed());
@@ -1810,15 +2080,65 @@ static void system_task(void *context) {
         snapshot.sw3_pressed = debounce_button(&sw3, system_io_sw3_pressed());
         snapshot.external_power_present = system_io_external_power_present();
 
+        auto_power_off_config_valid = app_resources_copy_config_with_revision(
+            &system_auto_power_off_config,
+            &auto_power_off_config_revision);
+        if (auto_power_off_config_valid) {
+            if (system_auto_power_off_config_revision_valid &&
+                auto_power_off_config_revision !=
+                    system_auto_power_off_config_revision) {
+                auto_power_off_reset(&system_auto_power_off_state);
+            }
+            system_auto_power_off_config_revision =
+                auto_power_off_config_revision;
+            system_auto_power_off_config_revision_valid = true;
+            auto_power_off_minutes =
+                system_auto_power_off_config.auto_power_off_minutes;
+        } else {
+            system_auto_power_off_config_revision_valid = false;
+        }
+        if (app_resources_copy_vario(&system_auto_power_off_vario)) {
+            auto_power_off_altitude_valid =
+                system_auto_power_off_vario.estimate_valid;
+            auto_power_off_altitude_m =
+                system_auto_power_off_vario.altitude_m;
+        }
+        auto_power_off_issued = auto_power_off_update(
+            &system_auto_power_off_state, auto_power_off_minutes,
+            snapshot.external_power_present,
+            auto_power_off_config_valid && auto_power_off_altitude_valid,
+            auto_power_off_altitude_m, snapshot.timestamp_us);
+
         if (sw1.stable_valid && !snapshot.sw1_pressed) {
+            if (previous_sw1_pressed && sw1_was_released &&
+                sw1_short_press_pending && !sw1_power_off_issued) {
+                snapshot.volume_level =
+                    next_volume_level(snapshot.volume_level);
+                snapshot.volume_override_active = true;
+                update_switch_preferences_dirty(
+                    &snapshot, &persisted_preferences,
+                    force_preferences_save);
+                request_button_sound(snapshot.volume_level, 1U);
+            }
             sw1_was_released = true;
             sw1_hold_time_ms = 0U;
+            sw1_short_press_pending = false;
+            sw1_power_off_issued = false;
         } else if (sw1.stable_valid && sw1_was_released) {
+            if (!previous_sw1_pressed) {
+                sw1_hold_time_ms = 0U;
+                sw1_short_press_pending = true;
+                sw1_power_off_issued = false;
+            }
             if (UINT32_MAX - sw1_hold_time_ms <
                 SYSTEM_SAMPLE_PERIOD_MS) {
                 sw1_hold_time_ms = UINT32_MAX;
             } else {
                 sw1_hold_time_ms += SYSTEM_SAMPLE_PERIOD_MS;
+            }
+            if (sw1_hold_time_ms >= POWER_OFF_HOLD_MS) {
+                sw1_short_press_pending = false;
+                sw1_power_off_issued = true;
             }
         } else {
             /* The switch used to start the board is not a power-off request. */
@@ -1827,17 +2147,12 @@ static void system_task(void *context) {
 
         if (sw2.stable_valid && snapshot.sw2_pressed &&
             !previous_sw2_pressed) {
-            app_config_t config = {0};
-            audio_volume_level_t current = snapshot.volume_level;
-
-            if (!snapshot.volume_override_active) {
-                if (!app_resources_copy_config(&config)) {
-                    app_config_set_defaults(&config);
-                }
-                current = config_volume_level(&config);
-            }
-            snapshot.volume_level = next_volume_level(current);
-            snapshot.volume_override_active = true;
+            toggle_sink_override(&snapshot);
+            update_switch_preferences_dirty(&snapshot,
+                                            &persisted_preferences,
+                                            force_preferences_save);
+            request_sink_status_sound(selected_volume_level(&snapshot),
+                                      snapshot.sink_enabled_override);
         }
         if (sw3.stable_valid && snapshot.sw3_pressed) {
             if (!previous_sw3_pressed) {
@@ -1846,7 +2161,11 @@ static void system_task(void *context) {
                 sw3_short_press_pending =
                     imu_accel_calibration_required;
                 if (!imu_accel_calibration_required) {
-                    toggle_sink_override(&snapshot);
+                    if (select_next_parameter_set(&snapshot)) {
+                        update_switch_preferences_dirty(
+                            &snapshot, &persisted_preferences,
+                            force_preferences_save);
+                    }
                 }
             }
             if (imu_accel_calibration_required &&
@@ -1874,13 +2193,18 @@ static void system_task(void *context) {
         } else if (sw3.stable_valid && previous_sw3_pressed) {
             if (sw3_short_press_pending &&
                 !sw3_skip_request_issued) {
-                toggle_sink_override(&snapshot);
+                if (select_next_parameter_set(&snapshot)) {
+                    update_switch_preferences_dirty(
+                        &snapshot, &persisted_preferences,
+                        force_preferences_save);
+                }
             }
             sw3_hold_time_ms = 0U;
             sw3_short_press_pending = false;
             sw3_skip_request_issued = false;
         }
         snapshot.sw3_hold_ms = sw3_hold_time_ms;
+        previous_sw1_pressed = snapshot.sw1_pressed;
         previous_sw2_pressed = snapshot.sw2_pressed;
         previous_sw3_pressed = snapshot.sw3_pressed;
 
@@ -1901,12 +2225,24 @@ static void system_task(void *context) {
             battery_elapsed_ms = 0U;
         }
 
-        set_lifecycle_leds(led_elapsed_ms, sw1_hold_time_ms);
-        led_elapsed_ms += SYSTEM_SAMPLE_PERIOD_MS;
+        set_lifecycle_leds(
+            led_elapsed_ms, sw1_hold_time_ms,
+            snapshot.external_power_present, snapshot.battery_valid,
+            snapshot.battery_voltage_v);
+        if ((event_bits & APP_EVENT_BMP581_STARTUP_COMPLETE) != 0U) {
+            led_elapsed_ms += SYSTEM_SAMPLE_PERIOD_MS;
+        }
 
         (void) app_resources_publish_system(&snapshot);
 
-        if (sw1_was_released && sw1_hold_time_ms >= POWER_OFF_HOLD_MS) {
+        if (auto_power_off_issued) {
+            ESP_LOGI(TAG,
+                     "automatic power-off requested after %" PRIu32
+                     " minutes within %.1f m altitude range",
+                     auto_power_off_minutes,
+                     (double) AUTO_POWER_OFF_ALTITUDE_RANGE_M);
+        }
+        if (sw1_power_off_issued || auto_power_off_issued) {
             request_power_off(&snapshot);
         }
 
@@ -2066,6 +2402,7 @@ static void console_diag_status(void) {
     firmware_update_diagnostics_t update = {0};
     ble_vario_diagnostics_t ble = {0};
     app_power_diagnostics_t power = {0};
+    switch_preferences_diagnostics_t switch_diagnostics = {0};
     int64_t now_us = esp_timer_get_time();
 
     (void) app_resources_copy_vario(&vario);
@@ -2076,6 +2413,7 @@ static void console_diag_status(void) {
     firmware_update_get_diagnostics(&update);
     ble_vario_get_diagnostics(&ble);
     app_power_get_diagnostics(&power);
+    switch_preferences_get_diagnostics(&switch_diagnostics);
 
     console_writef(
         "VARIO bmp=%d pressure_valid=%d climb_valid=%d fusion=%d "
@@ -2157,7 +2495,8 @@ static void console_diag_status(void) {
         " ext_power=%d sw=%d,%d,%d sw1_hold_ms=%" PRIu32
         " sw3_hold_ms=%" PRIu32
         " volume_override=%d volume_level=%d sink_override=%d"
-        " sink_enabled=%d power_off=%d\r\n",
+        " sink_enabled=%d parameter_number=%u parameter_sets=%u"
+        " switch_dirty=%d power_off=%d\r\n",
         system.battery_valid, (double) system.battery_voltage_v,
         system.battery_raw, system.battery_adc_mv,
         system.battery_sample_count, system.battery_error_count,
@@ -2166,7 +2505,25 @@ static void console_diag_status(void) {
         system.sw1_hold_ms, system.sw3_hold_ms,
         system.volume_override_active,
         (int) system.volume_level, system.sink_override_active,
-        system.sink_enabled_override, system.power_off_requested);
+        system.sink_enabled_override,
+        (unsigned int) system.parameter_number,
+        (unsigned int) system.parameter_set_count,
+        system.switch_preferences_dirty,
+        system.power_off_requested);
+    console_writef(
+        "SWITCH source=%s load=%s load_error=%s save_result=%s"
+        " clear_result=%s load_errors=%" PRIu32
+        " saves=%" PRIu32 " save_errors=%" PRIu32
+        " clear_errors=%" PRIu32 "\r\n",
+        switch_preferences_source_name(switch_diagnostics.source),
+        switch_preferences_load_result_name(switch_diagnostics.load_result),
+        esp_err_to_name(switch_diagnostics.last_load_error),
+        esp_err_to_name(switch_diagnostics.last_save_result),
+        esp_err_to_name(switch_diagnostics.last_clear_result),
+        switch_diagnostics.load_error_count,
+        switch_diagnostics.save_count,
+        switch_diagnostics.save_error_count,
+        switch_diagnostics.clear_error_count);
     console_writef(
         "USB tinyusb=%d cdc=%d msc_driver=%d msc_enabled=%d msc_media=%d"
         " attached=%d dtr=%d vbus=%d storage=%d owner=%s load=%d"
@@ -2232,8 +2589,10 @@ static void console_diag_status(void) {
 
 static void console_handle_parameter(char *tokens[], size_t token_count) {
     app_config_t config = {0};
+    uint8_t parameter_number = 0U;
 
-    if (token_count < 2U || !app_resources_copy_config(&config)) {
+    if (token_count < 2U ||
+        !app_resources_copy_active_config(&config, &parameter_number)) {
         console_writef("ERR PARAM\r\n");
         return;
     }
@@ -2257,7 +2616,8 @@ static void console_handle_parameter(char *tokens[], size_t token_count) {
     }
     if (strcasecmp(tokens[1], "SET") == 0 && token_count == 4U) {
         if (!app_config_set_text(&config, tokens[2], tokens[3]) ||
-            !app_resources_publish_config(&config)) {
+            !app_resources_publish_config_for_profile(&config,
+                                                      parameter_number)) {
             console_writef("ERR INVALID_VALUE\r\n");
             return;
         }
@@ -2265,8 +2625,9 @@ static void console_handle_parameter(char *tokens[], size_t token_count) {
         return;
     }
     if (strcasecmp(tokens[1], "RESET") == 0 && token_count == 3U) {
-        if (!app_config_reset(&config, tokens[2]) ||
-            !app_resources_publish_config(&config)) {
+        if (!app_config_reset(&config, parameter_number, tokens[2]) ||
+            !app_resources_publish_config_for_profile(&config,
+                                                      parameter_number)) {
             console_writef("ERR INVALID_RESET\r\n");
             return;
         }
@@ -2276,7 +2637,11 @@ static void console_handle_parameter(char *tokens[], size_t token_count) {
     if (strcasecmp(tokens[1], "SAVE") == 0 && token_count == 2U) {
         esp_err_t ret = ESP_OK;
 
-        ret = usb_device_save_config(&config);
+        if (!app_resources_copy_config_profiles(&console_profile_snapshot)) {
+            console_writef("ERR PARAM\r\n");
+            return;
+        }
+        ret = usb_device_save_config(&console_profile_snapshot);
         if (ret == ESP_OK) {
             console_writef("OK\r\n");
         } else if (ret == ESP_ERR_INVALID_STATE) {
@@ -2357,6 +2722,7 @@ static void console_process_line(char *line) {
 
 static void console_task(void *context) {
     QueueHandle_t queue = app_resources_diagnostic_queue();
+    EventGroupHandle_t event_group = app_resources_event_group();
     diagnostic_event_t event = {0};
     uint8_t input[64] = {0};
     char line[129] = {0};
@@ -2374,6 +2740,31 @@ static void console_task(void *context) {
         int64_t now_us = esp_timer_get_time();
 
         if (app_stop_requested()) {
+            system_snapshot_t final_system = {0};
+
+            if (event_group != NULL) {
+                (void) xEventGroupWaitBits(
+                    event_group, APP_EVENT_AUDIO_QUIESCED,
+                    pdFALSE, pdFALSE, portMAX_DELAY);
+            }
+            if (app_resources_copy_system(&final_system) &&
+                final_system.switch_preferences_dirty) {
+                switch_preferences_t preferences = {
+                    .volume_level = final_system.volume_level,
+                    .sink_enabled = final_system.sink_enabled_override,
+                    .parameter_number = final_system.parameter_number,
+                };
+                esp_err_t save_ret =
+                    switch_preferences_save(&preferences);
+
+                if (save_ret != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "switch preferences shutdown save failed: %s",
+                             esp_err_to_name(save_ret));
+                    post_runtime_diagnostic(
+                        DIAGNOSTIC_EVENT_PERIPHERAL_FAILURE, save_ret);
+                }
+            }
             acknowledge_and_delete(APP_EVENT_CONSOLE_ACK);
         }
 
@@ -2452,8 +2843,10 @@ static void ble_tx_task(void *context) {
             acknowledge_and_delete(APP_EVENT_BLE_TX_ACK);
         }
 
+        if (app_resources_copy_system(&system)) {
+            ble_vario_update_battery(&system);
+        }
         if (app_resources_copy_vario(&vario) &&
-            app_resources_copy_system(&system) &&
             ble_vario_can_notify()) {
             (void) app_resources_apply_debug_vario(
                 &vario, esp_timer_get_time());
@@ -2530,38 +2923,6 @@ esp_err_t app_tasks_start(void) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    (void) xEventGroupClearBits(
-        event_group,
-        APP_EVENT_STARTUP_SOUND_REQUEST | APP_EVENT_STARTUP_SOUND_DONE |
-            APP_EVENT_STARTUP_SOUND_ABORT);
-    (void) xEventGroupSetBits(event_group,
-                              APP_EVENT_STARTUP_SOUND_REQUEST);
-    EventBits_t sound_bits = xEventGroupWaitBits(
-        event_group,
-        APP_EVENT_STARTUP_SOUND_DONE | APP_EVENT_STOP_REQUEST |
-            APP_EVENT_FATAL_STATE,
-        pdFALSE, pdFALSE, pdMS_TO_TICKS(STARTUP_SOUND_WAIT_MS));
-    if ((sound_bits &
-         (APP_EVENT_STOP_REQUEST | APP_EVENT_FATAL_STATE)) != 0U) {
-        (void) xEventGroupSetBits(event_group,
-                                  APP_EVENT_STARTUP_SOUND_ABORT);
-        (void) xEventGroupClearBits(event_group,
-                                    APP_EVENT_STARTUP_SOUND_REQUEST);
-        return ESP_ERR_INVALID_STATE;
-    }
-    if ((sound_bits & APP_EVENT_STARTUP_SOUND_DONE) == 0U) {
-        ESP_LOGW(TAG, "startup sound timed out; continuing startup");
-        post_runtime_diagnostic(DIAGNOSTIC_EVENT_PERIPHERAL_FAILURE,
-                                ESP_ERR_TIMEOUT);
-        (void) xEventGroupSetBits(event_group,
-                                  APP_EVENT_STARTUP_SOUND_ABORT);
-        (void) xEventGroupClearBits(event_group,
-                                    APP_EVENT_STARTUP_SOUND_REQUEST);
-    } else {
-        (void) xEventGroupClearBits(event_group,
-                                    APP_EVENT_STARTUP_SOUND_DONE);
-    }
-
     return ESP_OK;
 }
 
@@ -2587,6 +2948,7 @@ void app_tasks_run_fatal_fallback(void) {
 
     sw1.candidate_pressed = board_is_sw1_pressed();
     sw1.stable_pressed = sw1.candidate_pressed;
+    vTaskDelay(pdMS_TO_TICKS(SYSTEM_SAMPLE_PERIOD_MS));
 
     for (;;) {
         bool pressed = debounce_button(&sw1, board_is_sw1_pressed());
@@ -2604,9 +2966,7 @@ void app_tasks_run_fatal_fallback(void) {
         led_elapsed_ms += SYSTEM_SAMPLE_PERIOD_MS;
 
         if (was_released && hold_time_ms >= POWER_OFF_HOLD_MS) {
-            board_set_safe_indicators();
-            (void) board_set_power_hold(false);
-            run_safe_stop_loop(NULL, 0U, false);
+            app_tasks_run_safe_stop();
         }
 
         vTaskDelay(pdMS_TO_TICKS(SYSTEM_SAMPLE_PERIOD_MS));

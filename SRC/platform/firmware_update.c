@@ -372,16 +372,21 @@ static esp_err_t apply_update(const update_image_info_t *info) {
     return ESP_OK;
 }
 
-esp_err_t firmware_update_process_boot(bool external_power_present) {
+bool firmware_update_running_image_pending_verify(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
-    const esp_app_desc_t *running_desc = esp_app_get_description();
     esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+
+    return running != NULL &&
+           esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+           ota_state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+esp_err_t firmware_update_process_boot(bool external_power_present) {
+    const esp_app_desc_t *running_desc = esp_app_get_description();
     update_image_info_t image_info;
     esp_err_t ret;
 
-    if (running != NULL &&
-        esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+    if (firmware_update_running_image_pending_verify()) {
         portENTER_CRITICAL(&update_lock);
         update_diagnostics.state = FIRMWARE_UPDATE_PENDING_CONFIRMATION;
         update_diagnostics.confirmation_required = true;

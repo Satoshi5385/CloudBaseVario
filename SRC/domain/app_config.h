@@ -11,6 +11,7 @@ typedef enum {
 
 typedef struct {
     float sea_level_pressure_pa;
+    uint32_t auto_power_off_minutes;
     app_filter_mode_t filter_mode;
     uint32_t i2c_reinit_error_count;
     uint32_t imu_gyro_calibration_samples;
@@ -19,12 +20,11 @@ typedef struct {
     bool audio_enabled;
     bool sink_enabled;
     bool predictive_buzzer_enabled;
+    float audio_climb_rate_average_s;
     float lift_start_mps;
     float lift_end_mps;
-    float lift_confirm_distance_m;
     float sink_start_mps;
     float sink_end_mps;
-    float sink_confirm_distance_m;
     uint32_t audio_state_hold_ms;
     uint32_t audio_stale_ms;
     uint32_t lift_freq_base_hz;
@@ -39,12 +39,30 @@ typedef struct {
     uint32_t sink_freq_min_hz;
     uint32_t audio_duty_percent;
     uint32_t audio_amp_mode;
-    uint32_t predictive_freq_hz;
-    uint32_t predictive_on_ms;
-    uint32_t predictive_off_ms;
+    uint32_t predictive_interval_ms;
+    uint32_t predictive_duration_ms;
     float predictive_min_mps;
-    float predictive_max_mps;
 } app_config_t;
+
+#define APP_CONFIG_PROFILE_MIN_NUMBER UINT8_C(1)
+#define APP_CONFIG_PROFILE_MAX_NUMBER UINT8_C(5)
+#define APP_CONFIG_PROFILE_MAX_COUNT 5U
+
+typedef struct {
+    uint8_t parameter_number;
+    app_config_t config;
+} app_config_profile_t;
+
+typedef struct {
+    app_config_t shared_config;
+    size_t count;
+    app_config_profile_t profiles[APP_CONFIG_PROFILE_MAX_COUNT];
+} app_config_profiles_t;
+
+typedef enum {
+    APP_PARAMETER_SCOPE_SHARED = 0,
+    APP_PARAMETER_SCOPE_PROFILE,
+} app_parameter_scope_t;
 
 typedef enum {
     APP_PARAMETER_BOOL = 0,
@@ -63,10 +81,42 @@ typedef union {
 typedef struct {
     const char *name;
     app_parameter_type_t type;
+    app_parameter_scope_t scope;
 } app_parameter_info_t;
 
-/** Fill a complete configuration from the single built-in parameter table. */
+/** Fill public parameters plus SW1/SW2-owned runtime audio defaults. */
 void app_config_set_defaults(app_config_t *config);
+
+/** Fill one effective configuration with defaults for a profile number. */
+void app_config_set_profile_defaults(app_config_t *config,
+                                     uint8_t parameter_number);
+
+/** Fill a profile collection with built-in parameter sets 1, 2, and 3. */
+void app_config_profiles_set_defaults(app_config_profiles_t *profiles);
+
+/** Validate profile count, unique numbers, and every complete configuration. */
+bool app_config_profiles_validate(const app_config_profiles_t *profiles);
+
+/** Sort an already valid profile collection by parameter number. */
+void app_config_profiles_sort(app_config_profiles_t *profiles);
+
+/** Find a profile by its stable parameter number. */
+bool app_config_profiles_find(const app_config_profiles_t *profiles,
+                              uint8_t parameter_number, size_t *index_out);
+
+/** Compose one complete runtime configuration from shared and profile values. */
+bool app_config_profiles_get_config(const app_config_profiles_t *profiles,
+                                    size_t profile_index,
+                                    app_config_t *config);
+
+/** Store shared values once and profile values in the selected profile. */
+bool app_config_profiles_set_config(app_config_profiles_t *profiles,
+                                    size_t profile_index,
+                                    const app_config_t *config);
+
+/** Return the next profile index in ascending-number cyclic order. */
+size_t app_config_profiles_next_index(const app_config_profiles_t *profiles,
+                                      size_t current_index);
 
 /** Validate all individual ranges and cross-parameter relationships. */
 bool app_config_validate(const app_config_t *config);
@@ -96,7 +146,8 @@ bool app_config_set_text(app_config_t *config, const char *name,
                          const char *text);
 
 /** Reset one parameter, or every parameter when name is "ALL". */
-bool app_config_reset(app_config_t *config, const char *name);
+bool app_config_reset(app_config_t *config, uint8_t parameter_number,
+                      const char *name);
 
 /** Format one value for console output. */
 bool app_config_format_value(const app_config_t *config, size_t index,

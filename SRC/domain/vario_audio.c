@@ -61,96 +61,97 @@ static uint32_t sink_frequency_hz(const app_config_t *config,
     return (uint32_t) lroundf(frequency);
 }
 
-static int8_t vertical_direction(float climb_rate_mps) {
-    if (climb_rate_mps > 0.0f) {
-        return INT8_C(1);
-    }
-    if (climb_rate_mps < 0.0f) {
-        return INT8_C(-1);
-    }
-    return INT8_C(0);
+static void clear_history(vario_audio_state_t *state) {
+    state->history_sum_mps = 0.0;
+    state->averaged_climb_rate_mps = 0.0f;
+    state->history_head = 0U;
+    state->history_count = 0U;
+    state->averaged_climb_rate_valid = false;
 }
 
-static void clear_altitude_reference(vario_audio_state_t *state) {
-    state->reference_altitude_m = 0.0f;
-    state->vertical_direction = INT8_C(0);
-    state->reference_altitude_valid = false;
-}
-
-static void update_altitude_reference(vario_audio_state_t *state,
-                                      const vario_result_t *result) {
-    int8_t direction = INT8_C(0);
-
-    if (!state->input_source_valid ||
-        state->last_debug_input_active != result->debug_input_active) {
-        clear_altitude_reference(state);
-        state->last_debug_input_active = result->debug_input_active;
-        state->input_source_valid = true;
-    }
-    if (!result->estimate_valid || !result->climb_rate_valid ||
-        !isfinite(result->altitude_m) ||
-        !isfinite(result->climb_rate_mps)) {
-        clear_altitude_reference(state);
+static void remove_oldest_history_sample(vario_audio_state_t *state) {
+    if (state->history_count == 0U) {
         return;
     }
-
-    direction = vertical_direction(result->climb_rate_mps);
-    if (!state->reference_altitude_valid) {
-        state->reference_altitude_m = result->altitude_m;
-        state->vertical_direction = direction;
-        state->reference_altitude_valid = true;
-        return;
-    }
-
-    if (direction == INT8_C(0)) {
-        return;
-    }
-    if (state->vertical_direction != INT8_C(0) &&
-        direction != state->vertical_direction) {
-        state->reference_altitude_m = result->altitude_m;
-    }
-    state->vertical_direction = direction;
+    state->history_sum_mps -= state->history_rates_mps[state->history_head];
+    state->history_head = (uint16_t) (
+        (state->history_head + 1U) % VARIO_AUDIO_MAX_HISTORY_SAMPLES);
+    state->history_count--;
 }
 
-static bool lift_distance_confirmed(const vario_audio_state_t *state,
-                                    const app_config_t *config,
-                                    const vario_result_t *result) {
-    if (config->lift_confirm_distance_m == 0.0f) {
-        return true;
-    }
-    return state->reference_altitude_valid && result->estimate_valid &&
-           isfinite(result->altitude_m) &&
-           result->altitude_m - state->reference_altitude_m >
-               config->lift_confirm_distance_m;
-}
+static float averaged_climb_rate(vario_audio_state_t *state,
+                                 const app_config_t *config,
+                                 const vario_result_t *result) {
+    int64_t window_us = 0;
+    int64_t last_timestamp_us = 0;
 
-static bool sink_distance_confirmed(const vario_audio_state_t *state,
-                                    const app_config_t *config,
-                                    const vario_result_t *result) {
-    if (config->sink_confirm_distance_m == 0.0f) {
-        return true;
+    if (config->audio_climb_rate_average_s == 0.0f) {
+        clear_history(state);
+        state->averaged_climb_rate_mps = result->climb_rate_mps;
+        state->averaged_climb_rate_valid = true;
+        return result->climb_rate_mps;
     }
-    return state->reference_altitude_valid && result->estimate_valid &&
-           isfinite(result->altitude_m) &&
-           state->reference_altitude_m - result->altitude_m >
-               config->sink_confirm_distance_m;
+    window_us = (int64_t) llroundf(
+        config->audio_climb_rate_average_s * 1000000.0f);
+    if (state->history_count > 0U) {
+        uint16_t last_index = (uint16_t) (
+            (state->history_head + state->history_count - 1U) %
+            VARIO_AUDIO_MAX_HISTORY_SAMPLES);
+        last_timestamp_us = state->history_timestamps_us[last_index];
+        if (result->timestamp_us < last_timestamp_us) {
+            clear_history(state);
+        } else if (result->timestamp_us == last_timestamp_us) {
+            return state->averaged_climb_rate_mps;
+        }
+    }
+    if (state->history_count == VARIO_AUDIO_MAX_HISTORY_SAMPLES) {
+        remove_oldest_history_sample(state);
+    }
+    {
+        uint16_t insert_index = (uint16_t) (
+            (state->history_head + state->history_count) %
+            VARIO_AUDIO_MAX_HISTORY_SAMPLES);
+
+        state->history_timestamps_us[insert_index] = result->timestamp_us;
+        state->history_rates_mps[insert_index] = result->climb_rate_mps;
+        state->history_sum_mps += result->climb_rate_mps;
+        state->history_count++;
+    }
+    while (state->history_count > 1U &&
+           result->timestamp_us -
+                   state->history_timestamps_us[state->history_head] >
+               window_us) {
+        remove_oldest_history_sample(state);
+    }
+    state->averaged_climb_rate_mps =
+        (float) (state->history_sum_mps / (double) state->history_count);
+    state->averaged_climb_rate_valid = true;
+    return state->averaged_climb_rate_mps;
 }
 
 void vario_audio_reset(vario_audio_state_t *state) {
     if (state != NULL) {
-        memset(state, 0, sizeof(*state));
         state->mode = VARIO_AUDIO_SILENT;
+        state->mode_started_us = 0;
+        state->phase_started_us = 0;
+        state->phase_on = false;
+        state->input_source_valid = false;
+        state->last_debug_input_active = false;
+        clear_history(state);
     }
 }
 
 static vario_audio_mode_t requested_mode(const vario_audio_state_t *state,
                                          const app_config_t *config,
-                                         const vario_result_t *result) {
-    float climb_rate_mps = result->climb_rate_mps;
+                                         float climb_rate_mps) {
 
     switch (state->mode) {
     case VARIO_AUDIO_LIFT:
         if (climb_rate_mps < config->lift_end_mps) {
+            if (config->predictive_buzzer_enabled &&
+                climb_rate_mps >= config->predictive_min_mps) {
+                return VARIO_AUDIO_PREDICTIVE;
+            }
             return VARIO_AUDIO_SILENT;
         }
         return VARIO_AUDIO_LIFT;
@@ -160,26 +161,26 @@ static vario_audio_mode_t requested_mode(const vario_audio_state_t *state,
         }
         return VARIO_AUDIO_SINK;
     case VARIO_AUDIO_PREDICTIVE:
+        if (climb_rate_mps > config->lift_start_mps) {
+            return VARIO_AUDIO_LIFT;
+        }
         if (!config->predictive_buzzer_enabled ||
-            climb_rate_mps < config->predictive_min_mps ||
-            climb_rate_mps > config->predictive_max_mps) {
+            climb_rate_mps < config->predictive_min_mps) {
             return VARIO_AUDIO_SILENT;
         }
         return VARIO_AUDIO_PREDICTIVE;
     case VARIO_AUDIO_SILENT:
     default:
-        if (climb_rate_mps > config->lift_start_mps &&
-            lift_distance_confirmed(state, config, result)) {
+        if (climb_rate_mps > config->lift_start_mps) {
             return VARIO_AUDIO_LIFT;
         }
         if (config->sink_enabled &&
-            climb_rate_mps < config->sink_start_mps &&
-            sink_distance_confirmed(state, config, result)) {
+            climb_rate_mps < config->sink_start_mps) {
             return VARIO_AUDIO_SINK;
         }
         if (config->predictive_buzzer_enabled &&
             climb_rate_mps >= config->predictive_min_mps &&
-            climb_rate_mps <= config->predictive_max_mps) {
+            climb_rate_mps <= config->lift_start_mps) {
             return VARIO_AUDIO_PREDICTIVE;
         }
         return VARIO_AUDIO_SILENT;
@@ -192,6 +193,7 @@ void vario_audio_step(vario_audio_state_t *state,
                       int64_t now_us,
                       vario_audio_command_t *command) {
     vario_audio_mode_t requested = VARIO_AUDIO_SILENT;
+    float climb_rate_mps = 0.0f;
     int64_t sample_age_us = 0;
     bool force_silent = true;
 
@@ -211,13 +213,20 @@ void vario_audio_step(vario_audio_state_t *state,
         return;
     }
 
-    update_altitude_reference(state, result);
-    requested = requested_mode(state, config, result);
+    if (!state->input_source_valid ||
+        state->last_debug_input_active != result->debug_input_active) {
+        clear_history(state);
+        state->last_debug_input_active = result->debug_input_active;
+        state->input_source_valid = true;
+    }
+    climb_rate_mps = averaged_climb_rate(state, config, result);
+    requested = requested_mode(state, config, climb_rate_mps);
     if (state->mode == VARIO_AUDIO_LIFT &&
-        requested != VARIO_AUDIO_LIFT && state->phase_on) {
+        requested != VARIO_AUDIO_LIFT &&
+        requested != VARIO_AUDIO_PREDICTIVE && state->phase_on) {
         int64_t elapsed_us = now_us - state->phase_started_us;
         int64_t phase_us =
-            (int64_t) lift_phase_time_ms(config, result->climb_rate_mps) *
+            (int64_t) lift_phase_time_ms(config, climb_rate_mps) *
             INT64_C(1000);
 
         if (elapsed_us >= 0 && elapsed_us < phase_us) {
@@ -226,8 +235,13 @@ void vario_audio_step(vario_audio_state_t *state,
     }
     if (requested != state->mode) {
         int64_t held_us = now_us - state->mode_started_us;
+        bool predictive_lift_transition =
+            (state->mode == VARIO_AUDIO_PREDICTIVE &&
+             requested == VARIO_AUDIO_LIFT) ||
+            (state->mode == VARIO_AUDIO_LIFT &&
+             requested == VARIO_AUDIO_PREDICTIVE);
 
-        if (state->mode_started_us == 0 ||
+        if (predictive_lift_transition || state->mode_started_us == 0 ||
             held_us >= (int64_t) config->audio_state_hold_ms * INT64_C(1000)) {
             state->mode = requested;
             state->mode_started_us = now_us;
@@ -242,7 +256,7 @@ void vario_audio_step(vario_audio_state_t *state,
 
     switch (state->mode) {
     case VARIO_AUDIO_LIFT: {
-        uint32_t phase_ms = lift_phase_time_ms(config, result->climb_rate_mps);
+        uint32_t phase_ms = lift_phase_time_ms(config, climb_rate_mps);
         int64_t elapsed_us = now_us - state->phase_started_us;
         int64_t phase_us = (int64_t) phase_ms * INT64_C(1000);
 
@@ -255,26 +269,25 @@ void vario_audio_step(vario_audio_state_t *state,
             state->phase_started_us += phases_elapsed * phase_us;
         }
         command->frequency_hz =
-            lift_frequency_hz(config, result->climb_rate_mps);
+            lift_frequency_hz(config, climb_rate_mps);
         command->sounding = state->phase_on;
         break;
     }
     case VARIO_AUDIO_SINK:
         command->frequency_hz =
-            sink_frequency_hz(config, result->climb_rate_mps);
+            sink_frequency_hz(config, climb_rate_mps);
         command->sounding = true;
         break;
     case VARIO_AUDIO_PREDICTIVE: {
-        uint32_t phase_ms =
-            state->phase_on ? config->predictive_on_ms
-                            : config->predictive_off_ms;
-        int64_t phase_us = (int64_t) phase_ms * INT64_C(1000);
+        int64_t interval_us =
+            (int64_t) config->predictive_interval_ms * INT64_C(1000);
+        int64_t duration_us =
+            (int64_t) config->predictive_duration_ms * INT64_C(1000);
+        int64_t elapsed_us = now_us - state->phase_started_us;
+        int64_t position_us = elapsed_us >= 0 ? elapsed_us % interval_us : 0;
 
-        if (now_us - state->phase_started_us >= phase_us) {
-            state->phase_on = !state->phase_on;
-            state->phase_started_us = now_us;
-        }
-        command->frequency_hz = config->predictive_freq_hz;
+        state->phase_on = position_us < duration_us;
+        command->frequency_hz = lift_frequency_hz(config, climb_rate_mps);
         command->sounding = state->phase_on;
         break;
     }

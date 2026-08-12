@@ -31,6 +31,15 @@ typedef struct {
 } firmware_update_diagnostics_t;
 
 /**
+ * @brief Check whether the running image is in its rollback-validation boot.
+ *
+ * This read-only check is safe before storage, USB, and application resources
+ * are initialized. It is used to bypass the physical power-on hold only for
+ * the first boot of a newly staged OTA image.
+ */
+bool firmware_update_running_image_pending_verify(void);
+
+/**
  * @brief Reconcile update state files and apply UPDATE.BIN when permitted.
  *
  * Must run before TinyUSB is exposed and before normal application tasks.

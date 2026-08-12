@@ -45,7 +45,7 @@ typedef struct {
  * A blank or damaged volume is never formatted implicitly. Formatting occurs
  * only when @p format_config_storage is true (the SW2+SW3 boot gesture).
  */
-esp_err_t usb_device_storage_init(app_config_t *config,
+esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
                                   bool format_config_storage);
 
 /** Start the self-powered TinyUSB CDC + MSC composite device. */
@@ -59,7 +59,7 @@ esp_err_t usb_device_start(void);
 esp_err_t usb_device_enable_msc(void);
 
 /** Save parameters while the application owns the FAT volume. */
-esp_err_t usb_device_save_config(const app_config_t *config);
+esp_err_t usb_device_save_config(const app_config_profiles_t *profiles);
 
 /** Load the private per-unit IMU calibration while the app owns the FAT. */
 imu_calibration_storage_result_t usb_device_load_imu_calibration(

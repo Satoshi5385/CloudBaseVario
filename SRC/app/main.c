@@ -21,6 +21,7 @@
 #include "platform/firmware_update.h"
 #include "platform/sensor_bus.h"
 #include "platform/system_io.h"
+#include "platform/switch_preferences.h"
 #include "platform/usb_device_service.h"
 
 #if !CONFIG_IDF_TARGET_ESP32S3
@@ -80,23 +81,97 @@
 #define EXPECTED_PSRAM_SIZE_BYTES UINT32_C(8388608)
 #define STARTUP_FORMAT_SAMPLE_PERIOD_MS UINT32_C(10)
 #define STARTUP_FORMAT_DEBOUNCE_MS UINT32_C(30)
+#define STARTUP_POWER_SAMPLE_PERIOD_MS UINT32_C(10)
+#define STARTUP_POWER_DEBOUNCE_MS UINT32_C(30)
+#define STARTUP_PREP_TASK_STACK_BYTES UINT32_C(4096)
+#define STARTUP_PREP_TASK_PRIORITY ((UBaseType_t) 5U)
+#define STARTUP_PREP_TASK_CORE ((BaseType_t) 1)
 #define UPDATE_CONFIRMATION_USB_WAIT_MS UINT32_C(15000)
 
+typedef struct {
+    bool candidate_pressed;
+    bool stable_pressed;
+    bool stable_valid;
+    uint32_t stable_time_ms;
+} startup_button_debounce_t;
+
+typedef struct {
+    bool confirmed;
+    bool config_format_requested;
+} startup_power_on_result_t;
+
+typedef struct {
+    esp_err_t audio_result;
+    esp_err_t nvs_result;
+    switch_preferences_load_result_t switch_load_result;
+    switch_preferences_t switch_preferences;
+} startup_preparation_result_t;
+
 static const char *TAG = "main";
+static app_config_profiles_t startup_runtime_profiles;
+static startup_preparation_result_t startup_preparation_result;
+static TaskHandle_t startup_preparation_waiter = NULL;
 
-static esp_err_t initialize_nvs(void) {
-    esp_err_t ret = nvs_flash_init();
+static bool nvs_recovery_required(esp_err_t result) {
+    return result == ESP_ERR_NVS_NO_FREE_PAGES ||
+           result == ESP_ERR_NVS_NEW_VERSION_FOUND;
+}
 
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS requires one-time erase and recovery");
-        ret = nvs_flash_erase();
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        ret = nvs_flash_init();
+static esp_err_t recover_nvs_after_power_confirmation(
+    esp_err_t initial_result) {
+    if (!nvs_recovery_required(initial_result)) {
+        return initial_result;
     }
 
-    return ret;
+    ESP_LOGW(TAG, "NVS requires one-time erase and recovery");
+    esp_err_t result = nvs_flash_erase();
+
+    if (result == ESP_OK) {
+        result = nvs_flash_init();
+    }
+    return result;
+}
+
+static void run_startup_preparation(void) {
+    switch_preferences_set_defaults(
+        &startup_preparation_result.switch_preferences);
+    startup_preparation_result.switch_load_result =
+        SWITCH_PREFERENCES_LOAD_NOT_FOUND;
+    startup_preparation_result.audio_result = audio_output_init();
+    startup_preparation_result.nvs_result = nvs_flash_init();
+    if (startup_preparation_result.nvs_result == ESP_OK) {
+        startup_preparation_result.switch_load_result =
+            switch_preferences_load(
+                &startup_preparation_result.switch_preferences);
+    }
+}
+
+static void startup_preparation_task(void *context) {
+    TaskHandle_t waiter = startup_preparation_waiter;
+
+    (void) context;
+    run_startup_preparation();
+    if (waiter != NULL) {
+        xTaskNotifyGive(waiter);
+    }
+    vTaskDelete(NULL);
+}
+
+static bool start_startup_preparation(void) {
+    startup_preparation_waiter = xTaskGetCurrentTaskHandle();
+    return xTaskCreatePinnedToCore(
+               startup_preparation_task, "startup_prep",
+               STARTUP_PREP_TASK_STACK_BYTES, NULL,
+               STARTUP_PREP_TASK_PRIORITY, NULL,
+               STARTUP_PREP_TASK_CORE) == pdPASS;
+}
+
+static void wait_for_startup_preparation(bool started_async) {
+    if (started_async) {
+        (void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    } else {
+        run_startup_preparation();
+    }
 }
 
 static void log_hardware_configuration(void) {
@@ -131,6 +206,86 @@ static void post_peripheral_failure(esp_err_t detail) {
     (void) app_resources_post_diagnostic(&event);
 }
 
+static bool debounce_startup_button(startup_button_debounce_t *state,
+                                    bool pressed) {
+    if (state == NULL) {
+        return false;
+    }
+    if (pressed != state->candidate_pressed) {
+        state->candidate_pressed = pressed;
+        /* The edge sample starts the interval; it does not consume 10 ms. */
+        state->stable_time_ms = 0U;
+        return state->stable_pressed;
+    }
+    if (state->stable_time_ms < STARTUP_POWER_DEBOUNCE_MS) {
+        state->stable_time_ms += STARTUP_POWER_SAMPLE_PERIOD_MS;
+    }
+    if (state->stable_time_ms >= STARTUP_POWER_DEBOUNCE_MS) {
+        state->stable_pressed = state->candidate_pressed;
+        state->stable_valid = true;
+    }
+    return state->stable_pressed;
+}
+
+static uint32_t power_on_green_brightness_percent(uint32_t hold_ms) {
+    if (hold_ms >= POWER_ON_HOLD_MS) {
+        return 100U;
+    }
+    return hold_ms * 100U / POWER_ON_HOLD_MS;
+}
+
+static startup_power_on_result_t startup_power_on_confirmed(void) {
+    startup_button_debounce_t sw1 = {0};
+    startup_power_on_result_t result = {0};
+    uint32_t hold_time_ms = 0U;
+    uint32_t format_hold_time_ms = 0U;
+
+    sw1.candidate_pressed = board_is_sw1_pressed();
+    sw1.stable_pressed = sw1.candidate_pressed;
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_POWER_SAMPLE_PERIOD_MS));
+
+    for (;;) {
+        bool pressed = debounce_startup_button(&sw1, board_is_sw1_pressed());
+        bool format_pressed =
+            system_io_sw2_pressed() && system_io_sw3_pressed();
+
+        if (format_pressed) {
+            if (UINT32_MAX - format_hold_time_ms <
+                STARTUP_FORMAT_SAMPLE_PERIOD_MS) {
+                format_hold_time_ms = UINT32_MAX;
+            } else {
+                format_hold_time_ms += STARTUP_FORMAT_SAMPLE_PERIOD_MS;
+            }
+        } else {
+            format_hold_time_ms = 0U;
+        }
+
+        if (sw1.stable_valid && !pressed) {
+            board_set_status_leds(false, false);
+            return result;
+        }
+        if (sw1.stable_valid) {
+            if (UINT32_MAX - hold_time_ms < STARTUP_POWER_SAMPLE_PERIOD_MS) {
+                hold_time_ms = UINT32_MAX;
+            } else {
+                hold_time_ms += STARTUP_POWER_SAMPLE_PERIOD_MS;
+            }
+            board_set_status_leds_brightness(
+                power_on_green_brightness_percent(hold_time_ms), false);
+            if (hold_time_ms >= POWER_ON_HOLD_MS) {
+                result.confirmed = true;
+                result.config_format_requested =
+                    format_pressed &&
+                    format_hold_time_ms >= STARTUP_FORMAT_DEBOUNCE_MS;
+                return result;
+            }
+        } else {
+            board_set_status_leds(false, false);
+        }
+        vTaskDelay(pdMS_TO_TICKS(STARTUP_POWER_SAMPLE_PERIOD_MS));
+    }
+}
+
 static bool startup_config_format_requested(void) {
     uint32_t stable_time_ms = 0U;
 
@@ -148,7 +303,6 @@ static bool startup_config_format_requested(void) {
 
 void app_main(void) {
     esp_err_t ret = board_init_power_hold();
-    app_config_t runtime_config = {0};
     bool board_valid = false;
     bool config_format_requested = false;
     bool nvs_ready = false;
@@ -156,9 +310,19 @@ void app_main(void) {
     bool usb_msc_gate_required = false;
     bool usb_composite_active = false;
     bool imu_accel_calibration_required = false;
+    bool ota_confirmation_boot = false;
+    bool startup_preparation_started = false;
+    startup_power_on_result_t power_on_result = {0};
+    switch_preferences_t switch_preferences = {0};
+    switch_preferences_load_result_t switch_load_result =
+        SWITCH_PREFERENCES_LOAD_NOT_FOUND;
+    bool switch_preferences_dirty = false;
     esp_err_t storage_result = ESP_OK;
     esp_err_t usb_result = ESP_OK;
     esp_err_t startup_gate_result = ESP_OK;
+    esp_err_t startup_sound_result = ESP_OK;
+    esp_err_t switch_clear_result = ESP_OK;
+    esp_err_t nvs_result = ESP_OK;
     firmware_update_diagnostics_t update_diagnostics = {0};
     imu_accel_calibration_t imu_accel_calibration = {0};
     imu_calibration_storage_diagnostics_t imu_calibration_diagnostics = {
@@ -175,7 +339,56 @@ void app_main(void) {
         app_tasks_run_fatal_fallback();
     }
 
-    config_format_requested = startup_config_format_requested();
+    ota_confirmation_boot =
+        firmware_update_running_image_pending_verify();
+    startup_preparation_started = start_startup_preparation();
+    if (ota_confirmation_boot) {
+        board_set_status_leds_brightness(100U, false);
+        config_format_requested = startup_config_format_requested();
+    } else {
+        power_on_result = startup_power_on_confirmed();
+        config_format_requested =
+            power_on_result.config_format_requested;
+        if (!power_on_result.confirmed) {
+            wait_for_startup_preparation(startup_preparation_started);
+            app_tasks_run_safe_stop();
+        }
+    }
+    wait_for_startup_preparation(startup_preparation_started);
+
+    switch_preferences =
+        startup_preparation_result.switch_preferences;
+    switch_load_result =
+        startup_preparation_result.switch_load_result;
+    if (config_format_requested) {
+        switch_preferences_set_defaults(&switch_preferences);
+        switch_load_result = SWITCH_PREFERENCES_LOAD_NOT_FOUND;
+    }
+    if (startup_preparation_result.audio_result == ESP_OK) {
+        startup_sound_result = app_tasks_play_startup_sound(
+            switch_preferences.volume_level);
+    } else {
+        startup_sound_result =
+            startup_preparation_result.audio_result;
+    }
+
+    nvs_result = recover_nvs_after_power_confirmation(
+        startup_preparation_result.nvs_result);
+    if (nvs_result == ESP_OK) {
+        nvs_ready = true;
+        if (nvs_recovery_required(
+                startup_preparation_result.nvs_result)) {
+            switch_preferences_set_defaults(&switch_preferences);
+            switch_load_result = SWITCH_PREFERENCES_LOAD_NOT_FOUND;
+        }
+    }
+    if (nvs_ready && config_format_requested) {
+        switch_clear_result = switch_preferences_clear();
+        if (switch_clear_result != ESP_OK) {
+            switch_preferences_dirty = true;
+        }
+    }
+
     if (config_format_requested) {
         ESP_LOGW(TAG, "SW2+SW3 startup request: config FAT will be formatted");
     }
@@ -193,7 +406,8 @@ void app_main(void) {
     }
 
     storage_result =
-        usb_device_storage_init(&runtime_config, config_format_requested);
+        usb_device_storage_init(&startup_runtime_profiles,
+                                config_format_requested);
     if (storage_result != ESP_OK) {
         ESP_LOGW(TAG, "config FAT/MSC storage degraded: %s",
                  esp_err_to_name(storage_result));
@@ -263,13 +477,67 @@ void app_main(void) {
         }
     }
 
-    ret = initialize_nvs();
-    if (ret == ESP_OK) {
-        nvs_ready = true;
-    } else {
-        ESP_LOGW(TAG, "NVS unavailable; BLE will remain disabled: %s", esp_err_to_name(ret));
-        post_peripheral_failure(ret);
+    if (!nvs_ready) {
+        ESP_LOGW(TAG, "NVS unavailable; BLE will remain disabled: %s",
+                 esp_err_to_name(nvs_result));
+        post_peripheral_failure(nvs_result);
     }
+    if (switch_clear_result != ESP_OK) {
+            ESP_LOGW(TAG, "switch preferences could not be cleared: %s",
+                     esp_err_to_name(switch_clear_result));
+            post_peripheral_failure(switch_clear_result);
+    }
+    if (nvs_ready && !config_format_requested) {
+        if (switch_load_result != SWITCH_PREFERENCES_LOAD_OK &&
+            switch_load_result != SWITCH_PREFERENCES_LOAD_LEGACY &&
+            switch_load_result != SWITCH_PREFERENCES_LOAD_NOT_FOUND) {
+            switch_preferences_diagnostics_t diagnostics = {0};
+
+            switch_preferences_get_diagnostics(&diagnostics);
+            ESP_LOGW(TAG, "switch preferences ignored: %s (%s)",
+                     switch_preferences_load_result_name(switch_load_result),
+                     esp_err_to_name(diagnostics.last_load_error));
+            post_peripheral_failure(
+                diagnostics.last_load_error == ESP_OK
+                    ? ESP_ERR_INVALID_RESPONSE
+                    : diagnostics.last_load_error);
+        }
+        if (switch_load_result == SWITCH_PREFERENCES_LOAD_LEGACY) {
+            switch_preferences_dirty = true;
+        }
+    }
+    {
+        size_t selected_index = 0U;
+
+        if (!app_config_profiles_find(&startup_runtime_profiles,
+                                      switch_preferences.parameter_number,
+                                      &selected_index)) {
+            switch_preferences.parameter_number =
+                startup_runtime_profiles.profiles[0].parameter_number;
+            switch_preferences_dirty = true;
+        }
+    }
+    if (!app_resources_publish_config_profiles(
+            &startup_runtime_profiles, switch_preferences.parameter_number,
+            &switch_preferences.parameter_number)) {
+        ESP_LOGW(TAG,
+                 "runtime parameter profile collection rejected; defaults retained");
+        app_config_profiles_set_defaults(&startup_runtime_profiles);
+        switch_preferences.parameter_number = 1U;
+        switch_preferences_dirty = true;
+        (void) app_resources_publish_config_profiles(
+            &startup_runtime_profiles, switch_preferences.parameter_number,
+            &switch_preferences.parameter_number);
+    }
+    app_tasks_set_switch_preferences(&switch_preferences,
+                                     switch_preferences_dirty);
+    ESP_LOGI(TAG,
+             "switch preferences=%s volume=%d sink=%d parameter=%u sets=%u",
+             switch_preferences_load_result_name(switch_load_result),
+             (int) switch_preferences.volume_level,
+             switch_preferences.sink_enabled,
+             (unsigned int) switch_preferences.parameter_number,
+             (unsigned int) startup_runtime_profiles.count);
 
     if (storage_result != ESP_OK) {
         post_peripheral_failure(storage_result);
@@ -282,21 +550,18 @@ void app_main(void) {
         startup_gate_result != usb_result) {
         post_peripheral_failure(startup_gate_result);
     }
-    if (!app_resources_publish_config(&runtime_config)) {
-        ESP_LOGW(TAG, "runtime parameter configuration rejected; defaults retained");
+    if (startup_sound_result != ESP_OK &&
+        startup_sound_result != storage_result &&
+        startup_sound_result != usb_result &&
+        startup_sound_result != startup_gate_result) {
+        ESP_LOGW(TAG, "startup sound unavailable: %s",
+                 esp_err_to_name(startup_sound_result));
+        post_peripheral_failure(startup_sound_result);
     }
-
     ret = sensor_bus_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "shared sensor I2C bus unavailable: %s",
                  esp_err_to_name(ret));
-        post_peripheral_failure(ret);
-    }
-
-    ret = audio_output_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "audio output unavailable: %s", esp_err_to_name(ret));
-        board_set_safe_indicators();
         post_peripheral_failure(ret);
     }
 

@@ -44,6 +44,24 @@ typedef enum {
 } audio_volume_level_t;
 
 typedef struct {
+    audio_volume_level_t volume_level;
+    bool sink_enabled;
+    uint8_t parameter_number;
+} switch_preferences_t;
+
+typedef enum {
+    AUDIO_NOTIFICATION_BUTTON = 0,
+    AUDIO_NOTIFICATION_SINK_ENABLED,
+    AUDIO_NOTIFICATION_SINK_DISABLED,
+} audio_notification_kind_t;
+
+typedef struct {
+    audio_notification_kind_t kind;
+    audio_volume_level_t volume_level;
+    uint8_t repeat_count;
+} audio_notification_request_t;
+
+typedef struct {
     int64_t timestamp_us;
     float battery_voltage_v;
     bool battery_valid;
@@ -62,6 +80,9 @@ typedef struct {
     audio_volume_level_t volume_level;
     bool sink_override_active;
     bool sink_enabled_override;
+    uint8_t parameter_number;
+    uint8_t parameter_set_count;
+    bool switch_preferences_dirty;
     bool power_off_requested;
 } system_snapshot_t;
 

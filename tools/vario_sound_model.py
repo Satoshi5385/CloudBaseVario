@@ -12,8 +12,7 @@ import tempfile
 from typing import Any, Iterable, Mapping
 
 
-FORMAT_VERSION = 2
-LEGACY_FORMAT_VERSION = 1
+FORMAT_VERSION = 5
 MAX_CONFIG_FILE_BYTES = 32 * 1024
 
 
@@ -30,78 +29,119 @@ class ParameterSpec:
     audio: bool = False
 
 
+@dataclass
+class ConfigDocument:
+    parameters: dict[str, Any]
+    parameter_sets: dict[int, dict[str, Any]]
+
+    def sorted_numbers(self) -> tuple[int, ...]:
+        return tuple(sorted(self.parameter_sets))
+
+    def effective_parameters(self, parameter_number: int) -> dict[str, Any]:
+        if parameter_number not in self.parameter_sets:
+            raise ConfigError(f"unknown parameter_number: {parameter_number}")
+        values = default_parameters()
+        values.update(self.parameters)
+        values.update(self.parameter_sets[parameter_number])
+        return validate_parameters(values)
+
+    def update_profile(
+        self, parameter_number: int, values: Mapping[str, Any]
+    ) -> None:
+        checked = validate_parameters(values)
+        self.parameters = {
+            name: checked[name] for name in SHARED_PARAMETER_SPECS
+        }
+        self.parameter_sets[parameter_number] = {
+            name: checked[name] for name in PROFILE_PARAMETER_SPECS
+        }
+
+
 PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "sea_level_pressure_pa": ParameterSpec("float", 101325.0, 80000.0, 110000.0),
+    "auto_power_off_minutes": ParameterSpec("uint", 60, 0.0, 1440.0),
     "filter_mode": ParameterSpec("enum", "AUTO"),
     "i2c_reinit_error_count": ParameterSpec("uint", 10, 1.0, 100.0),
     "imu_gyro_calibration_samples": ParameterSpec("uint", 200, 50.0, 2000.0),
     "imu_mahony_kp": ParameterSpec("float", 5.0, 0.0, 20.0),
     "imu_mahony_ki": ParameterSpec("float", 0.05, 0.0, 5.0),
-    "audio_enabled": ParameterSpec("bool", True, audio=True),
-    "sink_enabled": ParameterSpec("bool", True, audio=True),
     "predictive_buzzer_enabled": ParameterSpec("bool", False, audio=True),
+    "audio_climb_rate_average_s": ParameterSpec("float", 1.0, 0.0, 10.0, True),
     "lift_start_mps": ParameterSpec("float", 0.10, -1.0, 5.0, True),
-    "lift_end_mps": ParameterSpec("float", 0.05, -1.0, 5.0, True),
-    "lift_confirm_distance_m": ParameterSpec("float", 0.5, 0.0, 10.0, True),
-    "sink_start_mps": ParameterSpec("float", -1.00, -10.0, 0.0, True),
-    "sink_end_mps": ParameterSpec("float", -0.80, -10.0, 0.0, True),
-    "sink_confirm_distance_m": ParameterSpec("float", 0.5, 0.0, 10.0, True),
-    "audio_state_hold_ms": ParameterSpec("uint", 60, 0.0, 1000.0, True),
+    "lift_end_mps": ParameterSpec("float", 0.08, -1.0, 5.0, True),
+    "sink_start_mps": ParameterSpec("float", -1.80, -10.0, 0.0, True),
+    "sink_end_mps": ParameterSpec("float", -1.70, -10.0, 0.0, True),
+    "audio_state_hold_ms": ParameterSpec("uint", 200, 0.0, 1000.0, True),
     "audio_stale_ms": ParameterSpec("uint", 500, 100.0, 500.0, True),
-    "lift_freq_base_hz": ParameterSpec("uint", 600, 200.0, 5000.0, True),
+    "lift_freq_base_hz": ParameterSpec("uint", 1047, 200.0, 5000.0, True),
     "lift_freq_rate_hz_per_mps": ParameterSpec(
         "float", 100.0, 0.0, 1000.0, True
     ),
-    "lift_freq_max_hz": ParameterSpec("uint", 1800, 200.0, 5000.0, True),
-    "lift_time_ms_at_0p2": ParameterSpec("uint", 480, 20.0, 2000.0, True),
-    "lift_time_ms_at_1p0": ParameterSpec("uint", 220, 20.0, 2000.0, True),
-    "lift_time_ms_at_2p5": ParameterSpec("uint", 100, 20.0, 2000.0, True),
-    "lift_time_ms_at_5p0": ParameterSpec("uint", 70, 70.0, 2000.0, True),
-    "sink_freq_start_hz": ParameterSpec("uint", 400, 130.0, 2000.0, True),
+    "lift_freq_max_hz": ParameterSpec("uint", 2600, 200.0, 5000.0, True),
+    "lift_time_ms_at_0p2": ParameterSpec("uint", 400, 20.0, 2000.0, True),
+    "lift_time_ms_at_1p0": ParameterSpec("uint", 400, 20.0, 2000.0, True),
+    "lift_time_ms_at_2p5": ParameterSpec("uint", 300, 20.0, 2000.0, True),
+    "lift_time_ms_at_5p0": ParameterSpec("uint", 100, 70.0, 2000.0, True),
+    "sink_freq_start_hz": ParameterSpec("uint", 523, 130.0, 2000.0, True),
     "sink_freq_rate_hz_per_mps": ParameterSpec(
-        "float", 70.0, 0.0, 500.0, True
+        "float", 40.0, 0.0, 500.0, True
     ),
-    "sink_freq_min_hz": ParameterSpec("uint", 130, 130.0, 2000.0, True),
+    "sink_freq_min_hz": ParameterSpec("uint", 240, 130.0, 2000.0, True),
     "audio_duty_percent": ParameterSpec("uint", 50, 10.0, 90.0, True),
+    "predictive_interval_ms": ParameterSpec("uint", 1000, 20.0, 2000.0, True),
+    "predictive_duration_ms": ParameterSpec("uint", 150, 10.0, 1000.0, True),
+    "predictive_min_mps": ParameterSpec("float", 0.01, -2.0, 1.0, True),
+}
+
+RUNTIME_CONTROL_SPECS: dict[str, ParameterSpec] = {
+    "audio_enabled": ParameterSpec("bool", True, audio=True),
+    "sink_enabled": ParameterSpec("bool", True, audio=True),
     "audio_amp_mode": ParameterSpec("uint", 1, 1.0, 3.0, True),
-    "predictive_freq_hz": ParameterSpec("uint", 800, 200.0, 5000.0, True),
-    "predictive_on_ms": ParameterSpec("uint", 20, 10.0, 1000.0, True),
-    "predictive_off_ms": ParameterSpec("uint", 20, 10.0, 1000.0, True),
-    "predictive_min_mps": ParameterSpec("float", -0.10, -2.0, 1.0, True),
-    "predictive_max_mps": ParameterSpec("float", 0.10, -1.0, 2.0, True),
+}
+
+MODEL_PARAMETER_SPECS = {**PARAMETER_SPECS, **RUNTIME_CONTROL_SPECS}
+
+SHARED_PARAMETER_SPECS = {
+    name: spec for name, spec in PARAMETER_SPECS.items() if not spec.audio
+}
+PROFILE_PARAMETER_SPECS = {
+    name: spec for name, spec in PARAMETER_SPECS.items() if spec.audio
 }
 
 AUDIO_PARAMETER_NAMES = tuple(
-    name for name, spec in PARAMETER_SPECS.items() if spec.audio
+    name for name, spec in MODEL_PARAMETER_SPECS.items() if spec.audio
 )
 
-LEGACY_BOARD_AXIS_PARAMETERS = frozenset(
-    {
-        "imu_accel_x_source",
-        "imu_accel_y_source",
-        "imu_accel_z_source",
-        "imu_accel_x_sign",
-        "imu_accel_y_sign",
-        "imu_accel_z_sign",
-        "imu_gyro_x_source",
-        "imu_gyro_y_source",
-        "imu_gyro_z_source",
-        "imu_gyro_x_sign",
-        "imu_gyro_y_sign",
-        "imu_gyro_z_sign",
+def default_parameters() -> dict[str, Any]:
+    return {
+        name: spec.default for name, spec in MODEL_PARAMETER_SPECS.items()
     }
-)
-
-LEGACY_VERSION_1_PARAMETERS = frozenset(
-    {"imu_accel_correction_min_g", "imu_accel_correction_max_g"}
-)
 
 
-def default_parameters(*, legacy_version: bool = False) -> dict[str, Any]:
-    values = {name: spec.default for name, spec in PARAMETER_SPECS.items()}
-    if legacy_version:
-        values["imu_mahony_ki"] = 0.0
-    return values
+def default_config_document() -> ConfigDocument:
+    values = default_parameters()
+    shared = {name: values[name] for name in SHARED_PARAMETER_SPECS}
+    profile = {name: values[name] for name in PROFILE_PARAMETER_SPECS}
+    return ConfigDocument(
+        shared,
+        {
+            1: dict(profile),
+            2: {
+                **profile,
+                "lift_start_mps": 0.20,
+                "lift_end_mps": 0.18,
+                "sink_start_mps": -2.00,
+                "sink_end_mps": -1.90,
+            },
+            3: {
+                **profile,
+                "lift_start_mps": 0.30,
+                "lift_end_mps": 0.29,
+                "sink_start_mps": -2.20,
+                "sink_end_mps": -2.10,
+            },
+        },
+    )
 
 
 def _duplicate_rejecting_object(pairs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
@@ -150,8 +190,8 @@ def _validate_scalar(name: str, value: Any, spec: ParameterSpec) -> Any:
 
 
 def validate_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
-    unknown = set(values) - set(PARAMETER_SPECS)
-    missing = set(PARAMETER_SPECS) - set(values)
+    unknown = set(values) - set(MODEL_PARAMETER_SPECS)
+    missing = set(MODEL_PARAMETER_SPECS) - set(values)
     if unknown:
         raise ConfigError(f"unknown parameter: {sorted(unknown)[0]}")
     if missing:
@@ -159,7 +199,7 @@ def validate_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
 
     checked = {
         name: _validate_scalar(name, values[name], spec)
-        for name, spec in PARAMETER_SPECS.items()
+        for name, spec in MODEL_PARAMETER_SPECS.items()
     }
     if not (
         checked["sink_start_mps"]
@@ -182,12 +222,33 @@ def validate_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
         >= checked["lift_time_ms_at_5p0"]
     ):
         raise ConfigError("lift timing control points must be non-increasing")
-    if checked["predictive_min_mps"] > checked["predictive_max_mps"]:
-        raise ConfigError("predictive_min_mps must not exceed predictive_max_mps")
+    if checked["predictive_min_mps"] > checked["lift_start_mps"]:
+        raise ConfigError("predictive_min_mps must not exceed lift_start_mps")
+    if checked["predictive_duration_ms"] > checked["predictive_interval_ms"]:
+        raise ConfigError(
+            "predictive_duration_ms must not exceed predictive_interval_ms"
+        )
     return checked
 
 
-def parse_config_text(text: str) -> dict[str, Any]:
+def _parse_parameter_values(
+    parameters: Any, expected_specs: Mapping[str, ParameterSpec]
+) -> dict[str, Any]:
+    if not isinstance(parameters, dict):
+        raise ConfigError("parameters must be an object")
+    unknown = set(parameters) - set(expected_specs)
+    missing = set(expected_specs) - set(parameters)
+    if unknown:
+        raise ConfigError(f"unknown parameter: {sorted(unknown)[0]}")
+    if missing:
+        raise ConfigError(f"missing parameter: {sorted(missing)[0]}")
+    return {
+        name: _validate_scalar(name, parameters[name], spec)
+        for name, spec in expected_specs.items()
+    }
+
+
+def parse_config_document_text(text: str) -> ConfigDocument:
     try:
         root = json.loads(
             text.lstrip("\ufeff"),
@@ -201,13 +262,8 @@ def parse_config_text(text: str) -> dict[str, Any]:
 
     if not isinstance(root, dict):
         raise ConfigError("top-level value must be an object")
-    unknown_top = set(root) - {"format_version", "parameters"}
-    if unknown_top:
-        raise ConfigError(f"unknown top-level key: {sorted(unknown_top)[0]}")
-    if set(root) != {"format_version", "parameters"}:
-        missing = {"format_version", "parameters"} - set(root)
-        raise ConfigError(f"missing top-level key: {sorted(missing)[0]}")
-
+    if "format_version" not in root:
+        raise ConfigError("missing top-level key: format_version")
     raw_version = root["format_version"]
     if (
         type(raw_version) not in (int, float)
@@ -216,28 +272,68 @@ def parse_config_text(text: str) -> dict[str, Any]:
     ):
         raise ConfigError("format_version must be an integer")
     version = int(raw_version)
-    if version not in (LEGACY_FORMAT_VERSION, FORMAT_VERSION):
+    if version != FORMAT_VERSION:
         raise ConfigError(f"unsupported format_version: {version}")
-    parameters = root["parameters"]
-    if not isinstance(parameters, dict):
-        raise ConfigError("parameters must be an object")
+    expected_keys = {"format_version", "parameters", "parameter_sets"}
+    unknown_top = set(root) - expected_keys
+    if unknown_top:
+        raise ConfigError(f"unknown top-level key: {sorted(unknown_top)[0]}")
+    missing = expected_keys - set(root)
+    if missing:
+        raise ConfigError(f"missing top-level key: {sorted(missing)[0]}")
+    shared_parameters = _parse_parameter_values(
+        root["parameters"], SHARED_PARAMETER_SPECS
+    )
+    raw_sets = root["parameter_sets"]
+    if not isinstance(raw_sets, list):
+        raise ConfigError("parameter_sets must be an array")
+    if not 1 <= len(raw_sets) <= 5:
+        raise ConfigError("parameter_sets must contain 1 to 5 sets")
+    parameter_sets: dict[int, dict[str, Any]] = {}
+    for raw_set in raw_sets:
+        if not isinstance(raw_set, dict):
+            raise ConfigError("each parameter set must be an object")
+        if set(raw_set) != {"parameter_number", "parameters"}:
+            unknown = set(raw_set) - {"parameter_number", "parameters"}
+            if unknown:
+                raise ConfigError(f"unknown profile key: {sorted(unknown)[0]}")
+            missing = {"parameter_number", "parameters"} - set(raw_set)
+            raise ConfigError(f"missing profile key: {sorted(missing)[0]}")
+        number = raw_set["parameter_number"]
+        if type(number) not in (int, float) or not math.isfinite(float(number)):
+            raise ConfigError("parameter_number must be an integer")
+        if not float(number).is_integer() or not 1 <= int(number) <= 5:
+            raise ConfigError("parameter_number must be between 1 and 5")
+        number = int(number)
+        if number in parameter_sets:
+            raise ConfigError(f"duplicate parameter_number: {number}")
+        profile_parameters = _parse_parameter_values(
+            raw_set["parameters"], PROFILE_PARAMETER_SPECS
+        )
+        validate_parameters(
+            {
+                **default_parameters(),
+                **shared_parameters,
+                **profile_parameters,
+            }
+        )
+        parameter_sets[number] = profile_parameters
+    return ConfigDocument(
+        shared_parameters, dict(sorted(parameter_sets.items()))
+    )
 
-    values = default_parameters(legacy_version=version == LEGACY_FORMAT_VERSION)
-    for name, value in parameters.items():
-        if name in LEGACY_BOARD_AXIS_PARAMETERS:
-            continue
-        if version == LEGACY_FORMAT_VERSION and name in LEGACY_VERSION_1_PARAMETERS:
-            if type(value) not in (int, float) or not math.isfinite(float(value)):
-                raise ConfigError(f"{name}: expected finite number")
-            continue
-        spec = PARAMETER_SPECS.get(name)
-        if spec is None:
-            raise ConfigError(f"unknown parameter: {name}")
-        values[name] = _validate_scalar(name, value, spec)
-    return validate_parameters(values)
+
+def parse_config_text(text: str) -> dict[str, Any]:
+    document = parse_config_document_text(text)
+    return document.effective_parameters(document.sorted_numbers()[0])
 
 
 def load_config_file(path: str | os.PathLike[str]) -> dict[str, Any]:
+    document = load_config_document_file(path)
+    return document.effective_parameters(document.sorted_numbers()[0])
+
+
+def load_config_document_file(path: str | os.PathLike[str]) -> ConfigDocument:
     try:
         contents = Path(path).read_bytes()
     except (OSError, UnicodeError) as exc:
@@ -252,26 +348,76 @@ def load_config_file(path: str | os.PathLike[str]) -> dict[str, Any]:
         text = contents.decode("utf-8-sig")
     except UnicodeError as exc:
         raise ConfigError(f"configuration file is not UTF-8: {exc}") from exc
-    return parse_config_text(text)
+    return parse_config_document_text(text)
 
 
 def config_json_text(values: Mapping[str, Any]) -> str:
     checked = validate_parameters(values)
-    document = {
+    return config_document_json_text(
+        ConfigDocument(
+            {name: checked[name] for name in SHARED_PARAMETER_SPECS},
+            {1: {name: checked[name] for name in PROFILE_PARAMETER_SPECS}},
+        )
+    )
+
+
+def config_document_json_text(document: ConfigDocument) -> str:
+    if not 1 <= len(document.parameter_sets) <= 5:
+        raise ConfigError("parameter_sets must contain 1 to 5 sets")
+    checked_shared = _parse_parameter_values(
+        document.parameters, SHARED_PARAMETER_SPECS
+    )
+    checked_sets: dict[int, dict[str, Any]] = {}
+    for number, values in document.parameter_sets.items():
+        if type(number) is not int or not 1 <= number <= 5:
+            raise ConfigError("parameter_number must be between 1 and 5")
+        checked_profile = _parse_parameter_values(
+            values, PROFILE_PARAMETER_SPECS
+        )
+        validate_parameters(
+            {**default_parameters(), **checked_shared, **checked_profile}
+        )
+        checked_sets[number] = checked_profile
+    rendered_document = {
         "format_version": FORMAT_VERSION,
-        "parameters": checked,
+        "parameters": {
+            name: checked_shared[name] for name in SHARED_PARAMETER_SPECS
+        },
+        "parameter_sets": [
+            {
+                "parameter_number": number,
+                "parameters": {
+                    name: checked_sets[number][name]
+                    for name in PROFILE_PARAMETER_SPECS
+                },
+            }
+            for number in sorted(checked_sets)
+        ],
     }
-    return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(rendered_document, ensure_ascii=False, indent=2) + "\n"
 
 
 def save_config_file(
     path: str | os.PathLike[str], values: Mapping[str, Any]
 ) -> None:
+    checked = validate_parameters(values)
+    save_config_document_file(
+        path,
+        ConfigDocument(
+            {name: checked[name] for name in SHARED_PARAMETER_SPECS},
+            {1: {name: checked[name] for name in PROFILE_PARAMETER_SPECS}},
+        ),
+    )
+
+
+def save_config_document_file(
+    path: str | os.PathLike[str], document: ConfigDocument
+) -> None:
     target = Path(path)
     parent = target.parent
     if not parent.is_dir():
         raise ConfigError(f"destination directory does not exist: {parent}")
-    rendered = config_json_text(values)
+    rendered = config_document_json_text(document)
     temporary_path: Path | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
@@ -282,8 +428,9 @@ def save_config_file(
             stream.write(rendered)
             stream.flush()
             os.fsync(stream.fileno())
-        verified = load_config_file(temporary_path)
-        if verified != validate_parameters(values):
+        verified = load_config_document_file(temporary_path)
+        expected = parse_config_document_text(rendered)
+        if verified != expected:
             raise ConfigError("saved file verification failed")
         os.replace(temporary_path, target)
         temporary_path = None
@@ -322,9 +469,10 @@ class VarioAudioState:
     mode_started_s: float = 0.0
     phase_started_s: float = 0.0
     phase_on: bool = False
-    reference_altitude_m: float = 0.0
-    vertical_direction: int = 0
-    reference_altitude_valid: bool = False
+    history: list[tuple[float, float]] = field(default_factory=list)
+    history_sum_mps: float = 0.0
+    averaged_climb_rate_mps: float = 0.0
+    averaged_climb_rate_valid: bool = False
     last_debug_input_active: bool = False
     input_source_valid: bool = False
 
@@ -344,9 +492,10 @@ def reset_audio_state(state: VarioAudioState) -> None:
     state.mode_started_s = 0.0
     state.phase_started_s = 0.0
     state.phase_on = False
-    state.reference_altitude_m = 0.0
-    state.vertical_direction = 0
-    state.reference_altitude_valid = False
+    state.history.clear()
+    state.history_sum_mps = 0.0
+    state.averaged_climb_rate_mps = 0.0
+    state.averaged_climb_rate_valid = False
     state.last_debug_input_active = False
     state.input_source_valid = False
 
@@ -407,111 +556,76 @@ def sink_frequency_hz(config: Mapping[str, Any], climb_rate_mps: float) -> int:
     return _lround_positive(max(frequency, float(config["sink_freq_min_hz"])))
 
 
-def _vertical_direction(climb_rate_mps: float) -> int:
-    if climb_rate_mps > 0.0:
-        return 1
-    if climb_rate_mps < 0.0:
-        return -1
-    return 0
+def _clear_history(state: VarioAudioState) -> None:
+    state.history.clear()
+    state.history_sum_mps = 0.0
+    state.averaged_climb_rate_mps = 0.0
+    state.averaged_climb_rate_valid = False
 
 
-def _clear_altitude_reference(state: VarioAudioState) -> None:
-    state.reference_altitude_m = 0.0
-    state.vertical_direction = 0
-    state.reference_altitude_valid = False
-
-
-def _update_altitude_reference(state: VarioAudioState, sample: VarioSample) -> None:
-    if (
-        not state.input_source_valid
-        or state.last_debug_input_active != sample.debug_input_active
-    ):
-        _clear_altitude_reference(state)
-        state.last_debug_input_active = sample.debug_input_active
-        state.input_source_valid = True
-    if (
-        not sample.estimate_valid
-        or not sample.climb_rate_valid
-        or not math.isfinite(sample.altitude_m)
-        or not math.isfinite(sample.climb_rate_mps)
-    ):
-        _clear_altitude_reference(state)
-        return
-
-    direction = _vertical_direction(sample.climb_rate_mps)
-    if not state.reference_altitude_valid:
-        state.reference_altitude_m = sample.altitude_m
-        state.vertical_direction = direction
-        state.reference_altitude_valid = True
-        return
-    if direction == 0:
-        return
-    if state.vertical_direction != 0 and direction != state.vertical_direction:
-        state.reference_altitude_m = sample.altitude_m
-    state.vertical_direction = direction
-
-
-def _lift_distance_confirmed(
+def _averaged_climb_rate(
     state: VarioAudioState, config: Mapping[str, Any], sample: VarioSample
-) -> bool:
-    distance = float(config["lift_confirm_distance_m"])
-    if distance == 0.0:
-        return True
-    return (
-        state.reference_altitude_valid
-        and sample.estimate_valid
-        and math.isfinite(sample.altitude_m)
-        and sample.altitude_m - state.reference_altitude_m > distance
-    )
+) -> float:
+    window_s = float(config["audio_climb_rate_average_s"])
+    if window_s == 0.0:
+        _clear_history(state)
+        state.averaged_climb_rate_mps = sample.climb_rate_mps
+        state.averaged_climb_rate_valid = True
+        return sample.climb_rate_mps
 
-
-def _sink_distance_confirmed(
-    state: VarioAudioState, config: Mapping[str, Any], sample: VarioSample
-) -> bool:
-    distance = float(config["sink_confirm_distance_m"])
-    if distance == 0.0:
-        return True
-    return (
-        state.reference_altitude_valid
-        and sample.estimate_valid
-        and math.isfinite(sample.altitude_m)
-        and state.reference_altitude_m - sample.altitude_m > distance
-    )
+    if state.history:
+        last_timestamp_s = state.history[-1][0]
+        if sample.timestamp_s < last_timestamp_s:
+            _clear_history(state)
+        elif sample.timestamp_s == last_timestamp_s:
+            return state.averaged_climb_rate_mps
+    state.history.append((sample.timestamp_s, sample.climb_rate_mps))
+    state.history_sum_mps += sample.climb_rate_mps
+    while len(state.history) > 1 and sample.timestamp_s - state.history[0][0] > window_s:
+        _, oldest_rate = state.history.pop(0)
+        state.history_sum_mps -= oldest_rate
+    state.averaged_climb_rate_mps = state.history_sum_mps / len(state.history)
+    state.averaged_climb_rate_valid = True
+    return state.averaged_climb_rate_mps
 
 
 def _requested_mode(
-    state: VarioAudioState, config: Mapping[str, Any], sample: VarioSample
+    state: VarioAudioState, config: Mapping[str, Any], rate: float
 ) -> AudioMode:
-    rate = sample.climb_rate_mps
     if state.mode == AudioMode.LIFT:
-        return AudioMode.SILENT if rate < config["lift_end_mps"] else AudioMode.LIFT
+        if rate < config["lift_end_mps"]:
+            if (
+                config["predictive_buzzer_enabled"]
+                and rate >= config["predictive_min_mps"]
+            ):
+                return AudioMode.PREDICTIVE
+            return AudioMode.SILENT
+        return AudioMode.LIFT
     if state.mode == AudioMode.SINK:
         if not config["sink_enabled"] or rate > config["sink_end_mps"]:
             return AudioMode.SILENT
         return AudioMode.SINK
     if state.mode == AudioMode.PREDICTIVE:
+        if rate > config["lift_start_mps"]:
+            return AudioMode.LIFT
         if (
             not config["predictive_buzzer_enabled"]
             or rate < config["predictive_min_mps"]
-            or rate > config["predictive_max_mps"]
         ):
             return AudioMode.SILENT
         return AudioMode.PREDICTIVE
 
-    if rate > config["lift_start_mps"] and _lift_distance_confirmed(
-        state, config, sample
-    ):
+    if rate > config["lift_start_mps"]:
         return AudioMode.LIFT
     if (
         config["sink_enabled"]
         and rate < config["sink_start_mps"]
-        and _sink_distance_confirmed(state, config, sample)
     ):
         return AudioMode.SINK
     if (
         config["predictive_buzzer_enabled"]
         and rate >= config["predictive_min_mps"]
-        and rate <= config["predictive_max_mps"]
+        and rate <= config["lift_start_mps"]
     ):
         return AudioMode.PREDICTIVE
     return AudioMode.SILENT
@@ -535,17 +649,36 @@ def vario_audio_step(
         reset_audio_state(state)
         return VarioAudioCommand()
 
-    _update_altitude_reference(state, sample)
-    requested = _requested_mode(state, config, sample)
-    if state.mode == AudioMode.LIFT and requested != AudioMode.LIFT and state.phase_on:
-        phase_s = lift_phase_time_ms(config, sample.climb_rate_mps) / 1000.0
+    if (
+        not state.input_source_valid
+        or state.last_debug_input_active != sample.debug_input_active
+    ):
+        _clear_history(state)
+        state.last_debug_input_active = sample.debug_input_active
+        state.input_source_valid = True
+    rate = _averaged_climb_rate(state, config, sample)
+    requested = _requested_mode(state, config, rate)
+    if (
+        state.mode == AudioMode.LIFT
+        and requested not in (AudioMode.LIFT, AudioMode.PREDICTIVE)
+        and state.phase_on
+    ):
+        phase_s = lift_phase_time_ms(config, rate) / 1000.0
         elapsed_s = now_s - state.phase_started_s
         if 0.0 <= elapsed_s < phase_s:
             requested = AudioMode.LIFT
 
     if requested != state.mode:
         held_s = now_s - state.mode_started_s
-        if state.mode_started_s == 0.0 or held_s >= config["audio_state_hold_ms"] / 1000.0:
+        predictive_lift_transition = {
+            state.mode,
+            requested,
+        } == {AudioMode.PREDICTIVE, AudioMode.LIFT}
+        if (
+            predictive_lift_transition
+            or state.mode_started_s == 0.0
+            or held_s >= config["audio_state_hold_ms"] / 1000.0
+        ):
             state.mode = requested
             state.mode_started_s = now_s
             state.phase_started_s = now_s
@@ -554,7 +687,7 @@ def vario_audio_step(
     duty = int(config["audio_duty_percent"])
     amplifier = int(config["audio_amp_mode"])
     if state.mode == AudioMode.LIFT:
-        phase_ms = lift_phase_time_ms(config, sample.climb_rate_mps)
+        phase_ms = lift_phase_time_ms(config, rate)
         phase_s = phase_ms / 1000.0
         elapsed_s = now_s - state.phase_started_s
         if elapsed_s >= phase_s:
@@ -565,7 +698,7 @@ def vario_audio_step(
         return VarioAudioCommand(
             state.mode,
             state.phase_on,
-            lift_frequency_hz(config, sample.climb_rate_mps),
+            lift_frequency_hz(config, rate),
             duty,
             amplifier,
             phase_ms,
@@ -574,27 +707,23 @@ def vario_audio_step(
         return VarioAudioCommand(
             state.mode,
             True,
-            sink_frequency_hz(config, sample.climb_rate_mps),
+            sink_frequency_hz(config, rate),
             duty,
             amplifier,
             0,
         )
     if state.mode == AudioMode.PREDICTIVE:
-        phase_ms = int(
-            config["predictive_on_ms"]
-            if state.phase_on
-            else config["predictive_off_ms"]
-        )
-        if now_s - state.phase_started_s >= phase_ms / 1000.0:
-            state.phase_on = not state.phase_on
-            state.phase_started_s = now_s
+        interval_ms = int(config["predictive_interval_ms"])
+        duration_ms = int(config["predictive_duration_ms"])
+        elapsed_ms = max((now_s - state.phase_started_s) * 1000.0, 0.0)
+        state.phase_on = elapsed_ms % interval_ms < duration_ms
         return VarioAudioCommand(
             state.mode,
             state.phase_on,
-            int(config["predictive_freq_hz"]),
+            lift_frequency_hz(config, rate),
             duty,
             amplifier,
-            phase_ms,
+            duration_ms if state.phase_on else interval_ms - duration_ms,
         )
     return VarioAudioCommand(
         AudioMode.SILENT, False, 0, duty, amplifier, 0

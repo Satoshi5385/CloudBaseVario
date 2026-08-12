@@ -23,34 +23,44 @@ else:
 try:
     from .vario_sound_model import (
         AUDIO_PARAMETER_NAMES,
+        MODEL_PARAMETER_SPECS,
         PARAMETER_SPECS,
+        PROFILE_PARAMETER_SPECS,
+        SHARED_PARAMETER_SPECS,
         AudioMode,
+        ConfigDocument,
         ConfigError,
         PwmWaveform,
         VarioAudioCommand,
         VarioAudioState,
         VarioSample,
+        default_config_document,
         default_parameters,
-        load_config_file,
+        load_config_document_file,
         reset_audio_state,
-        save_config_file,
+        save_config_document_file,
         validate_parameters,
         vario_audio_step,
     )
 except ImportError:
     from vario_sound_model import (
         AUDIO_PARAMETER_NAMES,
+        MODEL_PARAMETER_SPECS,
         PARAMETER_SPECS,
+        PROFILE_PARAMETER_SPECS,
+        SHARED_PARAMETER_SPECS,
         AudioMode,
+        ConfigDocument,
         ConfigError,
         PwmWaveform,
         VarioAudioCommand,
         VarioAudioState,
         VarioSample,
+        default_config_document,
         default_parameters,
-        load_config_file,
+        load_config_document_file,
         reset_audio_state,
-        save_config_file,
+        save_config_document_file,
         validate_parameters,
         vario_audio_step,
     )
@@ -79,6 +89,7 @@ PARAMETER_GROUPS = (
         "General",
         (
             "audio_enabled",
+            "audio_climb_rate_average_s",
             "audio_state_hold_ms",
             "audio_stale_ms",
         ),
@@ -88,7 +99,6 @@ PARAMETER_GROUPS = (
         (
             "lift_start_mps",
             "lift_end_mps",
-            "lift_confirm_distance_m",
         ),
     ),
     (
@@ -109,7 +119,6 @@ PARAMETER_GROUPS = (
             "sink_enabled",
             "sink_start_mps",
             "sink_end_mps",
-            "sink_confirm_distance_m",
             "sink_freq_start_hz",
             "sink_freq_rate_hz_per_mps",
             "sink_freq_min_hz",
@@ -120,10 +129,8 @@ PARAMETER_GROUPS = (
         (
             "predictive_buzzer_enabled",
             "predictive_min_mps",
-            "predictive_max_mps",
-            "predictive_freq_hz",
-            "predictive_on_ms",
-            "predictive_off_ms",
+            "predictive_interval_ms",
+            "predictive_duration_ms",
         ),
     ),
     (
@@ -226,8 +233,10 @@ class VarioSoundSimulatorApp:
         self.audio_engine = AudioEngine()
         self.audio_state = VarioAudioState()
         self.command = VarioAudioCommand()
-        self.values = validate_parameters(default_parameters())
-        self.saved_values: dict[str, Any] | None = None
+        self.document = default_config_document()
+        self.values = self.document.effective_parameters(1)
+        self.saved_document: ConfigDocument | None = None
+        self.active_parameter_number = 1
         self.current_path: Path | None = None
         self.parameter_vars: dict[str, tk.Variable] = {}
         self.validation_after: str | None = None
@@ -240,7 +249,8 @@ class VarioSoundSimulatorApp:
         self.climb_rate_mps = 0.0
         self.last_tick_s = time.monotonic()
 
-        self.file_var = tk.StringVar(value="New version 2 configuration")
+        self.file_var = tk.StringVar(value="New version 5 configuration")
+        self.parameter_number_var = tk.StringVar(value="1")
         self.validation_var = tk.StringVar(value="Configuration is valid")
         self.rate_entry_var = tk.StringVar(value="0.00")
         self.rate_scale_var = tk.DoubleVar(value=0.0)
@@ -251,8 +261,8 @@ class VarioSoundSimulatorApp:
         self.output_var = tk.StringVar(value="OFF")
         self.frequency_var = tk.StringVar(value="-- Hz")
         self.altitude_var = tk.StringVar(value="0.000 m")
-        self.reference_var = tk.StringVar(value="--")
-        self.confirmation_var = tk.StringVar(value="--")
+        self.instant_rate_var = tk.StringVar(value="0.000 m/s")
+        self.average_rate_var = tk.StringVar(value="-- m/s")
         self.audio_status_var = tk.StringVar(value="Default output device")
 
         self._configure_style()
@@ -341,6 +351,16 @@ class VarioSoundSimulatorApp:
             bar, text="Save As...", command=self._save_configuration_as
         )
         self.save_as_button.pack(side="left", padx=(6, 0))
+        ttk.Label(bar, text="Parameter set", style="Muted.TLabel").pack(
+            side="left", padx=(18, 6)
+        )
+        self.parameter_number_combo = ttk.Combobox(
+            bar, textvariable=self.parameter_number_var, state="readonly", width=4
+        )
+        self.parameter_number_combo.pack(side="left")
+        self.parameter_number_combo.bind(
+            "<<ComboboxSelected>>", self._parameter_set_changed
+        )
         ttk.Label(bar, textvariable=self.file_var, style="Muted.TLabel").pack(
             side="left", padx=(18, 0), fill="x", expand=True
         )
@@ -362,8 +382,13 @@ class VarioSoundSimulatorApp:
             notebook.add(page, text=group_name)
             page.grid_columnconfigure(1, weight=1)
             for row, name in enumerate(names):
-                spec = PARAMETER_SPECS[name]
-                ttk.Label(page, text=name, style="Panel.TLabel").grid(
+                spec = MODEL_PARAMETER_SPECS[name]
+                display_name = (
+                    f"{name} (runtime only)"
+                    if name not in PARAMETER_SPECS
+                    else name
+                )
+                ttk.Label(page, text=display_name, style="Panel.TLabel").grid(
                     row=row,
                     column=0,
                     sticky="w",
@@ -459,8 +484,8 @@ class VarioSoundSimulatorApp:
             ("Output phase", self.output_var),
             ("Frequency", self.frequency_var),
             ("Virtual altitude", self.altitude_var),
-            ("Reference altitude", self.reference_var),
-            ("Confirmation distance", self.confirmation_var),
+            ("Input climb rate", self.instant_rate_var),
+            ("Audio average rate", self.average_rate_var),
         )
         for row, (label, variable) in enumerate(rows):
             ttk.Label(status, text=label, style="Panel.TLabel").grid(
@@ -482,7 +507,7 @@ class VarioSoundSimulatorApp:
             text=(
                 "The volume slider is PC playback gain and is not saved. "
                 "audio_duty_percent changes the rectangular waveform; "
-                "audio_amp_mode approximates the PAM8904E 1x/2x/3x levels."
+                "Runtime Amplifier mode approximates the PAM8904E 1x/2x/3x levels."
             ),
             bg=COLOR_PANEL,
             fg=COLOR_MUTED,
@@ -524,7 +549,7 @@ class VarioSoundSimulatorApp:
         candidate = dict(self.values)
         try:
             for name, variable in self.parameter_vars.items():
-                spec = PARAMETER_SPECS[name]
+                spec = MODEL_PARAMETER_SPECS[name]
                 if spec.kind == "bool":
                     candidate[name] = bool(variable.get())
                     continue
@@ -543,7 +568,11 @@ class VarioSoundSimulatorApp:
             self._set_validation(str(exc), False)
         else:
             self.editor_valid = True
-            self.dirty = self.saved_values is None or self.values != self.saved_values
+            self.document.update_profile(self.active_parameter_number, self.values)
+            self.dirty = (
+                self.saved_document is None
+                or self.document != self.saved_document
+            )
             self._set_validation("Configuration is valid; preview updated", True)
             self._update_title()
         self._update_save_controls()
@@ -568,10 +597,14 @@ class VarioSoundSimulatorApp:
         if not self._confirm_discard():
             return
         self.current_path = None
-        self.saved_values = None
+        self.document = default_config_document()
+        values = self.document.effective_parameters(1)
+        self.saved_document = None
+        self.active_parameter_number = 1
         self.dirty = True
-        self.file_var.set("New version 2 configuration")
-        self._load_values_into_editor(default_parameters())
+        self.file_var.set("New version 5 configuration")
+        self._refresh_parameter_number_selector()
+        self._load_values_into_editor(values)
         self._reset_simulation()
         self._update_title()
         self._update_save_controls()
@@ -586,15 +619,26 @@ class VarioSoundSimulatorApp:
         if not filename:
             return
         try:
-            values = load_config_file(filename)
+            document = load_config_document_file(filename)
         except ConfigError as exc:
             messagebox.showerror(APP_TITLE, f"Could not open configuration:\n{exc}")
             return
         self.current_path = Path(filename)
-        self.saved_values = dict(values)
+        self.document = ConfigDocument(
+            dict(document.parameters),
+            {number: dict(values) for number, values in document.parameter_sets.items()}
+        )
+        self.saved_document = ConfigDocument(
+            dict(document.parameters),
+            {number: dict(values) for number, values in document.parameter_sets.items()}
+        )
+        self.active_parameter_number = document.sorted_numbers()[0]
         self.dirty = False
         self.file_var.set(str(self.current_path))
-        self._load_values_into_editor(values)
+        self._refresh_parameter_number_selector()
+        self._load_values_into_editor(
+            self.document.effective_parameters(self.active_parameter_number)
+        )
         self._reset_simulation()
         self._update_title()
         self._update_save_controls()
@@ -632,16 +676,43 @@ class VarioSoundSimulatorApp:
 
     def _save_to_path(self, path: Path) -> None:
         try:
-            save_config_file(path, self.values)
+            self.document.update_profile(self.active_parameter_number, self.values)
+            save_config_document_file(path, self.document)
         except ConfigError as exc:
             messagebox.showerror(APP_TITLE, f"Could not save configuration:\n{exc}")
             return
         self.current_path = path
-        self.saved_values = dict(self.values)
+        self.saved_document = ConfigDocument(
+            dict(self.document.parameters),
+            {
+                number: dict(values)
+                for number, values in self.document.parameter_sets.items()
+            }
+        )
         self.dirty = False
         self.file_var.set(str(path))
-        self._set_validation("Saved and verified as format_version 2", True)
+        self._set_validation("Saved and verified as format_version 5", True)
         self._update_title()
+
+    def _refresh_parameter_number_selector(self) -> None:
+        numbers = tuple(str(number) for number in self.document.sorted_numbers())
+        self.parameter_number_combo.configure(values=numbers)
+        self.parameter_number_var.set(str(self.active_parameter_number))
+
+    def _parameter_set_changed(self, _event: Any = None) -> None:
+        self._validate_editor()
+        if not self.editor_valid:
+            self.parameter_number_var.set(str(self.active_parameter_number))
+            return
+        requested = int(self.parameter_number_var.get())
+        if requested == self.active_parameter_number:
+            return
+        self.document.update_profile(self.active_parameter_number, self.values)
+        self.active_parameter_number = requested
+        self._load_values_into_editor(
+            self.document.effective_parameters(requested)
+        )
+        self._reset_simulation()
 
     def _update_title(self) -> None:
         name = self.current_path.name if self.current_path else "Untitled"
@@ -731,26 +802,13 @@ class VarioSoundSimulatorApp:
             f"{self.command.frequency_hz} Hz" if self.command.frequency_hz else "-- Hz"
         )
         self.altitude_var.set(f"{self.virtual_altitude_m:.3f} m")
-        if self.audio_state.reference_altitude_valid:
-            reference = self.audio_state.reference_altitude_m
-            self.reference_var.set(f"{reference:.3f} m")
-            if self.climb_rate_mps > 0.0:
-                actual = self.virtual_altitude_m - reference
-                required = float(self.values["lift_confirm_distance_m"])
-                direction = "lift"
-            elif self.climb_rate_mps < 0.0:
-                actual = reference - self.virtual_altitude_m
-                required = float(self.values["sink_confirm_distance_m"])
-                direction = "sink"
-            else:
-                self.confirmation_var.set("0 m/s — reference held")
-                return
-            self.confirmation_var.set(
-                f"{direction}: {actual:.3f} / {required:.3f} m (requires >)"
+        self.instant_rate_var.set(f"{self.climb_rate_mps:.3f} m/s")
+        if self.audio_state.averaged_climb_rate_valid:
+            self.average_rate_var.set(
+                f"{self.audio_state.averaged_climb_rate_mps:.3f} m/s"
             )
         else:
-            self.reference_var.set("--")
-            self.confirmation_var.set("--")
+            self.average_rate_var.set("-- m/s")
 
     def _close(self) -> None:
         if not self._confirm_discard():

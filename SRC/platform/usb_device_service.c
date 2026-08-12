@@ -54,7 +54,7 @@ static usb_device_diagnostics_t usb_diagnostics = {
     .config = {
         .source = CONFIG_SOURCE_BUILTIN_DEFAULT,
         .validation = CONFIG_VALIDATION_IO_ERROR,
-        .format_version = 2,
+        .format_version = CONFIG_FORMAT_VERSION,
     },
     .last_storage_error = ESP_ERR_INVALID_STATE,
     .last_save_result = ESP_ERR_INVALID_STATE,
@@ -264,7 +264,7 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
     }
 }
 
-esp_err_t usb_device_storage_init(app_config_t *config,
+esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
                                   bool format_config_storage) {
     esp_vfs_fat_mount_config_t mount_config = {
         .format_if_mount_failed = false,
@@ -278,10 +278,10 @@ esp_err_t usb_device_storage_init(app_config_t *config,
     esp_err_t storage_error;
     esp_err_t ret;
 
-    if (config == NULL) {
+    if (profiles == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    app_config_set_defaults(config);
+    app_config_profiles_set_defaults(profiles);
 
     storage_io_mutex = xSemaphoreCreateMutex();
     if (storage_io_mutex == NULL) {
@@ -340,9 +340,10 @@ esp_err_t usb_device_storage_init(app_config_t *config,
     }
 
     usb_diagnostics.load_result =
-        config_storage_load(CONFIG_MOUNT_PATH, config, &usb_diagnostics.config);
+        config_storage_load(CONFIG_MOUNT_PATH, profiles,
+                            &usb_diagnostics.config);
     if (usb_diagnostics.load_result == CONFIG_LOAD_DEFAULT_NO_FILE) {
-        ret = config_storage_save(CONFIG_MOUNT_PATH, config);
+        ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "default parameters.json generation failed: %s",
                      esp_err_to_name(ret));
@@ -606,15 +607,15 @@ void usb_device_storage_end_app_io(void) {
     }
 }
 
-esp_err_t usb_device_save_config(const app_config_t *config) {
+esp_err_t usb_device_save_config(const app_config_profiles_t *profiles) {
     esp_err_t ret;
 
-    if (config == NULL) {
+    if (profiles == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     ret = usb_device_storage_begin_app_io(STORAGE_MUTEX_TIMEOUT_MS);
     if (ret == ESP_OK) {
-        ret = config_storage_save(CONFIG_MOUNT_PATH, config);
+        ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
         usb_device_storage_end_app_io();
     }
     portENTER_CRITICAL(&state_lock);

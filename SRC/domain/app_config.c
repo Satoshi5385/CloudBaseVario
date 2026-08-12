@@ -11,30 +11,31 @@
 typedef struct {
     const char *name;
     app_parameter_type_t type;
+    app_parameter_scope_t scope;
     size_t offset;
     app_parameter_value_t default_value;
     double minimum;
     double maximum;
 } app_parameter_descriptor_t;
 
-#define PARAM_BOOL(member, default_value_)                                                      \
+#define PARAM_BOOL(member, default_value_, scope_)                                              \
     {                                                                                            \
-        #member, APP_PARAMETER_BOOL, offsetof(app_config_t, member),                             \
+        #member, APP_PARAMETER_BOOL, (scope_), offsetof(app_config_t, member),                   \
             {.boolean = (default_value_)}, 0.0, 1.0                                             \
     }
-#define PARAM_UINT(member, default_value_, minimum_, maximum_)                                   \
+#define PARAM_UINT(member, default_value_, minimum_, maximum_, scope_)                           \
     {                                                                                            \
-        #member, APP_PARAMETER_UINT32, offsetof(app_config_t, member),                           \
+        #member, APP_PARAMETER_UINT32, (scope_), offsetof(app_config_t, member),                 \
             {.uint32 = UINT32_C(default_value_)}, (minimum_), (maximum_)                         \
     }
-#define PARAM_FLOAT(member, default_value_, minimum_, maximum_)                                  \
+#define PARAM_FLOAT(member, default_value_, minimum_, maximum_, scope_)                          \
     {                                                                                            \
-        #member, APP_PARAMETER_FLOAT, offsetof(app_config_t, member),                            \
+        #member, APP_PARAMETER_FLOAT, (scope_), offsetof(app_config_t, member),                  \
             {.real = (default_value_)}, (minimum_), (maximum_)                                  \
     }
-#define PARAM_ENUM(member, default_value_)                                                       \
+#define PARAM_ENUM(member, default_value_, scope_)                                               \
     {                                                                                            \
-        #member, APP_PARAMETER_ENUM, offsetof(app_config_t, member),                             \
+        #member, APP_PARAMETER_ENUM, (scope_), offsetof(app_config_t, member),                   \
             {.filter_mode = (default_value_)}, APP_FILTER_MODE_AUTO, APP_FILTER_MODE_BARO_ONLY   \
     }
 
@@ -43,40 +44,35 @@ typedef struct {
  * ranges.
  */
 static const app_parameter_descriptor_t parameter_table[] = {
-    PARAM_FLOAT(sea_level_pressure_pa, 101325.0f, 80000.0, 110000.0),
-    PARAM_ENUM(filter_mode, APP_FILTER_MODE_AUTO),
-    PARAM_UINT(i2c_reinit_error_count, 10, 1.0, 100.0),
-    PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0),
-    PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0),
-    PARAM_FLOAT(imu_mahony_ki, 0.05f, 0.0, 5.0),
-    PARAM_BOOL(audio_enabled, true),
-    PARAM_BOOL(sink_enabled, true),
-    PARAM_BOOL(predictive_buzzer_enabled, false),
-    PARAM_FLOAT(lift_start_mps, 0.10f, -1.0, 5.0),
-    PARAM_FLOAT(lift_end_mps, 0.05f, -1.0, 5.0),
-    PARAM_FLOAT(lift_confirm_distance_m, 0.5f, 0.0, 10.0),
-    PARAM_FLOAT(sink_start_mps, -1.00f, -10.0, 0.0),
-    PARAM_FLOAT(sink_end_mps, -0.80f, -10.0, 0.0),
-    PARAM_FLOAT(sink_confirm_distance_m, 0.5f, 0.0, 10.0),
-    PARAM_UINT(audio_state_hold_ms, 60, 0.0, 1000.0),
-    PARAM_UINT(audio_stale_ms, 500, 100.0, 500.0),
-    PARAM_UINT(lift_freq_base_hz, 600, 200.0, 5000.0),
-    PARAM_FLOAT(lift_freq_rate_hz_per_mps, 100.0f, 0.0, 1000.0),
-    PARAM_UINT(lift_freq_max_hz, 1800, 200.0, 5000.0),
-    PARAM_UINT(lift_time_ms_at_0p2, 480, 20.0, 2000.0),
-    PARAM_UINT(lift_time_ms_at_1p0, 220, 20.0, 2000.0),
-    PARAM_UINT(lift_time_ms_at_2p5, 100, 20.0, 2000.0),
-    PARAM_UINT(lift_time_ms_at_5p0, 70, 70.0, 2000.0),
-    PARAM_UINT(sink_freq_start_hz, 400, 130.0, 2000.0),
-    PARAM_FLOAT(sink_freq_rate_hz_per_mps, 70.0f, 0.0, 500.0),
-    PARAM_UINT(sink_freq_min_hz, 130, 130.0, 2000.0),
-    PARAM_UINT(audio_duty_percent, 50, 10.0, 90.0),
-    PARAM_UINT(audio_amp_mode, 1, 1.0, 3.0),
-    PARAM_UINT(predictive_freq_hz, 800, 200.0, 5000.0),
-    PARAM_UINT(predictive_on_ms, 20, 10.0, 1000.0),
-    PARAM_UINT(predictive_off_ms, 20, 10.0, 1000.0),
-    PARAM_FLOAT(predictive_min_mps, -0.10f, -2.0, 1.0),
-    PARAM_FLOAT(predictive_max_mps, 0.10f, -1.0, 2.0),
+    PARAM_FLOAT(sea_level_pressure_pa, 101325.0f, 80000.0, 110000.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_UINT(auto_power_off_minutes, 60, 0.0, 1440.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_ENUM(filter_mode, APP_FILTER_MODE_AUTO, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_UINT(i2c_reinit_error_count, 10, 1.0, 100.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_FLOAT(imu_mahony_ki, 0.05f, 0.0, 5.0, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_BOOL(predictive_buzzer_enabled, false, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(audio_climb_rate_average_s, 1.0f, 0.0, 10.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(lift_start_mps, 0.10f, -1.0, 5.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(lift_end_mps, 0.08f, -1.0, 5.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(sink_start_mps, -1.80f, -10.0, 0.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(sink_end_mps, -1.70f, -10.0, 0.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(audio_state_hold_ms, 200, 0.0, 1000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(audio_stale_ms, 500, 100.0, 500.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_freq_base_hz, 1047, 200.0, 5000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(lift_freq_rate_hz_per_mps, 100.0f, 0.0, 1000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_freq_max_hz, 2600, 200.0, 5000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_time_ms_at_0p2, 400, 20.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_time_ms_at_1p0, 400, 20.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_time_ms_at_2p5, 300, 20.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(lift_time_ms_at_5p0, 100, 70.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(sink_freq_start_hz, 523, 130.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(sink_freq_rate_hz_per_mps, 40.0f, 0.0, 500.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(sink_freq_min_hz, 240, 130.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(audio_duty_percent, 50, 10.0, 90.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(predictive_interval_ms, 1000, 20.0, 2000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_UINT(predictive_duration_ms, 150, 10.0, 1000.0, APP_PARAMETER_SCOPE_PROFILE),
+    PARAM_FLOAT(predictive_min_mps, 0.01f, -2.0, 1.0, APP_PARAMETER_SCOPE_PROFILE),
 };
 
 static const app_parameter_descriptor_t *find_parameter(const char *name,
@@ -154,6 +150,10 @@ void app_config_set_defaults(app_config_t *config) {
     }
 
     memset(config, 0, sizeof(*config));
+    /* SW1/SW2 own these runtime-only values; they are not public parameters. */
+    config->audio_enabled = true;
+    config->sink_enabled = true;
+    config->audio_amp_mode = 1U;
     for (size_t index = 0U;
          index < sizeof(parameter_table) / sizeof(parameter_table[0]); index++) {
         write_value(config, &parameter_table[index],
@@ -161,8 +161,176 @@ void app_config_set_defaults(app_config_t *config) {
     }
 }
 
+void app_config_set_profile_defaults(app_config_t *config,
+                                     uint8_t parameter_number) {
+    app_config_set_defaults(config);
+    if (config == NULL) {
+        return;
+    }
+    if (parameter_number == 2U) {
+        config->lift_start_mps = 0.20f;
+        config->lift_end_mps = 0.18f;
+        config->sink_start_mps = -2.00f;
+        config->sink_end_mps = -1.90f;
+    } else if (parameter_number == 3U) {
+        config->lift_start_mps = 0.30f;
+        config->lift_end_mps = 0.29f;
+        config->sink_start_mps = -2.20f;
+        config->sink_end_mps = -2.10f;
+    }
+}
+
+void app_config_profiles_set_defaults(app_config_profiles_t *profiles) {
+    if (profiles == NULL) {
+        return;
+    }
+    memset(profiles, 0, sizeof(*profiles));
+    app_config_set_defaults(&profiles->shared_config);
+    profiles->count = 3U;
+    for (size_t index = 0U; index < profiles->count; index++) {
+        profiles->profiles[index].parameter_number =
+            (uint8_t) (APP_CONFIG_PROFILE_MIN_NUMBER + index);
+        app_config_set_profile_defaults(&profiles->profiles[index].config,
+                                        profiles->profiles[index].parameter_number);
+    }
+}
+
+bool app_config_profiles_validate(const app_config_profiles_t *profiles) {
+    bool seen[APP_CONFIG_PROFILE_MAX_NUMBER + 1U] = {false};
+    app_config_t effective = {0};
+
+    if (profiles == NULL || profiles->count == 0U ||
+        profiles->count > APP_CONFIG_PROFILE_MAX_COUNT) {
+        return false;
+    }
+    for (size_t index = 0U; index < profiles->count; index++) {
+        uint8_t number = profiles->profiles[index].parameter_number;
+
+        if (number < APP_CONFIG_PROFILE_MIN_NUMBER ||
+            number > APP_CONFIG_PROFILE_MAX_NUMBER || seen[number] ||
+            !app_config_profiles_get_config(profiles, index, &effective) ||
+            !app_config_validate(&effective)) {
+            return false;
+        }
+        seen[number] = true;
+    }
+    return true;
+}
+
+static void copy_parameter_scope(app_config_t *destination,
+                                 const app_config_t *source,
+                                 app_parameter_scope_t scope) {
+    if (destination == NULL || source == NULL) {
+        return;
+    }
+    for (size_t index = 0U; index < app_config_parameter_count(); index++) {
+        const app_parameter_descriptor_t *descriptor = &parameter_table[index];
+        const uint8_t *source_value =
+            (const uint8_t *) source + descriptor->offset;
+        uint8_t *destination_value =
+            (uint8_t *) destination + descriptor->offset;
+        size_t value_size = 0U;
+
+        if (descriptor->scope != scope) {
+            continue;
+        }
+        switch (descriptor->type) {
+        case APP_PARAMETER_BOOL:
+            value_size = sizeof(bool);
+            break;
+        case APP_PARAMETER_UINT32:
+            value_size = sizeof(uint32_t);
+            break;
+        case APP_PARAMETER_FLOAT:
+            value_size = sizeof(float);
+            break;
+        case APP_PARAMETER_ENUM:
+            value_size = sizeof(app_filter_mode_t);
+            break;
+        default:
+            continue;
+        }
+        memcpy(destination_value, source_value, value_size);
+    }
+}
+
+bool app_config_profiles_get_config(const app_config_profiles_t *profiles,
+                                    size_t profile_index,
+                                    app_config_t *config) {
+    if (profiles == NULL || config == NULL || profile_index >= profiles->count) {
+        return false;
+    }
+    app_config_set_defaults(config);
+    copy_parameter_scope(config, &profiles->shared_config,
+                         APP_PARAMETER_SCOPE_SHARED);
+    copy_parameter_scope(config, &profiles->profiles[profile_index].config,
+                         APP_PARAMETER_SCOPE_PROFILE);
+    return true;
+}
+
+bool app_config_profiles_set_config(app_config_profiles_t *profiles,
+                                    size_t profile_index,
+                                    const app_config_t *config) {
+    if (profiles == NULL || config == NULL || profile_index >= profiles->count ||
+        !app_config_validate(config)) {
+        return false;
+    }
+    copy_parameter_scope(&profiles->shared_config, config,
+                         APP_PARAMETER_SCOPE_SHARED);
+    copy_parameter_scope(&profiles->profiles[profile_index].config, config,
+                         APP_PARAMETER_SCOPE_PROFILE);
+    return true;
+}
+
+void app_config_profiles_sort(app_config_profiles_t *profiles) {
+    if (profiles == NULL) {
+        return;
+    }
+    for (size_t index = 1U; index < profiles->count; index++) {
+        app_config_profile_t value = profiles->profiles[index];
+        size_t destination = index;
+
+        while (destination > 0U &&
+               profiles->profiles[destination - 1U].parameter_number >
+                   value.parameter_number) {
+            profiles->profiles[destination] =
+                profiles->profiles[destination - 1U];
+            destination--;
+        }
+        profiles->profiles[destination] = value;
+    }
+}
+
+bool app_config_profiles_find(const app_config_profiles_t *profiles,
+                              uint8_t parameter_number, size_t *index_out) {
+    if (profiles == NULL) {
+        return false;
+    }
+    for (size_t index = 0U; index < profiles->count; index++) {
+        if (profiles->profiles[index].parameter_number == parameter_number) {
+            if (index_out != NULL) {
+                *index_out = index;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t app_config_profiles_next_index(const app_config_profiles_t *profiles,
+                                      size_t current_index) {
+    if (profiles == NULL || profiles->count == 0U) {
+        return 0U;
+    }
+    return (current_index + 1U) % profiles->count;
+}
+
 bool app_config_validate(const app_config_t *config) {
     if (config == NULL) {
+        return false;
+    }
+
+    if (config->audio_amp_mode < 1U || config->audio_amp_mode > 3U) {
         return false;
     }
 
@@ -190,7 +358,8 @@ bool app_config_validate(const app_config_t *config) {
           config->lift_time_ms_at_2p5 >= config->lift_time_ms_at_5p0)) {
         return false;
     }
-    if (config->predictive_min_mps > config->predictive_max_mps) {
+    if (config->predictive_min_mps > config->lift_start_mps ||
+        config->predictive_duration_ms > config->predictive_interval_ms) {
         return false;
     }
     return true;
@@ -206,6 +375,7 @@ bool app_config_parameter_info(size_t index, app_parameter_info_t *info) {
     }
     info->name = parameter_table[index].name;
     info->type = parameter_table[index].type;
+    info->scope = parameter_table[index].scope;
     return true;
 }
 
@@ -349,15 +519,18 @@ bool app_config_set_text(app_config_t *config, const char *name,
     return true;
 }
 
-bool app_config_reset(app_config_t *config, const char *name) {
+bool app_config_reset(app_config_t *config, uint8_t parameter_number,
+                      const char *name) {
     const app_parameter_descriptor_t *descriptor = NULL;
     app_config_t candidate = {0};
+    app_config_t defaults = {0};
 
     if (config == NULL || name == NULL) {
         return false;
     }
+    app_config_set_profile_defaults(&defaults, parameter_number);
     if (strcasecmp(name, "ALL") == 0) {
-        app_config_set_defaults(config);
+        *config = defaults;
         return true;
     }
 
@@ -366,7 +539,12 @@ bool app_config_reset(app_config_t *config, const char *name) {
         return false;
     }
     candidate = *config;
-    write_value(&candidate, descriptor, descriptor->default_value);
+    memcpy((uint8_t *) &candidate + descriptor->offset,
+           (const uint8_t *) &defaults + descriptor->offset,
+           descriptor->type == APP_PARAMETER_BOOL ? sizeof(bool) :
+           descriptor->type == APP_PARAMETER_UINT32 ? sizeof(uint32_t) :
+           descriptor->type == APP_PARAMETER_FLOAT ? sizeof(float) :
+                                                     sizeof(app_filter_mode_t));
     if (!app_config_validate(&candidate)) {
         return false;
     }

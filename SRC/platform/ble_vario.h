@@ -6,6 +6,8 @@
 #include "domain/app_types.h"
 #include "esp_err.h"
 
+#define BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE 3U
+
 typedef struct {
     uint32_t sentence_count;
     uint32_t dropped_sentence_count;
@@ -25,7 +27,7 @@ typedef struct {
 } ble_vario_lk8ex1_fields_t;
 
 /**
- * @brief Initialize NimBLE, register the NUS service, and start its host task.
+ * @brief Initialize NimBLE, register NUS and Battery Service, and start its host task.
  * @return ESP_OK on success, otherwise an ESP-IDF or NimBLE setup error.
  */
 esp_err_t ble_vario_init(void);
@@ -53,6 +55,17 @@ bool ble_vario_can_notify(void);
  * @return true for 500 ms after a successful notification while subscribed.
  */
 bool ble_vario_notify_active(void);
+
+/** Convert a valid battery voltage to a 0-100% level using 3.0-4.2 V endpoints. */
+uint8_t ble_vario_battery_level_from_voltage(float battery_voltage_v);
+
+/** Format the three-byte Battery Level Status value defined by GSS. */
+void ble_vario_format_battery_level_status(
+    bool external_power_present,
+    uint8_t status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE]);
+
+/** Update Battery Service values from the latest system snapshot. */
+void ble_vario_update_battery(const system_snapshot_t *system);
 
 /**
  * @brief Format the exact five LK8EX1 payload fields without sending them.

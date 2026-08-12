@@ -8,11 +8,13 @@
 #include "freertos/semphr.h"
 
 #define AUDIO_QUEUE_LENGTH ((UBaseType_t) 1U)
+#define BUTTON_SOUND_QUEUE_LENGTH ((UBaseType_t) 1U)
 #define DIAGNOSTIC_QUEUE_LENGTH ((UBaseType_t) 16U)
 #define SNAPSHOT_MUTEX_WAIT_MS UINT32_C(5)
 
 /* RTOS handles are allocated once during application startup. */
 static QueueHandle_t audio_queue = NULL;
+static QueueHandle_t button_sound_queue = NULL;
 static QueueHandle_t diagnostic_queue = NULL;
 static SemaphoreHandle_t vario_mutex = NULL;
 static SemaphoreHandle_t system_mutex = NULL;
@@ -24,7 +26,9 @@ static EventGroupHandle_t app_event_group = NULL;
 static vario_result_t latest_vario;
 static imu_diagnostics_t latest_imu_diagnostics;
 static system_snapshot_t latest_system;
-static app_config_t latest_config;
+static app_config_profiles_t latest_profiles;
+static size_t active_profile_index = 0U;
+static uint32_t config_revision = 0U;
 static struct {
     float climb_rate_mps;
     float altitude_m;
@@ -39,6 +43,10 @@ static void app_resources_release_partial(void) {
     if (audio_queue != NULL) {
         vQueueDelete(audio_queue);
         audio_queue = NULL;
+    }
+    if (button_sound_queue != NULL) {
+        vQueueDelete(button_sound_queue);
+        button_sound_queue = NULL;
     }
     if (diagnostic_queue != NULL) {
         vQueueDelete(diagnostic_queue);
@@ -70,10 +78,14 @@ esp_err_t app_resources_init(void) {
     memset(&latest_vario, 0, sizeof(latest_vario));
     memset(&latest_imu_diagnostics, 0, sizeof(latest_imu_diagnostics));
     memset(&latest_system, 0, sizeof(latest_system));
-    app_config_set_defaults(&latest_config);
+    app_config_profiles_set_defaults(&latest_profiles);
+    active_profile_index = 0U;
+    config_revision = 0U;
     memset(&debug_vario, 0, sizeof(debug_vario));
 
     audio_queue = xQueueCreate(AUDIO_QUEUE_LENGTH, sizeof(vario_result_t));
+    button_sound_queue = xQueueCreate(BUTTON_SOUND_QUEUE_LENGTH,
+                                      sizeof(audio_notification_request_t));
     diagnostic_queue = xQueueCreate(DIAGNOSTIC_QUEUE_LENGTH, sizeof(diagnostic_event_t));
     vario_mutex = xSemaphoreCreateMutex();
     system_mutex = xSemaphoreCreateMutex();
@@ -81,9 +93,9 @@ esp_err_t app_resources_init(void) {
     debug_mutex = xSemaphoreCreateMutex();
     app_event_group = xEventGroupCreate();
 
-    if (audio_queue == NULL || diagnostic_queue == NULL || vario_mutex == NULL ||
-        system_mutex == NULL || config_mutex == NULL || debug_mutex == NULL ||
-        app_event_group == NULL) {
+    if (audio_queue == NULL || button_sound_queue == NULL || diagnostic_queue == NULL ||
+        vario_mutex == NULL || system_mutex == NULL || config_mutex == NULL ||
+        debug_mutex == NULL || app_event_group == NULL) {
         app_resources_release_partial();
         return ESP_ERR_NO_MEM;
     }
@@ -93,6 +105,10 @@ esp_err_t app_resources_init(void) {
 
 QueueHandle_t app_resources_audio_queue(void) {
     return audio_queue;
+}
+
+QueueHandle_t app_resources_button_sound_queue(void) {
+    return button_sound_queue;
 }
 
 QueueHandle_t app_resources_diagnostic_queue(void) {
@@ -201,8 +217,10 @@ bool app_resources_copy_system(system_snapshot_t *snapshot) {
     return true;
 }
 
-bool app_resources_publish_config(const app_config_t *config) {
+bool app_resources_publish_config_for_profile(const app_config_t *config,
+                                              uint8_t parameter_number) {
     BaseType_t lock_result = pdFALSE;
+    size_t profile_index = 0U;
 
     if (config == NULL || config_mutex == NULL || !app_config_validate(config)) {
         return false;
@@ -212,7 +230,37 @@ bool app_resources_publish_config(const app_config_t *config) {
     if (lock_result != pdTRUE) {
         return false;
     }
-    latest_config = *config;
+    if (!app_config_profiles_find(&latest_profiles, parameter_number,
+                                  &profile_index)) {
+        (void) xSemaphoreGive(config_mutex);
+        return false;
+    }
+    if (!app_config_profiles_set_config(&latest_profiles, profile_index,
+                                        config)) {
+        (void) xSemaphoreGive(config_mutex);
+        return false;
+    }
+    if (profile_index == active_profile_index) {
+        config_revision++;
+    }
+    (void) xSemaphoreGive(config_mutex);
+    return true;
+}
+
+bool app_resources_copy_active_config(app_config_t *config,
+                                      uint8_t *parameter_number) {
+    if (config == NULL || parameter_number == NULL || config_mutex == NULL ||
+        xSemaphoreTake(config_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    if (!app_config_profiles_get_config(&latest_profiles,
+                                        active_profile_index, config)) {
+        (void) xSemaphoreGive(config_mutex);
+        return false;
+    }
+    *parameter_number =
+        latest_profiles.profiles[active_profile_index].parameter_number;
     (void) xSemaphoreGive(config_mutex);
     return true;
 }
@@ -228,7 +276,89 @@ bool app_resources_copy_config(app_config_t *config) {
     if (lock_result != pdTRUE) {
         return false;
     }
-    *config = latest_config;
+    if (!app_config_profiles_get_config(&latest_profiles,
+                                        active_profile_index, config)) {
+        (void) xSemaphoreGive(config_mutex);
+        return false;
+    }
+    (void) xSemaphoreGive(config_mutex);
+    return true;
+}
+
+bool app_resources_publish_config_profiles(
+    const app_config_profiles_t *profiles, uint8_t requested_number,
+    uint8_t *selected_number) {
+    size_t selected_index = 0U;
+
+    if (profiles == NULL || config_mutex == NULL ||
+        !app_config_profiles_validate(profiles)) {
+        return false;
+    }
+    if (xSemaphoreTake(config_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    latest_profiles = *profiles;
+    app_config_profiles_sort(&latest_profiles);
+    if (!app_config_profiles_find(&latest_profiles, requested_number,
+                                  &selected_index)) {
+        selected_index = 0U;
+    }
+    active_profile_index = selected_index;
+    config_revision++;
+    if (selected_number != NULL) {
+        *selected_number =
+            latest_profiles.profiles[active_profile_index].parameter_number;
+    }
+    (void) xSemaphoreGive(config_mutex);
+    return true;
+}
+
+bool app_resources_copy_config_profiles(app_config_profiles_t *profiles) {
+    if (profiles == NULL || config_mutex == NULL ||
+        xSemaphoreTake(config_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    *profiles = latest_profiles;
+    (void) xSemaphoreGive(config_mutex);
+    return true;
+}
+
+bool app_resources_select_next_config(uint8_t *parameter_number,
+                                      uint8_t *parameter_set_count) {
+    if (config_mutex == NULL ||
+        xSemaphoreTake(config_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    active_profile_index = app_config_profiles_next_index(
+        &latest_profiles, active_profile_index);
+    config_revision++;
+    if (parameter_number != NULL) {
+        *parameter_number =
+            latest_profiles.profiles[active_profile_index].parameter_number;
+    }
+    if (parameter_set_count != NULL) {
+        *parameter_set_count = (uint8_t) latest_profiles.count;
+    }
+    (void) xSemaphoreGive(config_mutex);
+    return true;
+}
+
+bool app_resources_copy_config_with_revision(app_config_t *config,
+                                             uint32_t *revision) {
+    if (config == NULL || revision == NULL || config_mutex == NULL ||
+        xSemaphoreTake(config_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    if (!app_config_profiles_get_config(&latest_profiles,
+                                        active_profile_index, config)) {
+        (void) xSemaphoreGive(config_mutex);
+        return false;
+    }
+    *revision = config_revision;
     (void) xSemaphoreGive(config_mutex);
     return true;
 }

@@ -11,17 +11,20 @@
 
 #include "cJSON.h"
 
-#define CONFIG_FORMAT_VERSION 2
-#define CONFIG_LEGACY_FORMAT_VERSION 1
 #define CONFIG_MAX_FILE_BYTES (32U * 1024U)
 #define CONFIG_PATH_BUFFER_SIZE 96U
 
-static const char *const legacy_board_axis_parameters[] = {
-    "imu_accel_x_source", "imu_accel_y_source", "imu_accel_z_source",
-    "imu_accel_x_sign",   "imu_accel_y_sign",   "imu_accel_z_sign",
-    "imu_gyro_x_source",  "imu_gyro_y_source",  "imu_gyro_z_source",
-    "imu_gyro_x_sign",    "imu_gyro_y_sign",    "imu_gyro_z_sign",
-};
+/*
+ * Keep the multi-profile work buffers out of the caller task's stack.
+ * usb_device_service serializes storage I/O, and startup loading completes
+ * before worker tasks are created.
+ */
+static struct {
+    app_config_profiles_t parse_candidate;
+    app_config_profiles_t recovered;
+    app_config_profiles_t canonical;
+    app_config_profiles_t verified;
+} config_storage_workspace;
 
 static void set_diagnostics(config_storage_diagnostics_t *diagnostics,
                             config_validation_result_t validation,
@@ -66,25 +69,6 @@ static bool parameter_index_by_name(const char *name, size_t *index_out,
             }
             if (info_out != NULL) {
                 *info_out = info;
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool legacy_board_axis_parameter_index(const char *name,
-                                              size_t *index_out) {
-    if (name == NULL) {
-        return false;
-    }
-    for (size_t index = 0U;
-         index < sizeof(legacy_board_axis_parameters) /
-                     sizeof(legacy_board_axis_parameters[0]);
-         index++) {
-        if (strcmp(name, legacy_board_axis_parameters[index]) == 0) {
-            if (index_out != NULL) {
-                *index_out = index;
             }
             return true;
         }
@@ -175,27 +159,100 @@ static bool parse_json_parameter(app_config_t *candidate, const char *name,
     return true;
 }
 
+static bool parse_parameters_object(
+    const cJSON *parameters, app_parameter_scope_t expected_scope,
+    app_config_t *config,
+    config_storage_diagnostics_t *diagnostics) {
+    app_config_t candidate = {0};
+    bool *seen = NULL;
+    bool valid = false;
+
+    if (!cJSON_IsObject(parameters) || config == NULL) {
+        set_diagnostics(diagnostics,
+                        CONFIG_VALIDATION_PARAMETERS_NOT_OBJECT,
+                        "parameters", 0);
+        return false;
+    }
+    seen = calloc(app_config_parameter_count(), sizeof(*seen));
+    if (seen == NULL) {
+        set_diagnostics(diagnostics, CONFIG_VALIDATION_NO_MEMORY, NULL,
+                        ENOMEM);
+        return false;
+    }
+    app_config_set_defaults(&candidate);
+
+    for (const cJSON *child = parameters->child; child != NULL;
+         child = child->next) {
+        size_t index = 0U;
+        app_parameter_info_t info = {0};
+
+        if (child->string == NULL) {
+            set_diagnostics(diagnostics,
+                            CONFIG_VALIDATION_UNKNOWN_PARAMETER, NULL, 0);
+            goto cleanup;
+        }
+        if (!parameter_index_by_name(child->string, &index, &info)) {
+            set_diagnostics(diagnostics,
+                            CONFIG_VALIDATION_UNKNOWN_PARAMETER,
+                            child->string, 0);
+            goto cleanup;
+        }
+        if (info.scope != expected_scope) {
+            set_diagnostics(diagnostics,
+                            CONFIG_VALIDATION_UNKNOWN_PARAMETER,
+                            child->string, 0);
+            goto cleanup;
+        }
+        if (seen[index]) {
+            set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
+                            child->string, 0);
+            goto cleanup;
+        }
+        if (!parse_json_parameter(&candidate, child->string, child,
+                                  info.type, diagnostics)) {
+            goto cleanup;
+        }
+        seen[index] = true;
+    }
+    for (size_t index = 0U; index < app_config_parameter_count(); index++) {
+        app_parameter_info_t info = {0};
+
+        if (app_config_parameter_info(index, &info) &&
+            info.scope == expected_scope && !seen[index]) {
+            set_diagnostics(diagnostics, CONFIG_VALIDATION_MISSING_PARAMETERS,
+                            info.name, 0);
+            goto cleanup;
+        }
+    }
+    *config = candidate;
+    valid = true;
+
+cleanup:
+    free(seen);
+    return valid;
+}
+
 static bool parse_config_json(const char *json, size_t json_length,
-                              app_config_t *config,
+                              app_config_profiles_t *profiles,
                               config_storage_diagnostics_t *diagnostics) {
     const char *parse_end = NULL;
     const char *document = json;
     size_t document_length = json_length;
     cJSON *root = NULL;
     cJSON *version = NULL;
-    cJSON *parameters = NULL;
-    app_config_t candidate = {0};
-    bool *seen = NULL;
+    cJSON *shared_parameters = NULL;
+    cJSON *parameter_sets = NULL;
+    app_config_profiles_t *candidate =
+        &config_storage_workspace.parse_candidate;
     bool valid = false;
-    bool legacy_accel_min_seen = false;
-    bool legacy_accel_max_seen = false;
-    bool legacy_board_axis_seen[
-        sizeof(legacy_board_axis_parameters) /
-        sizeof(legacy_board_axis_parameters[0])] = {false};
     unsigned int version_count = 0U;
-    unsigned int parameters_count = 0U;
+    unsigned int shared_parameters_count = 0U;
+    unsigned int parameter_sets_count = 0U;
+    int32_t parsed_version = -1;
 
-    if (json == NULL || config == NULL || json_length == 0U) {
+    memset(candidate, 0, sizeof(*candidate));
+
+    if (json == NULL || profiles == NULL || json_length == 0U) {
         set_diagnostics(diagnostics, CONFIG_VALIDATION_EMPTY_FILE, NULL, 0);
         return false;
     }
@@ -228,8 +285,11 @@ static bool parse_config_json(const char *json, size_t json_length,
             version_count++;
             version = child;
         } else if (strcmp(child->string, "parameters") == 0) {
-            parameters_count++;
-            parameters = child;
+            shared_parameters_count++;
+            shared_parameters = child;
+        } else if (strcmp(child->string, "parameter_sets") == 0) {
+            parameter_sets_count++;
+            parameter_sets = child;
         } else {
             set_diagnostics(diagnostics,
                             CONFIG_VALIDATION_UNKNOWN_TOP_LEVEL_KEY,
@@ -255,123 +315,167 @@ static bool parse_config_json(const char *json, size_t json_length,
         goto cleanup;
     }
     if (version->valuedouble >= (double) INT32_MIN &&
-        version->valuedouble <= (double) INT32_MAX && diagnostics != NULL) {
-        diagnostics->format_version = (int32_t) version->valuedouble;
+        version->valuedouble <= (double) INT32_MAX) {
+        parsed_version = (int32_t) version->valuedouble;
+        if (diagnostics != NULL) {
+            diagnostics->format_version = parsed_version;
+        }
     }
-    if (version->valuedouble != CONFIG_FORMAT_VERSION &&
-        version->valuedouble != CONFIG_LEGACY_FORMAT_VERSION) {
+    if (parsed_version != CONFIG_FORMAT_VERSION) {
         set_diagnostics(diagnostics,
                         CONFIG_VALIDATION_UNSUPPORTED_FORMAT_VERSION,
                         "format_version", 0);
         goto cleanup;
     }
-    if (parameters_count == 0U) {
-        set_diagnostics(diagnostics, CONFIG_VALIDATION_MISSING_PARAMETERS,
+    if (shared_parameters_count == 0U) {
+        set_diagnostics(diagnostics,
+                        CONFIG_VALIDATION_MISSING_PARAMETERS,
                         "parameters", 0);
         goto cleanup;
     }
-    if (parameters_count > 1U) {
+    if (shared_parameters_count > 1U) {
         set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
                         "parameters", 0);
         goto cleanup;
     }
-    if (!cJSON_IsObject(parameters)) {
+    if (!parse_parameters_object(shared_parameters,
+                                 APP_PARAMETER_SCOPE_SHARED,
+                                 &candidate->shared_config, diagnostics)) {
+        goto cleanup;
+    }
+    if (parameter_sets_count == 0U) {
         set_diagnostics(diagnostics,
-                        CONFIG_VALIDATION_PARAMETERS_NOT_OBJECT,
-                        "parameters", 0);
+                        CONFIG_VALIDATION_MISSING_PARAMETER_SETS,
+                        "parameter_sets", 0);
         goto cleanup;
     }
-
-    seen = calloc(app_config_parameter_count(), sizeof(*seen));
-    if (seen == NULL) {
-        set_diagnostics(diagnostics, CONFIG_VALIDATION_NO_MEMORY, NULL,
-                        ENOMEM);
+    if (parameter_sets_count > 1U) {
+        set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
+                        "parameter_sets", 0);
         goto cleanup;
     }
-    app_config_set_defaults(&candidate);
-    if (version->valuedouble == CONFIG_LEGACY_FORMAT_VERSION) {
-        candidate.imu_mahony_ki = 0.0f;
-    }
+    {
+        int profile_count = 0;
+        bool seen_numbers[APP_CONFIG_PROFILE_MAX_NUMBER + 1U] = {false};
 
-    for (cJSON *child = parameters->child; child != NULL;
-         child = child->next) {
-        size_t index = 0U;
-        size_t legacy_axis_index = 0U;
-        app_parameter_info_t info = {0};
-
-        if (child->string == NULL) {
+        if (!cJSON_IsArray(parameter_sets)) {
             set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_PARAMETER, NULL, 0);
+                            CONFIG_VALIDATION_PARAMETER_SETS_NOT_ARRAY,
+                            "parameter_sets", 0);
             goto cleanup;
         }
-        if (legacy_board_axis_parameter_index(child->string,
-                                              &legacy_axis_index)) {
-            if (legacy_board_axis_seen[legacy_axis_index]) {
-                set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
-                                child->string, 0);
+        profile_count = cJSON_GetArraySize(parameter_sets);
+        if (profile_count < 1 ||
+            profile_count > (int) APP_CONFIG_PROFILE_MAX_COUNT) {
+            set_diagnostics(diagnostics, CONFIG_VALIDATION_PROFILE_COUNT,
+                            "parameter_sets", 0);
+            goto cleanup;
+        }
+        candidate->count = (size_t) profile_count;
+        for (size_t index = 0U; index < candidate->count; index++) {
+            cJSON *profile = cJSON_GetArrayItem(parameter_sets, (int) index);
+            cJSON *number = NULL;
+            cJSON *parameters = NULL;
+            unsigned int number_count = 0U;
+            unsigned int parameters_count = 0U;
+
+            if (!cJSON_IsObject(profile)) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_PROFILE_NOT_OBJECT,
+                                "parameter_sets", 0);
                 goto cleanup;
             }
-            legacy_board_axis_seen[legacy_axis_index] = true;
-            continue;
-        }
-        if (version->valuedouble == CONFIG_LEGACY_FORMAT_VERSION &&
-            (strcmp(child->string, "imu_accel_correction_min_g") == 0 ||
-             strcmp(child->string, "imu_accel_correction_max_g") == 0)) {
-            bool *legacy_seen =
-                strcmp(child->string, "imu_accel_correction_min_g") == 0
-                    ? &legacy_accel_min_seen
-                    : &legacy_accel_max_seen;
-
-            if (*legacy_seen) {
+            for (cJSON *child = profile->child; child != NULL;
+                 child = child->next) {
+                if (child->string == NULL) {
+                    set_diagnostics(diagnostics,
+                                    CONFIG_VALIDATION_UNKNOWN_PARAMETER,
+                                    "parameter_sets", 0);
+                    goto cleanup;
+                }
+                if (strcmp(child->string, "parameter_number") == 0) {
+                    number_count++;
+                    number = child;
+                } else if (strcmp(child->string, "parameters") == 0) {
+                    parameters_count++;
+                    parameters = child;
+                } else {
+                    set_diagnostics(
+                        diagnostics,
+                        CONFIG_VALIDATION_UNKNOWN_TOP_LEVEL_KEY,
+                        child->string, 0);
+                    goto cleanup;
+                }
+            }
+            if (number_count == 0U) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_MISSING_PARAMETER_NUMBER,
+                                "parameter_number", 0);
+                goto cleanup;
+            }
+            if (number_count > 1U || parameters_count > 1U) {
                 set_diagnostics(diagnostics,
                                 CONFIG_VALIDATION_DUPLICATE_KEY,
-                                child->string, 0);
+                                number_count > 1U ? "parameter_number"
+                                                  : "parameters",
+                                0);
                 goto cleanup;
             }
-            if (!cJSON_IsNumber(child) ||
-                !isfinite(child->valuedouble)) {
+            if (parameters_count == 0U) {
                 set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_PARAMETER_TYPE,
-                                child->string, 0);
+                                CONFIG_VALIDATION_MISSING_PARAMETERS,
+                                "parameters", 0);
                 goto cleanup;
             }
-            *legacy_seen = true;
-            continue;
+            if (!cJSON_IsNumber(number) ||
+                !isfinite(number->valuedouble) ||
+                floor(number->valuedouble) != number->valuedouble) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_PARAMETER_NUMBER_TYPE,
+                                "parameter_number", 0);
+                goto cleanup;
+            }
+            if (number->valuedouble < APP_CONFIG_PROFILE_MIN_NUMBER ||
+                number->valuedouble > APP_CONFIG_PROFILE_MAX_NUMBER) {
+                set_diagnostics(diagnostics,
+                                CONFIG_VALIDATION_PARAMETER_NUMBER_RANGE,
+                                "parameter_number", 0);
+                goto cleanup;
+            }
+            candidate->profiles[index].parameter_number =
+                (uint8_t) number->valuedouble;
+            if (seen_numbers[candidate->profiles[index].parameter_number]) {
+                set_diagnostics(
+                    diagnostics,
+                    CONFIG_VALIDATION_DUPLICATE_PARAMETER_NUMBER,
+                    "parameter_number", 0);
+                goto cleanup;
+            }
+            seen_numbers[candidate->profiles[index].parameter_number] = true;
+            if (!parse_parameters_object(
+                    parameters, APP_PARAMETER_SCOPE_PROFILE,
+                    &candidate->profiles[index].config,
+                    diagnostics)) {
+                goto cleanup;
+            }
         }
-        if (!parameter_index_by_name(child->string, &index, &info)) {
-            set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_PARAMETER,
-                            child->string, 0);
-            goto cleanup;
-        }
-        if (seen[index]) {
-            set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
-                            child->string, 0);
-            goto cleanup;
-        }
-        if (!parse_json_parameter(&candidate, child->string, child,
-                                  info.type, diagnostics)) {
-            goto cleanup;
-        }
-        seen[index] = true;
+        app_config_profiles_sort(candidate);
     }
-
-    if (!app_config_validate(&candidate)) {
+    if (!app_config_profiles_validate(candidate)) {
         set_diagnostics(diagnostics, CONFIG_VALIDATION_RELATION, NULL, 0);
         goto cleanup;
     }
-    *config = candidate;
+    *profiles = *candidate;
     set_diagnostics(diagnostics, CONFIG_VALIDATION_OK, NULL, 0);
     valid = true;
 
 cleanup:
-    free(seen);
     cJSON_Delete(root);
     return valid;
 }
 
 static config_load_result_t load_path(
-    const char *path, app_config_t *config,
+    const char *path, app_config_profiles_t *profiles,
     config_storage_diagnostics_t *diagnostics) {
     struct stat file_status = {0};
     FILE *file = NULL;
@@ -418,7 +522,7 @@ static config_load_result_t load_path(
         result = CONFIG_LOAD_IO_ERROR;
     } else {
         contents[bytes_read] = '\0';
-        result = parse_config_json(contents, bytes_read, config, diagnostics)
+        result = parse_config_json(contents, bytes_read, profiles, diagnostics)
                      ? CONFIG_LOAD_VALID_FILE
                      : CONFIG_LOAD_INVALID_FILE;
     }
@@ -428,11 +532,12 @@ static config_load_result_t load_path(
 }
 
 config_load_result_t config_storage_load(const char *base_path,
-                                         app_config_t *config,
+                                         app_config_profiles_t *profiles,
                                          config_storage_diagnostics_t *diagnostics) {
     char path[CONFIG_PATH_BUFFER_SIZE] = {0};
     char backup_path[CONFIG_PATH_BUFFER_SIZE] = {0};
-    app_config_t recovered = {0};
+    app_config_profiles_t *recovered =
+        &config_storage_workspace.recovered;
     config_load_result_t result = CONFIG_LOAD_IO_ERROR;
     config_storage_diagnostics_t backup_diagnostics = {
         .source = CONFIG_SOURCE_RECOVERED_BACKUP,
@@ -447,19 +552,19 @@ config_load_result_t config_storage_load(const char *base_path,
         diagnostics->format_version = CONFIG_FORMAT_VERSION;
     }
 
-    if (config == NULL ||
+    if (profiles == NULL ||
         !make_path(base_path, "parameters.json", path) ||
         !make_path(base_path, "parameters.bak", backup_path)) {
         set_diagnostics(diagnostics, CONFIG_VALIDATION_IO_ERROR, NULL,
                         EINVAL);
         return CONFIG_LOAD_IO_ERROR;
     }
-    app_config_set_defaults(config);
+    app_config_profiles_set_defaults(profiles);
     if (diagnostics != NULL) {
         diagnostics->source = CONFIG_SOURCE_FILE;
         diagnostics->format_version = -1;
     }
-    result = load_path(path, config, diagnostics);
+    result = load_path(path, profiles, diagnostics);
     if (result == CONFIG_LOAD_VALID_FILE) {
         (void) unlink(backup_path);
         return result;
@@ -476,11 +581,11 @@ config_load_result_t config_storage_load(const char *base_path,
      * Recover the last fully validated canonical file after a reset between
      * the two rename operations. A temporary file is never loaded.
     */
-    app_config_set_defaults(&recovered);
-    result = load_path(backup_path, &recovered, &backup_diagnostics);
+    app_config_profiles_set_defaults(recovered);
+    result = load_path(backup_path, recovered, &backup_diagnostics);
     if (result == CONFIG_LOAD_VALID_FILE &&
         rename(backup_path, path) == 0) {
-        *config = recovered;
+        *profiles = *recovered;
         if (diagnostics != NULL) {
             *diagnostics = backup_diagnostics;
         }
@@ -507,16 +612,20 @@ config_load_result_t config_storage_load(const char *base_path,
     return CONFIG_LOAD_IO_ERROR;
 }
 
-static bool write_json(FILE *file, const app_config_t *config) {
-    size_t parameter_count = app_config_parameter_count();
+static bool write_parameter_object(FILE *file, const app_config_t *config,
+                                   app_parameter_scope_t scope,
+                                   const char *indent) {
+    size_t remaining = 0U;
 
-    if (fprintf(file, "{\n  \"format_version\": %d,\n"
-                      "  \"parameters\": {\n",
-                CONFIG_FORMAT_VERSION) < 0) {
-        return false;
+    for (size_t index = 0U; index < app_config_parameter_count(); index++) {
+        app_parameter_info_t info = {0};
+
+        if (app_config_parameter_info(index, &info) && info.scope == scope) {
+            remaining++;
+        }
     }
 
-    for (size_t index = 0U; index < parameter_count; index++) {
+    for (size_t index = 0U; index < app_config_parameter_count(); index++) {
         app_parameter_info_t info = {0};
         app_parameter_value_t value = {0};
         char value_text[40] = {0};
@@ -525,6 +634,9 @@ static bool write_json(FILE *file, const app_config_t *config) {
         if (!app_config_parameter_info(index, &info) ||
             !app_config_get_value(config, index, &value)) {
             return false;
+        }
+        if (info.scope != scope) {
+            continue;
         }
         switch (info.type) {
         case APP_PARAMETER_BOOL:
@@ -548,15 +660,43 @@ static bool write_json(FILE *file, const app_config_t *config) {
             return false;
         }
         if (written <= 0 || (size_t) written >= sizeof(value_text) ||
-            fprintf(file, "    \"%s\": %s%s\n", info.name, value_text,
-                    index + 1U < parameter_count ? "," : "") < 0) {
+            fprintf(file, "%s\"%s\": %s%s\n", indent, info.name, value_text,
+                    --remaining > 0U ? "," : "") < 0) {
             return false;
         }
     }
-    return fprintf(file, "  }\n}\n") >= 0;
+    return true;
 }
 
-static bool configs_equal(const app_config_t *left, const app_config_t *right) {
+static bool write_json(FILE *file, const app_config_profiles_t *profiles) {
+    if (fprintf(file, "{\n  \"format_version\": %d,\n"
+                      "  \"parameters\": {\n",
+                CONFIG_FORMAT_VERSION) < 0 ||
+        !write_parameter_object(file, &profiles->shared_config,
+                                APP_PARAMETER_SCOPE_SHARED, "    ") ||
+        fprintf(file, "  },\n"
+                      "  \"parameter_sets\": [\n") < 0) {
+        return false;
+    }
+    for (size_t index = 0U; index < profiles->count; index++) {
+        const app_config_profile_t *profile = &profiles->profiles[index];
+
+        if (fprintf(file,
+                    "    {\n      \"parameter_number\": %u,\n"
+                    "      \"parameters\": {\n",
+                    (unsigned int) profile->parameter_number) < 0 ||
+            !write_parameter_object(file, &profile->config,
+                                    APP_PARAMETER_SCOPE_PROFILE, "        ") ||
+            fprintf(file, "      }\n    }%s\n",
+                    index + 1U < profiles->count ? "," : "") < 0) {
+            return false;
+        }
+    }
+    return fprintf(file, "  ]\n}\n") >= 0;
+}
+
+static bool configs_equal(const app_config_t *left, const app_config_t *right,
+                          app_parameter_scope_t scope) {
     if (left == NULL || right == NULL) {
         return false;
     }
@@ -569,6 +709,9 @@ static bool configs_equal(const app_config_t *left, const app_config_t *right) {
             !app_config_get_value(left, index, &left_value) ||
             !app_config_get_value(right, index, &right_value)) {
             return false;
+        }
+        if (info.scope != scope) {
+            continue;
         }
         switch (info.type) {
         case APP_PARAMETER_BOOL:
@@ -598,31 +741,57 @@ static bool configs_equal(const app_config_t *left, const app_config_t *right) {
     return true;
 }
 
+static bool profiles_equal(const app_config_profiles_t *left,
+                           const app_config_profiles_t *right) {
+    if (left == NULL || right == NULL || left->count != right->count) {
+        return false;
+    }
+    if (!configs_equal(&left->shared_config, &right->shared_config,
+                       APP_PARAMETER_SCOPE_SHARED)) {
+        return false;
+    }
+    for (size_t index = 0U; index < left->count; index++) {
+        if (left->profiles[index].parameter_number !=
+                right->profiles[index].parameter_number ||
+            !configs_equal(&left->profiles[index].config,
+                           &right->profiles[index].config,
+                           APP_PARAMETER_SCOPE_PROFILE)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 esp_err_t config_storage_save(const char *base_path,
-                              const app_config_t *config) {
+                              const app_config_profiles_t *profiles) {
     char target_path[CONFIG_PATH_BUFFER_SIZE] = {0};
     char temporary_path[CONFIG_PATH_BUFFER_SIZE] = {0};
     char backup_path[CONFIG_PATH_BUFFER_SIZE] = {0};
     FILE *file = NULL;
-    app_config_t verified = {0};
+    app_config_profiles_t *canonical =
+        &config_storage_workspace.canonical;
+    app_config_profiles_t *verified =
+        &config_storage_workspace.verified;
     config_storage_diagnostics_t verification_diagnostics = {0};
     config_load_result_t verification_result = CONFIG_LOAD_IO_ERROR;
     int file_descriptor = -1;
     struct stat target_status = {0};
     bool target_exists = false;
 
-    if (config == NULL || !app_config_validate(config) ||
+    if (profiles == NULL || !app_config_profiles_validate(profiles) ||
         !make_path(base_path, "parameters.json", target_path) ||
         !make_path(base_path, "parameters.tmp", temporary_path) ||
         !make_path(base_path, "parameters.bak", backup_path)) {
         return ESP_ERR_INVALID_ARG;
     }
+    *canonical = *profiles;
+    app_config_profiles_sort(canonical);
 
     file = fopen(temporary_path, "wb");
     if (file == NULL) {
         return ESP_FAIL;
     }
-    if (!write_json(file, config) || fflush(file) != 0) {
+    if (!write_json(file, canonical) || fflush(file) != 0) {
         (void) fclose(file);
         (void) unlink(temporary_path);
         return ESP_FAIL;
@@ -634,10 +803,10 @@ esp_err_t config_storage_save(const char *base_path,
         return ESP_FAIL;
     }
 
-    verification_result = load_path(temporary_path, &verified,
+    verification_result = load_path(temporary_path, verified,
                                     &verification_diagnostics);
     if (verification_result != CONFIG_LOAD_VALID_FILE ||
-        !configs_equal(&verified, config)) {
+        !profiles_equal(verified, canonical)) {
         (void) unlink(temporary_path);
         return ESP_ERR_INVALID_RESPONSE;
     }
@@ -713,6 +882,22 @@ const char *config_storage_validation_name(
         return "MISSING_PARAMETERS";
     case CONFIG_VALIDATION_PARAMETERS_NOT_OBJECT:
         return "PARAMETERS_NOT_OBJECT";
+    case CONFIG_VALIDATION_MISSING_PARAMETER_SETS:
+        return "MISSING_PARAMETER_SETS";
+    case CONFIG_VALIDATION_PARAMETER_SETS_NOT_ARRAY:
+        return "PARAMETER_SETS_NOT_ARRAY";
+    case CONFIG_VALIDATION_PROFILE_COUNT:
+        return "PROFILE_COUNT";
+    case CONFIG_VALIDATION_PROFILE_NOT_OBJECT:
+        return "PROFILE_NOT_OBJECT";
+    case CONFIG_VALIDATION_MISSING_PARAMETER_NUMBER:
+        return "MISSING_PARAMETER_NUMBER";
+    case CONFIG_VALIDATION_PARAMETER_NUMBER_TYPE:
+        return "PARAMETER_NUMBER_TYPE";
+    case CONFIG_VALIDATION_PARAMETER_NUMBER_RANGE:
+        return "PARAMETER_NUMBER_RANGE";
+    case CONFIG_VALIDATION_DUPLICATE_PARAMETER_NUMBER:
+        return "DUPLICATE_PARAMETER_NUMBER";
     case CONFIG_VALIDATION_UNKNOWN_PARAMETER:
         return "UNKNOWN_PARAMETER";
     case CONFIG_VALIDATION_PARAMETER_TYPE:

@@ -4,6 +4,7 @@ idf_component_register(
         "app/app_resources.c"
         "app/app_tasks.c"
         "domain/app_config.c"
+        "domain/auto_power_off.c"
         "domain/imu_fusion.c"
         "domain/vario_audio.c"
         "domain/vario_estimator.c"
@@ -18,6 +19,7 @@ idf_component_register(
         "platform/imu_calibration_storage.c"
         "platform/sensor_bus.c"
         "platform/system_io.c"
+        "platform/switch_preferences.c"
         "platform/usb_device_service.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
