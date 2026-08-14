@@ -23,14 +23,14 @@ static adc_cali_handle_t battery_calibration_handle = NULL;
 static adc_unit_t battery_adc_unit = ADC_UNIT_1;
 static adc_channel_t battery_adc_channel = ADC_CHANNEL_0;
 static bool battery_calibration_ready = false;
-static int battery_mv_history[BATTERY_SAMPLE_COUNT] = {0};
+static int32_t battery_mv_history[BATTERY_SAMPLE_COUNT] = {0};
 static uint32_t battery_history_count = 0U;
 static uint32_t battery_history_next = 0U;
 static system_io_battery_diagnostics_t battery_diagnostics = {0};
 
-static void sort_samples(int samples[BATTERY_SAMPLE_COUNT]) {
+static void sort_samples(int32_t samples[BATTERY_SAMPLE_COUNT]) {
     for (uint32_t index = 1U; index < BATTERY_SAMPLE_COUNT; index++) {
-        int value = samples[index];
+        int32_t value = samples[index];
         uint32_t insert_at = index;
 
         while (insert_at > 0U && samples[insert_at - 1U] > value) {
@@ -115,7 +115,7 @@ esp_err_t system_io_init(void) {
 }
 
 bool system_io_read_battery_voltage(float *battery_voltage_v) {
-    int samples[BATTERY_SAMPLE_COUNT] = {0};
+    int32_t samples[BATTERY_SAMPLE_COUNT] = {0};
     int raw = 0;
     int calibrated_mv = 0;
     float converted_voltage_v = 0.0f;

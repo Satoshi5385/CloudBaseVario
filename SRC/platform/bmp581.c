@@ -11,6 +11,7 @@
 
 #define BMP581_I2C_ADDRESS UINT16_C(0x46)
 #define BMP581_I2C_TIMEOUT_MS 5
+#define BMP581_RESET_SETTLE_MS UINT32_C(2)
 
 #define BMP581_REG_CHIP_ID UINT8_C(0x01)
 #define BMP581_REG_INT_STATUS UINT8_C(0x27)
@@ -155,7 +156,7 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle) {
         ret = bmp581_write_register(BMP581_REG_COMMAND, BMP581_SOFT_RESET_COMMAND);
     }
     if (ret == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(2U));
+        vTaskDelay(pdMS_TO_TICKS(BMP581_RESET_SETTLE_MS));
         ret = bmp581_read_registers(BMP581_REG_INT_STATUS, &interrupt_status,
                                     sizeof(interrupt_status));
     }

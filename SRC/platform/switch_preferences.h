@@ -50,7 +50,9 @@ esp_err_t switch_preferences_clear(void);
 void switch_preferences_get_diagnostics(
     switch_preferences_diagnostics_t *diagnostics);
 
+/** Return the diagnostic name of a switch-preference source. */
 const char *switch_preferences_source_name(
     switch_preferences_source_t source);
+/** Return the diagnostic name of a switch-preference load result. */
 const char *switch_preferences_load_result_name(
     switch_preferences_load_result_t result);

@@ -6,7 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_MSC_VER)
+#define strcasecmp _stricmp
+#else
 #include <strings.h>
+#endif
 
 typedef struct {
     const char *name;
@@ -17,6 +21,11 @@ typedef struct {
     double minimum;
     double maximum;
 } app_parameter_descriptor_t;
+
+_Static_assert(sizeof(app_filter_mode_t) == sizeof(int32_t),
+               "filter mode enum must be 32-bit");
+_Static_assert(sizeof(app_bluetooth_battery_mode_t) == sizeof(int32_t),
+               "LK8EX1 battery mode enum must be 32-bit");
 
 #define PARAM_BOOL(member, default_value_, scope_)                                              \
     {                                                                                            \
@@ -33,10 +42,10 @@ typedef struct {
         #member, APP_PARAMETER_FLOAT, (scope_), offsetof(app_config_t, member),                  \
             {.real = (default_value_)}, (minimum_), (maximum_)                                  \
     }
-#define PARAM_ENUM(member, default_value_, scope_)                                               \
+#define PARAM_ENUM(member, default_value_, minimum_, maximum_, scope_)                           \
     {                                                                                            \
         #member, APP_PARAMETER_ENUM, (scope_), offsetof(app_config_t, member),                   \
-            {.filter_mode = (default_value_)}, APP_FILTER_MODE_AUTO, APP_FILTER_MODE_BARO_ONLY   \
+            {.enumeration = (default_value_)}, (minimum_), (maximum_)                            \
     }
 
 /*
@@ -46,7 +55,14 @@ typedef struct {
 static const app_parameter_descriptor_t parameter_table[] = {
     PARAM_FLOAT(sea_level_pressure_pa, 101325.0f, 80000.0, 110000.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(auto_power_off_minutes, 60, 0.0, 1440.0, APP_PARAMETER_SCOPE_SHARED),
-    PARAM_ENUM(filter_mode, APP_FILTER_MODE_AUTO, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_ENUM(filter_mode, APP_FILTER_MODE_AUTO, APP_FILTER_MODE_AUTO,
+               APP_FILTER_MODE_BARO_ONLY, APP_PARAMETER_SCOPE_SHARED),
+    PARAM_ENUM(bluetooth_battery_mode, APP_BLUETOOTH_BATTERY_MODE_VOLTAGE,
+               APP_BLUETOOTH_BATTERY_MODE_VOLTAGE,
+               APP_BLUETOOTH_BATTERY_MODE_PERCENT,
+               APP_PARAMETER_SCOPE_SHARED),
+    PARAM_UINT(bluetooth_notify_rate_hz, 10, 1.0, 50.0,
+               APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(i2c_reinit_error_count, 10, 1.0, 100.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0, APP_PARAMETER_SCOPE_SHARED),
@@ -109,7 +125,7 @@ static void write_value(app_config_t *config,
         memcpy(destination, &value.real, sizeof(value.real));
         break;
     case APP_PARAMETER_ENUM:
-        memcpy(destination, &value.filter_mode, sizeof(value.filter_mode));
+        memcpy(destination, &value.enumeration, sizeof(value.enumeration));
         break;
     default:
         break;
@@ -136,7 +152,7 @@ static bool value_in_range(const app_parameter_descriptor_t *descriptor,
         number = value.real;
         break;
     case APP_PARAMETER_ENUM:
-        number = value.filter_mode;
+        number = value.enumeration;
         break;
     default:
         return false;
@@ -245,7 +261,7 @@ static void copy_parameter_scope(app_config_t *destination,
             value_size = sizeof(float);
             break;
         case APP_PARAMETER_ENUM:
-            value_size = sizeof(app_filter_mode_t);
+            value_size = sizeof(int32_t);
             break;
         default:
             continue;
@@ -402,7 +418,7 @@ bool app_config_get_value(const app_config_t *config, size_t index,
         memcpy(&value->real, source, sizeof(value->real));
         break;
     case APP_PARAMETER_ENUM:
-        memcpy(&value->filter_mode, source, sizeof(value->filter_mode));
+        memcpy(&value->enumeration, source, sizeof(value->enumeration));
         break;
     default:
         return false;
@@ -467,7 +483,7 @@ static bool parse_float(const char *text, float *value) {
     return true;
 }
 
-static bool parse_filter_mode(const char *text, app_filter_mode_t *mode) {
+static bool parse_filter_mode(const char *text, int32_t *mode) {
     if (strcasecmp(text, "AUTO") == 0) {
         *mode = APP_FILTER_MODE_AUTO;
         return true;
@@ -475,6 +491,32 @@ static bool parse_filter_mode(const char *text, app_filter_mode_t *mode) {
     if (strcasecmp(text, "BARO_ONLY") == 0) {
         *mode = APP_FILTER_MODE_BARO_ONLY;
         return true;
+    }
+    return false;
+}
+
+static bool parse_bluetooth_battery_mode(const char *text, int32_t *mode) {
+    if (strcasecmp(text, "VOLTAGE") == 0) {
+        *mode = APP_BLUETOOTH_BATTERY_MODE_VOLTAGE;
+        return true;
+    }
+    if (strcasecmp(text, "PERCENT") == 0) {
+        *mode = APP_BLUETOOTH_BATTERY_MODE_PERCENT;
+        return true;
+    }
+    return false;
+}
+
+bool app_config_parse_enum_value(const char *parameter_name,
+                                 const char *text, int32_t *value) {
+    if (parameter_name == NULL || text == NULL || value == NULL) {
+        return false;
+    }
+    if (strcasecmp(parameter_name, "filter_mode") == 0) {
+        return parse_filter_mode(text, value);
+    }
+    if (strcasecmp(parameter_name, "bluetooth_battery_mode") == 0) {
+        return parse_bluetooth_battery_mode(text, value);
     }
     return false;
 }
@@ -501,7 +543,8 @@ bool app_config_set_text(app_config_t *config, const char *name,
         parsed = parse_float(text, &value.real);
         break;
     case APP_PARAMETER_ENUM:
-        parsed = parse_filter_mode(text, &value.filter_mode);
+        parsed = app_config_parse_enum_value(name, text,
+                                             &value.enumeration);
         break;
     default:
         break;
@@ -524,6 +567,7 @@ bool app_config_reset(app_config_t *config, uint8_t parameter_number,
     const app_parameter_descriptor_t *descriptor = NULL;
     app_config_t candidate = {0};
     app_config_t defaults = {0};
+    size_t value_size = sizeof(int32_t);
 
     if (config == NULL || name == NULL) {
         return false;
@@ -539,12 +583,18 @@ bool app_config_reset(app_config_t *config, uint8_t parameter_number,
         return false;
     }
     candidate = *config;
+    if (descriptor->type == APP_PARAMETER_BOOL) {
+        value_size = sizeof(bool);
+    } else if (descriptor->type == APP_PARAMETER_UINT32) {
+        value_size = sizeof(uint32_t);
+    } else if (descriptor->type == APP_PARAMETER_FLOAT) {
+        value_size = sizeof(float);
+    } else {
+        /* APP_PARAMETER_ENUM uses the initialized int32_t size. */
+    }
     memcpy((uint8_t *) &candidate + descriptor->offset,
            (const uint8_t *) &defaults + descriptor->offset,
-           descriptor->type == APP_PARAMETER_BOOL ? sizeof(bool) :
-           descriptor->type == APP_PARAMETER_UINT32 ? sizeof(uint32_t) :
-           descriptor->type == APP_PARAMETER_FLOAT ? sizeof(float) :
-                                                     sizeof(app_filter_mode_t));
+           value_size);
     if (!app_config_validate(&candidate)) {
         return false;
     }
@@ -562,6 +612,32 @@ const char *app_config_filter_mode_name(app_filter_mode_t mode) {
     return "INVALID";
 }
 
+const char *app_config_bluetooth_battery_mode_name(
+    app_bluetooth_battery_mode_t mode) {
+    if (mode == APP_BLUETOOTH_BATTERY_MODE_VOLTAGE) {
+        return "VOLTAGE";
+    }
+    if (mode == APP_BLUETOOTH_BATTERY_MODE_PERCENT) {
+        return "PERCENT";
+    }
+    return "INVALID";
+}
+
+const char *app_config_enum_value_name(const char *parameter_name,
+                                       int32_t value) {
+    if (parameter_name == NULL) {
+        return "INVALID";
+    }
+    if (strcmp(parameter_name, "filter_mode") == 0) {
+        return app_config_filter_mode_name((app_filter_mode_t) value);
+    }
+    if (strcmp(parameter_name, "bluetooth_battery_mode") == 0) {
+        return app_config_bluetooth_battery_mode_name(
+            (app_bluetooth_battery_mode_t) value);
+    }
+    return "INVALID";
+}
+
 bool app_config_format_value(const app_config_t *config, size_t index,
                              char *buffer, size_t buffer_size) {
     app_parameter_value_t value = {0};
@@ -575,10 +651,15 @@ bool app_config_format_value(const app_config_t *config, size_t index,
     }
 
     switch (info.type) {
-    case APP_PARAMETER_BOOL:
-        written = snprintf(buffer, buffer_size, "%s",
-                           value.boolean ? "true" : "false");
+    case APP_PARAMETER_BOOL: {
+        const char *boolean_text = "false";
+
+        if (value.boolean) {
+            boolean_text = "true";
+        }
+        written = snprintf(buffer, buffer_size, "%s", boolean_text);
         break;
+    }
     case APP_PARAMETER_UINT32:
         written = snprintf(buffer, buffer_size, "%lu",
                            (unsigned long) value.uint32);
@@ -588,7 +669,8 @@ bool app_config_format_value(const app_config_t *config, size_t index,
         break;
     case APP_PARAMETER_ENUM:
         written = snprintf(buffer, buffer_size, "%s",
-                           app_config_filter_mode_name(value.filter_mode));
+                           app_config_enum_value_name(info.name,
+                                                      value.enumeration));
         break;
     default:
         break;

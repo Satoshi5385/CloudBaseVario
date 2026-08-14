@@ -16,15 +16,20 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "domain/firmware_update_policy.h"
 #include "platform/board.h"
 #include "platform/usb_device_service.h"
+#include "platform/watchdog_service.h"
+
+#ifndef CBV_FIRMWARE_PROJECT_NAME
+#error "The build must provide the Aohazuku firmware project identity"
+#endif
 
 #define UPDATE_INPUT_NAME "UPDATE.BIN"
 #define UPDATE_PENDING_NAME "UPDATE.PND"
 #define UPDATE_BAD_NAME "UPDATE.BAD"
 #define UPDATE_STATUS_NAME "UPDATE.TXT"
 #define UPDATE_STATUS_TEMP_NAME "UPDATE.TMP"
-#define UPDATE_PROJECT_NAME "CloudBaseVario"
 #define UPDATE_MAX_IMAGE_BYTES UINT32_C(0x380000)
 #define UPDATE_IO_BUFFER_BYTES 8192U
 #define UPDATE_STORAGE_TIMEOUT_MS UINT32_C(1000)
@@ -32,6 +37,14 @@
 #define UPDATE_CONFIRMATION_DELAY_MS UINT32_C(10000)
 #define UPDATE_CONFIRMATION_TASK_STACK 3072U
 #define UPDATE_CONFIRMATION_TASK_PRIORITY 2U
+#define UPDATE_LED_TASK_STACK 2048U
+#define UPDATE_LED_TASK_PRIORITY 1U
+#define UPDATE_LED_STOP_MARGIN_MS UINT32_C(10)
+#define UPDATE_CONFIRMATION_POLL_MS UINT32_C(10)
+#define UPDATE_PATH_BUFFER_SIZE 64U
+#define UPDATE_STATUS_TEXT_SIZE 384U
+#define UPDATE_PRINTABLE_ASCII_MIN UINT8_C(0x20)
+#define UPDATE_PRINTABLE_ASCII_MAX UINT8_C(0x7e)
 
 static const char *TAG = "firmware_update";
 static portMUX_TYPE update_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -53,14 +66,14 @@ static void make_path(const char *name, char *path, size_t capacity) {
 }
 
 static bool file_exists(const char *name) {
-    char path[64];
+    char path[UPDATE_PATH_BUFFER_SIZE];
     struct stat info;
     make_path(name, path, sizeof(path));
     return stat(path, &info) == 0 && S_ISREG(info.st_mode);
 }
 
 static esp_err_t remove_if_present(const char *name) {
-    char path[64];
+    char path[UPDATE_PATH_BUFFER_SIZE];
     make_path(name, path, sizeof(path));
     if (unlink(path) == 0 || errno == ENOENT) {
         return ESP_OK;
@@ -69,20 +82,25 @@ static esp_err_t remove_if_present(const char *name) {
 }
 
 static esp_err_t move_state_file(const char *from_name, const char *to_name) {
-    char from_path[64];
-    char to_path[64];
+    char from_path[UPDATE_PATH_BUFFER_SIZE];
+    char to_path[UPDATE_PATH_BUFFER_SIZE];
+    esp_err_t result = ESP_FAIL;
+
     make_path(from_name, from_path, sizeof(from_path));
     make_path(to_name, to_path, sizeof(to_path));
     (void) unlink(to_path);
-    return rename(from_path, to_path) == 0 ? ESP_OK : ESP_FAIL;
+    if (rename(from_path, to_path) == 0) {
+        result = ESP_OK;
+    }
+    return result;
 }
 
 static esp_err_t write_status(const char *format, ...) {
-    char status_path[64];
-    char temp_path[64];
-    char text[384];
+    char status_path[UPDATE_PATH_BUFFER_SIZE];
+    char temp_path[UPDATE_PATH_BUFFER_SIZE];
+    char text[UPDATE_STATUS_TEXT_SIZE];
     va_list arguments;
-    FILE *file;
+    FILE *file = NULL;
     int length;
     esp_err_t ret = ESP_OK;
 
@@ -153,16 +171,20 @@ static void set_state(firmware_update_state_t state, esp_err_t error) {
     portEXIT_CRITICAL(&update_lock);
 }
 
-static esp_err_t inspect_image(const char *name, update_image_info_t *info) {
-    char path[64];
+static esp_err_t inspect_image(const char *name, update_image_info_t *info,
+                               bool *project_mismatch) {
+    char path[UPDATE_PATH_BUFFER_SIZE];
     struct stat file_info;
-    FILE *file;
+    FILE *file = NULL;
     size_t descriptor_offset =
         sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
     esp_err_t ret = ESP_OK;
 
     if (name == NULL || info == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (project_mismatch != NULL) {
+        *project_mismatch = false;
     }
     memset(info, 0, sizeof(*info));
     make_path(name, path, sizeof(path));
@@ -197,8 +219,16 @@ static esp_err_t inspect_image(const char *name, update_image_info_t *info) {
         memchr(info->descriptor.project_name, '\0',
                sizeof(info->descriptor.project_name)) == NULL ||
         memchr(info->descriptor.version, '\0',
-               sizeof(info->descriptor.version)) == NULL ||
-        strcmp(info->descriptor.project_name, UPDATE_PROJECT_NAME) != 0) {
+               sizeof(info->descriptor.version)) == NULL) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (!firmware_update_policy_project_name_matches(
+            info->descriptor.project_name,
+            sizeof(info->descriptor.project_name),
+            CBV_FIRMWARE_PROJECT_NAME)) {
+        if (project_mismatch != NULL) {
+            *project_mismatch = true;
+        }
         return ESP_ERR_INVALID_RESPONSE;
     }
     return ESP_OK;
@@ -219,7 +249,9 @@ static void update_led_task(void *argument) {
 static void start_update_indicator(void) {
     update_led_running = true;
     board_set_status_leds(false, true);
-    if (xTaskCreatePinnedToCore(update_led_task, "ota_led", 2048, NULL, 1,
+    if (xTaskCreatePinnedToCore(update_led_task, "ota_led",
+                                UPDATE_LED_TASK_STACK, NULL,
+                                UPDATE_LED_TASK_PRIORITY,
                                 NULL, 0) != pdPASS) {
         update_led_running = false;
     }
@@ -227,7 +259,8 @@ static void start_update_indicator(void) {
 
 static void stop_update_indicator(void) {
     update_led_running = false;
-    vTaskDelay(pdMS_TO_TICKS(UPDATE_LED_PERIOD_MS + 10U));
+    vTaskDelay(pdMS_TO_TICKS(UPDATE_LED_PERIOD_MS +
+                            UPDATE_LED_STOP_MARGIN_MS));
     board_set_status_leds(false, false);
 }
 
@@ -237,7 +270,53 @@ static esp_err_t reject_input(esp_err_t reason, const char *message) {
     set_state(FIRMWARE_UPDATE_REJECTED, reason);
     (void) write_status("state=REJECTED\r\nreason=%s\r\nerror=%s\r\n",
                         message, esp_err_to_name(reason));
-    return move_result == ESP_OK ? reason : move_result;
+    if (move_result != ESP_OK) {
+        return move_result;
+    }
+    return reason;
+}
+
+static void sanitize_project_name(const char *input, size_t input_capacity,
+                                  char *output, size_t output_capacity) {
+    size_t index = 0U;
+
+    if (output_capacity == 0U) {
+        return;
+    }
+    while (index + 1U < output_capacity && index < input_capacity &&
+           input[index] != '\0') {
+        unsigned char value = (unsigned char) input[index];
+        output[index] = '?';
+        if (value >= UPDATE_PRINTABLE_ASCII_MIN &&
+            value <= UPDATE_PRINTABLE_ASCII_MAX) {
+            output[index] = (char) value;
+        }
+        index++;
+    }
+    output[index] = '\0';
+}
+
+static esp_err_t reject_project_mismatch(const update_image_info_t *info) {
+    char actual_project[sizeof(info->descriptor.project_name) + 1U];
+    esp_err_t reason = ESP_ERR_INVALID_RESPONSE;
+    esp_err_t move_result = ESP_FAIL;
+
+    sanitize_project_name(info->descriptor.project_name,
+                          sizeof(info->descriptor.project_name),
+                          actual_project, sizeof(actual_project));
+    move_result = move_state_file(UPDATE_INPUT_NAME, UPDATE_BAD_NAME);
+    set_state(FIRMWARE_UPDATE_REJECTED, reason);
+    (void) write_status(
+        "state=REJECTED\r\n"
+        "reason=firmware target mismatch\r\n"
+        "expected_project=%s\r\n"
+        "actual_project=%s\r\n"
+        "error=%s\r\n",
+        CBV_FIRMWARE_PROJECT_NAME, actual_project, esp_err_to_name(reason));
+    if (move_result != ESP_OK) {
+        return move_result;
+    }
+    return reason;
 }
 
 static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
@@ -247,7 +326,7 @@ static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
     if (!file_exists(UPDATE_PENDING_NAME)) {
         return ESP_OK;
     }
-    ret = inspect_image(UPDATE_PENDING_NAME, &pending_info);
+    ret = inspect_image(UPDATE_PENDING_NAME, &pending_info, NULL);
     if (ret == ESP_OK &&
         memcmp(pending_info.descriptor.app_elf_sha256,
                running_desc->app_elf_sha256,
@@ -275,10 +354,10 @@ static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
 }
 
 static esp_err_t apply_update(const update_image_info_t *info) {
-    char input_path[64];
-    uint8_t *buffer;
-    FILE *file;
-    const esp_partition_t *target;
+    char input_path[UPDATE_PATH_BUFFER_SIZE];
+    uint8_t *buffer = NULL;
+    FILE *file = NULL;
+    const esp_partition_t *target = NULL;
     esp_ota_handle_t ota_handle = 0;
     esp_err_t ret;
     bool ota_started = false;
@@ -298,6 +377,11 @@ static esp_err_t apply_update(const update_image_info_t *info) {
     if (file == NULL) {
         return ESP_FAIL;
     }
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: OTA is a serialized, low-frequency
+     * transaction. Reserving this internal-RAM-only buffer permanently would
+     * reduce normal runtime headroom; it is bounded and freed before exit.
+     */
     buffer = heap_caps_malloc(UPDATE_IO_BUFFER_BYTES,
                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (buffer == NULL) {
@@ -311,7 +395,9 @@ static esp_err_t apply_update(const update_image_info_t *info) {
         "state=WRITING\r\nversion=%s\r\nsize=%u\r\ntarget=%s\r\n",
         info->descriptor.version, (unsigned int) info->size, target->label);
 
+    (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     ret = esp_ota_begin(target, info->size, &ota_handle);
+    (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     if (ret == ESP_OK) {
         ota_started = true;
     }
@@ -332,12 +418,15 @@ static esp_err_t apply_update(const update_image_info_t *info) {
             }
             break;
         }
+        (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     }
     (void) fclose(file);
     heap_caps_free(buffer);
 
     if (ret == ESP_OK) {
+        (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
         ret = esp_ota_end(ota_handle);
+        (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
         ota_started = false;
     }
     if (ota_started) {
@@ -381,10 +470,24 @@ bool firmware_update_running_image_pending_verify(void) {
            ota_state == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
-esp_err_t firmware_update_process_boot(bool external_power_present) {
+esp_err_t firmware_update_process_boot(bool external_power_present,
+                                       bool battery_valid,
+                                       float battery_voltage_v) {
     const esp_app_desc_t *running_desc = esp_app_get_description();
     update_image_info_t image_info;
     esp_err_t ret;
+    bool project_mismatch = false;
+    bool update_power_allowed = firmware_update_policy_power_allowed(
+        external_power_present, battery_valid, battery_voltage_v);
+
+    portENTER_CRITICAL(&update_lock);
+    update_diagnostics.external_power_present = external_power_present;
+    update_diagnostics.battery_valid = battery_valid;
+    update_diagnostics.battery_voltage_v = battery_voltage_v;
+    update_diagnostics.minimum_battery_voltage_v =
+        FIRMWARE_UPDATE_MIN_BATTERY_V;
+    update_diagnostics.update_power_allowed = update_power_allowed;
+    portEXIT_CRITICAL(&update_lock);
 
     if (firmware_update_running_image_pending_verify()) {
         portENTER_CRITICAL(&update_lock);
@@ -401,6 +504,7 @@ esp_err_t firmware_update_process_boot(bool external_power_present) {
     }
 
     ret = reconcile_pending_file(running_desc);
+    (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     if (ret != ESP_OK) {
         usb_device_storage_end_app_io();
         return ret;
@@ -409,18 +513,31 @@ esp_err_t firmware_update_process_boot(bool external_power_present) {
         usb_device_storage_end_app_io();
         return ESP_OK;
     }
-    if (!external_power_present) {
-        set_state(FIRMWARE_UPDATE_DEFERRED_NO_VBUS, ESP_OK);
+    if (!update_power_allowed) {
+        set_state(FIRMWARE_UPDATE_DEFERRED_POWER, ESP_OK);
         (void) write_status(
-            "state=DEFERRED\r\nreason=external USB power required\r\n");
+            "state=DEFERRED\r\n"
+            "reason=USB power absent and battery not above threshold\r\n"
+            "external_power=%d\r\n"
+            "battery_valid=%d\r\n"
+            "battery_v=%.2f\r\n"
+            "threshold_v=%.2f\r\n",
+            external_power_present, battery_valid,
+            (double) battery_voltage_v,
+            (double) FIRMWARE_UPDATE_MIN_BATTERY_V);
         usb_device_storage_end_app_io();
         return ESP_OK;
     }
 
     set_state(FIRMWARE_UPDATE_VALIDATING, ESP_OK);
-    ret = inspect_image(UPDATE_INPUT_NAME, &image_info);
+    ret = inspect_image(UPDATE_INPUT_NAME, &image_info, &project_mismatch);
+    (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     if (ret != ESP_OK) {
-        ret = reject_input(ret, "invalid ESP32-S3 application image");
+        if (project_mismatch) {
+            ret = reject_project_mismatch(&image_info);
+        } else {
+            ret = reject_input(ret, "invalid ESP32-S3 application image");
+        }
         usb_device_storage_end_app_io();
         return ret;
     }
@@ -439,7 +556,7 @@ esp_err_t firmware_update_process_boot(bool external_power_present) {
 
 static void confirmation_task(void *argument) {
     bool workers_started;
-    const esp_app_desc_t *running_desc;
+    const esp_app_desc_t *running_desc = NULL;
     esp_err_t ret;
     (void) argument;
 
@@ -512,7 +629,7 @@ esp_err_t firmware_update_begin_confirmation(void) {
 }
 
 esp_err_t firmware_update_wait_for_confirmation(uint32_t timeout_ms) {
-    const TickType_t poll_ticks = pdMS_TO_TICKS(10U);
+    const TickType_t poll_ticks = pdMS_TO_TICKS(UPDATE_CONFIRMATION_POLL_MS);
     const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
     const TickType_t start_ticks = xTaskGetTickCount();
 
@@ -528,7 +645,10 @@ esp_err_t firmware_update_wait_for_confirmation(uint32_t timeout_ms) {
         portEXIT_CRITICAL(&update_lock);
 
         if (!confirmation_required) {
-            return state == FIRMWARE_UPDATE_CONFIRMED ? ESP_OK : last_error;
+            if (state == FIRMWARE_UPDATE_CONFIRMED) {
+                return ESP_OK;
+            }
+            return last_error;
         }
         if (state == FIRMWARE_UPDATE_PENDING_CONFIRMATION &&
             last_error != ESP_OK) {
@@ -559,7 +679,7 @@ void firmware_update_get_diagnostics(
 
 const char *firmware_update_state_name(firmware_update_state_t state) {
     switch (state) {
-        case FIRMWARE_UPDATE_DEFERRED_NO_VBUS:
+        case FIRMWARE_UPDATE_DEFERRED_POWER:
             return "DEFERRED";
         case FIRMWARE_UPDATE_VALIDATING:
             return "VALIDATING";

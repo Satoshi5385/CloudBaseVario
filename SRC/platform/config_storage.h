@@ -5,7 +5,7 @@
 #include "domain/app_config.h"
 #include "esp_err.h"
 
-#define CONFIG_FORMAT_VERSION 5
+#define CONFIG_FORMAT_VERSION 1
 
 typedef enum {
     CONFIG_LOAD_DEFAULT_NO_FILE = 0,
@@ -62,9 +62,9 @@ typedef struct {
 } config_storage_diagnostics_t;
 
 /**
- * @brief Load and strictly validate parameters.json from a mounted FAT volume.
+ * @brief Load and strictly validate setting.json from a mounted FAT volume.
  *
- * All six shared parameters and all 22 parameters in every version-4 audio
+ * All nine shared parameters and all 22 parameters in every version-1
  * profile are required. An invalid file never partially changes the returned
  * configuration.
  */
@@ -73,12 +73,14 @@ config_load_result_t config_storage_load(const char *base_path,
                                          config_storage_diagnostics_t *diagnostics);
 
 /**
- * @brief Atomically write, sync, read back, and rename parameters.json.
+ * @brief Atomically write, sync, read back, and rename setting.json.
  * @return ESP_OK on verified save, otherwise an I/O or validation error.
  */
 esp_err_t config_storage_save(const char *base_path,
                               const app_config_profiles_t *profiles);
 
+/** Return the diagnostic name of a configuration source. */
 const char *config_storage_source_name(config_source_t source);
+/** Return the diagnostic name of a validation result. */
 const char *config_storage_validation_name(
     config_validation_result_t validation);

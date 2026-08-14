@@ -1,7 +1,6 @@
 #include "platform/imu_calibration_storage.h"
 
 #include <errno.h>
-#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,12 +11,49 @@
 #include "cJSON.h"
 #include "platform/icm42688_hxy.h"
 
-#define MC_DATA_FORMAT_VERSION 1
+#define MC_DATA_FORMAT_VERSION 2
 #define MC_DATA_PATH_BUFFER_SIZE 96U
 #define MC_DATA_MAX_FILE_BYTES 2048U
-#define MC_DATA_MODEL "ICM-42688P-HXY"
-#define MC_DATA_COORDINATE "SENSOR"
-#define MC_DATA_METHOD "LEVEL_Z_UP"
+
+typedef struct {
+    const char *model;
+    uint8_t who_am_i;
+    const char *coordinate;
+    const char *method;
+    uint32_t sample_count;
+} mc_data_model_config_t;
+
+static const mc_data_model_config_t mc_data_model_configs[] = {{
+    .model = "ICM-42688P-HXY",
+    .who_am_i = ICM42688_HXY_WHO_AM_I_VALUE,
+    .coordinate = "SENSOR",
+    .method = "LEVEL_Z_UP",
+    .sample_count = IMU_ACCEL_CALIBRATION_SAMPLE_COUNT,
+}};
+
+static bool mc_data_model_config_is_valid(
+    const mc_data_model_config_t *config) {
+    return config != NULL && config->model != NULL &&
+           config->who_am_i != 0U && config->coordinate != NULL &&
+           config->method != NULL && config->sample_count > 0U;
+}
+
+static const mc_data_model_config_t *mc_data_model_config(
+    const char *model) {
+    if (model == NULL) {
+        return NULL;
+    }
+    for (size_t index = 0U;
+         index < sizeof(mc_data_model_configs) /
+                     sizeof(mc_data_model_configs[0]);
+         index++) {
+        if (mc_data_model_config_is_valid(&mc_data_model_configs[index]) &&
+            strcmp(model, mc_data_model_configs[index].model) == 0) {
+            return &mc_data_model_configs[index];
+        }
+    }
+    return NULL;
+}
 
 static bool make_path(const char *base_path, const char *filename,
                       char path[MC_DATA_PATH_BUFFER_SIZE]) {
@@ -89,15 +125,14 @@ static bool parse_document(const char *json, size_t length,
                            imu_accel_calibration_t *calibration) {
     static const char *const root_keys[] = {
         "format_version", "imu_accel_calibration"};
-    static const char *const calibration_keys[] = {
-        "model", "who_am_i", "coordinate", "method", "sample_count",
-        "offset_mps2"};
+    static const char *const calibration_keys[] = {"model", "offset_mps2"};
     const char *document = json;
     size_t document_length = length;
     const char *parse_end = NULL;
     cJSON *root = NULL;
     cJSON *section = NULL;
     cJSON *offsets = NULL;
+    const mc_data_model_config_t *model_config = NULL;
     imu_accel_calibration_t candidate = {0};
     bool valid = false;
 
@@ -110,6 +145,11 @@ static bool parse_document(const char *json, size_t length,
         document += 3;
         document_length -= 3U;
     }
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: cJSON owns a bounded parse tree for this
+     * low-frequency, serialized calibration load. cJSON_Delete releases the
+     * complete tree at cleanup on every exit path.
+     */
     root = cJSON_ParseWithLengthOpts(document, document_length + 1U,
                                      &parse_end, true);
     if (root == NULL || parse_end != document + document_length ||
@@ -120,7 +160,8 @@ static bool parse_document(const char *json, size_t length,
     cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "format_version");
     section = cJSON_GetObjectItemCaseSensitive(root,
                                                 "imu_accel_calibration");
-    if (!cJSON_IsNumber(version) || version->valuedouble != 1.0 ||
+    if (!cJSON_IsNumber(version) ||
+        version->valuedouble != MC_DATA_FORMAT_VERSION ||
         !object_has_exact_keys(
             section, calibration_keys,
             sizeof(calibration_keys) / sizeof(calibration_keys[0]))) {
@@ -128,23 +169,12 @@ static bool parse_document(const char *json, size_t length,
     }
 
     cJSON *model = cJSON_GetObjectItemCaseSensitive(section, "model");
-    cJSON *who_am_i = cJSON_GetObjectItemCaseSensitive(section, "who_am_i");
-    cJSON *coordinate =
-        cJSON_GetObjectItemCaseSensitive(section, "coordinate");
-    cJSON *method = cJSON_GetObjectItemCaseSensitive(section, "method");
-    cJSON *sample_count =
-        cJSON_GetObjectItemCaseSensitive(section, "sample_count");
     offsets = cJSON_GetObjectItemCaseSensitive(section, "offset_mps2");
-    if (!cJSON_IsString(model) || model->valuestring == NULL ||
-        strcmp(model->valuestring, MC_DATA_MODEL) != 0 ||
-        !cJSON_IsNumber(who_am_i) ||
-        who_am_i->valuedouble != ICM42688_HXY_WHO_AM_I_VALUE ||
-        !cJSON_IsString(coordinate) || coordinate->valuestring == NULL ||
-        strcmp(coordinate->valuestring, MC_DATA_COORDINATE) != 0 ||
-        !cJSON_IsString(method) || method->valuestring == NULL ||
-        strcmp(method->valuestring, MC_DATA_METHOD) != 0 ||
-        !cJSON_IsNumber(sample_count) ||
-        sample_count->valuedouble != IMU_ACCEL_CALIBRATION_SAMPLE_COUNT ||
+    if (!cJSON_IsString(model) || model->valuestring == NULL) {
+        goto cleanup;
+    }
+    model_config = mc_data_model_config(model->valuestring);
+    if (model_config == NULL ||
         !cJSON_IsArray(offsets) || cJSON_GetArraySize(offsets) != 3) {
         goto cleanup;
     }
@@ -156,7 +186,7 @@ static bool parse_document(const char *json, size_t length,
         }
         candidate.offset_mps2[axis] = (float) item->valuedouble;
     }
-    candidate.sample_count = IMU_ACCEL_CALIBRATION_SAMPLE_COUNT;
+    candidate.sample_count = model_config->sample_count;
     candidate.valid = true;
     if (!imu_accel_calibration_validate(&candidate)) {
         goto cleanup;
@@ -191,6 +221,11 @@ static imu_calibration_storage_result_t load_path(
         (uint64_t) status.st_size > MC_DATA_MAX_FILE_BYTES) {
         return IMU_CALIBRATION_STORAGE_INVALID;
     }
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: calibration files are bounded by
+     * MC_DATA_MAX_FILE_BYTES and loaded only during serialized storage
+     * transactions. The exact-size buffer is released before every return.
+     */
     contents = malloc((size_t) status.st_size + 1U);
     if (contents == NULL) {
         if (io_error != NULL) {
@@ -209,14 +244,18 @@ static imu_calibration_storage_result_t load_path(
     bytes_read = fread(contents, 1U, (size_t) status.st_size, file);
     if (ferror(file) != 0 || bytes_read != (size_t) status.st_size) {
         if (io_error != NULL) {
-            *io_error = ferror(file) != 0 ? errno : EIO;
+            *io_error = EIO;
+            if (ferror(file) != 0) {
+                *io_error = errno;
+            }
         }
         result = IMU_CALIBRATION_STORAGE_IO_ERROR;
     } else {
         contents[bytes_read] = '\0';
-        result = parse_document(contents, bytes_read, calibration)
-                     ? IMU_CALIBRATION_STORAGE_VALID
-                     : IMU_CALIBRATION_STORAGE_INVALID;
+        result = IMU_CALIBRATION_STORAGE_INVALID;
+        if (parse_document(contents, bytes_read, calibration)) {
+            result = IMU_CALIBRATION_STORAGE_VALID;
+        }
     }
     (void) fclose(file);
     free(contents);
@@ -278,17 +317,10 @@ static bool write_json(FILE *file,
                "  \"format_version\": %d,\n"
                "  \"imu_accel_calibration\": {\n"
                "    \"model\": \"%s\",\n"
-               "    \"who_am_i\": %u,\n"
-               "    \"coordinate\": \"%s\",\n"
-               "    \"method\": \"%s\",\n"
-               "    \"sample_count\": %" PRIu32 ",\n"
                "    \"offset_mps2\": [%.9g, %.9g, %.9g]\n"
                "  }\n"
                "}\n",
-               MC_DATA_FORMAT_VERSION, MC_DATA_MODEL,
-               (unsigned int) ICM42688_HXY_WHO_AM_I_VALUE,
-               MC_DATA_COORDINATE, MC_DATA_METHOD,
-               calibration->sample_count,
+               MC_DATA_FORMAT_VERSION, mc_data_model_configs[0].model,
                (double) calibration->offset_mps2[0],
                (double) calibration->offset_mps2[1],
                (double) calibration->offset_mps2[2]) > 0;

@@ -18,12 +18,15 @@ typedef struct {
     int32_t io_error;
 } imu_calibration_storage_diagnostics_t;
 
+/** Load and strictly validate calibration data, with backup recovery. */
 imu_calibration_storage_result_t imu_calibration_storage_load(
     const char *base_path, imu_accel_calibration_t *calibration,
     imu_calibration_storage_diagnostics_t *diagnostics);
 
+/** Atomically save and verify one valid accelerometer calibration. */
 esp_err_t imu_calibration_storage_save(
     const char *base_path, const imu_accel_calibration_t *calibration);
 
+/** Return the diagnostic name of a calibration storage result. */
 const char *imu_calibration_storage_result_name(
     imu_calibration_storage_result_t result);

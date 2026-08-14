@@ -6,8 +6,8 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +26,9 @@
 #define CONFIG_MOUNT_PATH "/config"
 #define CONFIG_VOLUME_LABEL "CBVARIO"
 #define STORAGE_MUTEX_TIMEOUT_MS UINT32_C(100)
-#define USB_SERIAL_NUMBER_LENGTH 13U
+#define STORAGE_MODE_QUIESCE_TIMEOUT_MS UINT32_C(100)
+#define STORAGE_MODE_IDLE_US INT64_C(1000000)
+#define USB_SERIAL_NUMBER_LENGTH BOARD_SERIAL_BUFFER_SIZE
 #define USB_CONFIG_TOTAL_LENGTH \
     (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
@@ -36,8 +38,17 @@ static SemaphoreHandle_t storage_io_mutex;
 static SemaphoreHandle_t msc_policy_mutex;
 static bool storage_transition_locked;
 static bool msc_exposure_enabled;
+static bool usb_stopping;
+static bool console_redirect_ready;
 static wl_handle_t wear_levelling_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t msc_storage;
+static esp_timer_handle_t storage_mode_idle_timer;
+static usb_storage_mode_begin_cb_t storage_mode_begin_cb;
+static usb_storage_mode_end_cb_t storage_mode_end_cb;
+static void *storage_mode_callback_arg;
+static int64_t current_write_started_us;
+static int64_t last_write_completed_us;
+static bool storage_mode_force_exit;
 static char serial_number[USB_SERIAL_NUMBER_LENGTH];
 static const char *usb_strings[] = {
     (const char[]) {0x09, 0x04},
@@ -77,6 +88,137 @@ static const tusb_desc_device_t usb_device_descriptor = {
     .bNumConfigurations = 1,
 };
 
+static void storage_mode_finish_if_idle(void) {
+    usb_storage_mode_end_cb_t end_cb = NULL;
+    void *callback_arg = NULL;
+
+    portENTER_CRITICAL(&state_lock);
+    if (usb_storage_policy_write_session_forced_exit(
+            usb_diagnostics.storage_mode_active,
+            usb_diagnostics.pending_write_count)) {
+        usb_diagnostics.storage_mode_active = false;
+        storage_mode_force_exit = false;
+        if (usb_diagnostics.storage_mode_end_count < UINT32_MAX) {
+            usb_diagnostics.storage_mode_end_count++;
+        }
+        end_cb = storage_mode_end_cb;
+        callback_arg = storage_mode_callback_arg;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    if (end_cb != NULL) {
+        end_cb(callback_arg);
+    }
+}
+
+static void storage_mode_request_forced_exit(void) {
+    portENTER_CRITICAL(&state_lock);
+    storage_mode_force_exit = true;
+    portEXIT_CRITICAL(&state_lock);
+    storage_mode_finish_if_idle();
+}
+
+static void storage_mode_idle_timer_cb(void *arg) {
+    bool idle = false;
+    int64_t now_us = esp_timer_get_time();
+
+    (void) arg;
+    portENTER_CRITICAL(&state_lock);
+    idle = usb_storage_policy_write_session_idle(
+        usb_diagnostics.storage_mode_active,
+        usb_diagnostics.pending_write_count,
+        now_us - last_write_completed_us, STORAGE_MODE_IDLE_US);
+    portEXIT_CRITICAL(&state_lock);
+    if (idle) {
+        storage_mode_finish_if_idle();
+    }
+}
+
+static void msc_write_event(tinyusb_msc_storage_handle_t handle,
+                            const tinyusb_msc_write_event_t *event,
+                            void *arg) {
+    bool start_mode = false;
+    bool quiesced = true;
+    int64_t now_us = esp_timer_get_time();
+    uint32_t duration_us = 0U;
+
+    (void) handle;
+    (void) arg;
+    if (event == NULL) {
+        return;
+    }
+    if (event->id == TINYUSB_MSC_WRITE_EVENT_BEGIN) {
+        if (storage_mode_idle_timer != NULL) {
+            (void) esp_timer_stop(storage_mode_idle_timer);
+        }
+        portENTER_CRITICAL(&state_lock);
+        start_mode = !usb_diagnostics.storage_mode_active;
+        usb_diagnostics.storage_mode_active = true;
+        storage_mode_force_exit = false;
+        usb_diagnostics.pending_write_count = event->pending_count;
+        current_write_started_us = now_us;
+        if (start_mode &&
+            usb_diagnostics.storage_mode_start_count < UINT32_MAX) {
+            usb_diagnostics.storage_mode_start_count++;
+        }
+        portEXIT_CRITICAL(&state_lock);
+        if (start_mode && storage_mode_begin_cb != NULL) {
+            quiesced = storage_mode_begin_cb(
+                STORAGE_MODE_QUIESCE_TIMEOUT_MS,
+                storage_mode_callback_arg);
+            if (!quiesced) {
+                portENTER_CRITICAL(&state_lock);
+                if (usb_diagnostics.storage_mode_quiesce_timeout_count <
+                    UINT32_MAX) {
+                    usb_diagnostics.storage_mode_quiesce_timeout_count++;
+                }
+                portEXIT_CRITICAL(&state_lock);
+            }
+        }
+        return;
+    }
+
+    if (now_us > current_write_started_us) {
+        int64_t measured_us = now_us - current_write_started_us;
+        duration_us = UINT32_MAX;
+        if (measured_us <= (int64_t) UINT32_MAX) {
+            duration_us = (uint32_t) measured_us;
+        }
+    }
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.pending_write_count = event->pending_count;
+    usb_diagnostics.last_msc_write_duration_us = duration_us;
+    if (duration_us > usb_diagnostics.max_msc_write_duration_us) {
+        usb_diagnostics.max_msc_write_duration_us = duration_us;
+    }
+    if (usb_diagnostics.msc_write_count < UINT32_MAX) {
+        usb_diagnostics.msc_write_count++;
+    }
+    if (event->result == ESP_OK) {
+        if (UINT64_MAX - usb_diagnostics.msc_written_bytes < event->size) {
+            usb_diagnostics.msc_written_bytes = UINT64_MAX;
+        } else {
+            usb_diagnostics.msc_written_bytes += event->size;
+        }
+    } else if (usb_diagnostics.msc_write_error_count < UINT32_MAX) {
+        usb_diagnostics.msc_write_error_count++;
+    }
+    last_write_completed_us = now_us;
+    portEXIT_CRITICAL(&state_lock);
+    if (event->pending_count == 0U) {
+        bool force_exit = false;
+
+        portENTER_CRITICAL(&state_lock);
+        force_exit = storage_mode_force_exit;
+        portEXIT_CRITICAL(&state_lock);
+        if (force_exit) {
+            storage_mode_finish_if_idle();
+        } else if (storage_mode_idle_timer != NULL) {
+            (void) esp_timer_start_once(storage_mode_idle_timer,
+                                        STORAGE_MODE_IDLE_US);
+        }
+    }
+}
+
 static const uint8_t usb_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 3, 0, USB_CONFIG_TOTAL_LENGTH,
                           TUSB_DESC_CONFIG_ATT_SELF_POWERED, 100),
@@ -111,34 +253,37 @@ static void set_storage_unavailable(esp_err_t error) {
 
 static void log_config_load_result(void) {
     if (usb_diagnostics.load_result == CONFIG_LOAD_INVALID_FILE) {
+        const char *key = usb_diagnostics.config.key;
+
+        if (key[0] == '\0') {
+            key = "-";
+        }
         ESP_LOGW(TAG,
-                 "parameters.json invalid: reason=%s key=%s version=%" PRId32,
+                 "setting.json invalid: reason=%s key=%s version=%" PRId32,
                  config_storage_validation_name(
                      usb_diagnostics.config.validation),
-                 usb_diagnostics.config.key[0] == '\0'
-                     ? "-"
-                     : usb_diagnostics.config.key,
+                 key,
                  usb_diagnostics.config.format_version);
     } else if (usb_diagnostics.load_result == CONFIG_LOAD_IO_ERROR) {
-        ESP_LOGW(TAG, "parameters.json read failed: reason=%s io_error=%" PRId32,
+        ESP_LOGW(TAG, "setting.json read failed: reason=%s io_error=%" PRId32,
                  config_storage_validation_name(
                      usb_diagnostics.config.validation),
                  usb_diagnostics.config.io_error);
     } else if (usb_diagnostics.load_result == CONFIG_LOAD_RECOVERED_FILE) {
-        ESP_LOGW(TAG, "parameters.json recovered from verified backup");
+        ESP_LOGW(TAG, "setting.json recovered from verified backup");
     }
 }
 
-static void make_serial_number(void) {
-    uint8_t mac[6] = {0};
+static bool make_serial_number(void) {
+    const board_identity_t *identity = board_active_identity();
 
-    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
-        (void) snprintf(serial_number, sizeof(serial_number), "000000000000");
-        return;
+    if (identity == NULL || !board_identity_validate(identity)) {
+        serial_number[0] = '\0';
+        return false;
     }
-    (void) snprintf(serial_number, sizeof(serial_number),
-                    "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2],
-                    mac[3], mac[4], mac[5]);
+    (void) snprintf(serial_number, sizeof(serial_number), "%s",
+                    identity->serial);
+    return true;
 }
 
 static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
@@ -160,19 +305,16 @@ static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
     portENTER_CRITICAL(&state_lock);
     if (event->id == TINYUSB_EVENT_ATTACHED) {
         usb_diagnostics.device_attached = true;
-        restore_app_ownership = !msc_exposure_enabled &&
-                                msc_storage != NULL;
+        restore_app_ownership = usb_storage_policy_restore_on_attach(
+            msc_exposure_enabled, msc_storage != NULL);
         if (usb_diagnostics.attach_count < UINT32_MAX) {
             usb_diagnostics.attach_count++;
         }
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         usb_diagnostics.device_attached = false;
         usb_diagnostics.cdc_connected = false;
-        restore_app_ownership = msc_storage != NULL &&
-                                usb_diagnostics.storage_owner !=
-                                    USB_STORAGE_APP_OWNED &&
-                                usb_diagnostics.storage_owner !=
-                                    USB_STORAGE_UNAVAILABLE;
+        restore_app_ownership = usb_storage_policy_restore_on_detach(
+            msc_storage != NULL, usb_diagnostics.storage_owner);
         if (usb_diagnostics.detach_count < UINT32_MAX) {
             usb_diagnostics.detach_count++;
         }
@@ -191,11 +333,19 @@ static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
         owner = usb_diagnostics.storage_owner;
         storage_error = usb_diagnostics.last_storage_error;
         portEXIT_CRITICAL(&state_lock);
-        if (ret != ESP_OK || owner != USB_STORAGE_APP_OWNED) {
-            esp_err_t effective_error =
-                ret != ESP_OK
-                    ? ret
-                    : (storage_error == ESP_OK ? ESP_FAIL : storage_error);
+        if (ret == ESP_ERR_NOT_FINISHED &&
+            event->id == TINYUSB_EVENT_DETACHED) {
+            ESP_LOGI(TAG,
+                     "MSC detach ownership transition deferred until writes drain");
+        } else if (ret != ESP_OK || owner != USB_STORAGE_APP_OWNED) {
+            esp_err_t effective_error = ret;
+
+            if (ret == ESP_OK) {
+                effective_error = storage_error;
+                if (effective_error == ESP_OK) {
+                    effective_error = ESP_FAIL;
+                }
+            }
             ESP_LOGE(TAG, "failed to retain APP storage ownership: %s",
                      esp_err_to_name(effective_error));
             set_storage_unavailable(effective_error);
@@ -203,6 +353,9 @@ static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
     }
     if (policy_locked) {
         (void) xSemaphoreGive(msc_policy_mutex);
+    }
+    if (event->id == TINYUSB_EVENT_DETACHED) {
+        storage_mode_request_forced_exit();
     }
 }
 
@@ -226,6 +379,7 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
     }
 
     if (event->id == TINYUSB_MSC_EVENT_MOUNT_START) {
+        storage_mode_request_forced_exit();
         (void) xSemaphoreTake(storage_io_mutex, portMAX_DELAY);
         storage_transition_locked = true;
         portENTER_CRITICAL(&state_lock);
@@ -239,10 +393,8 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
         usb_diagnostics.storage_ready = true;
         usb_diagnostics.msc_media_ready = true;
         usb_diagnostics.last_storage_error = ESP_OK;
-        usb_diagnostics.storage_owner =
-            event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP
-                ? USB_STORAGE_APP_OWNED
-                : USB_STORAGE_HOST_OWNED;
+        usb_diagnostics.storage_owner = usb_storage_policy_mount_owner(
+            event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
     } else {
         usb_diagnostics.storage_ready = false;
         usb_diagnostics.msc_media_ready = false;
@@ -272,7 +424,7 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         .allocation_unit_size = 4096,
         .use_one_fat = false,
     };
-    const esp_partition_t *partition;
+    const esp_partition_t *partition = NULL;
     wl_handle_t preflight_handle = WL_INVALID_HANDLE;
     bool media_ready;
     esp_err_t storage_error;
@@ -296,10 +448,25 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         return ESP_ERR_NO_MEM;
     }
 
+    if (storage_mode_idle_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = storage_mode_idle_timer_cb,
+            .name = "msc_idle",
+        };
+
+        ret = esp_timer_create(&timer_args, &storage_mode_idle_timer);
+        if (ret != ESP_OK) {
+            set_storage_unavailable(ret);
+            return ret;
+        }
+    }
+
     const tinyusb_msc_driver_config_t driver_config = {
         .user_flags = {.val = 0},
         .callback = msc_storage_event,
         .callback_arg = NULL,
+        .write_callback = msc_write_event,
+        .write_callback_arg = NULL,
     };
     ret = tinyusb_msc_install_driver(&driver_config);
     if (ret != ESP_OK) {
@@ -345,7 +512,7 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     if (usb_diagnostics.load_result == CONFIG_LOAD_DEFAULT_NO_FILE) {
         ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "default parameters.json generation failed: %s",
+            ESP_LOGW(TAG, "default setting.json generation failed: %s",
                      esp_err_to_name(ret));
         }
     } else {
@@ -422,7 +589,10 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     if (!media_ready) {
         ESP_LOGW(TAG, "MSC application mount failed: %s",
                  esp_err_to_name(storage_error));
-        return storage_error == ESP_OK ? ESP_FAIL : storage_error;
+        if (storage_error == ESP_OK) {
+            return ESP_FAIL;
+        }
+        return storage_error;
     }
     return ESP_OK;
 }
@@ -431,15 +601,17 @@ esp_err_t usb_device_start(void) {
     esp_err_t first_error = ESP_OK;
     esp_err_t ret;
     bool driver_ready;
+    bool stopping;
     bool msc_driver_ready;
     bool media_ready;
     esp_err_t storage_error;
 
     portENTER_CRITICAL(&state_lock);
     driver_ready = usb_diagnostics.driver_ready;
+    stopping = usb_stopping;
     msc_driver_ready = usb_diagnostics.msc_driver_ready;
     portEXIT_CRITICAL(&state_lock);
-    if (driver_ready) {
+    if (driver_ready || stopping) {
         return ESP_ERR_INVALID_STATE;
     }
     if (!msc_driver_ready) {
@@ -448,7 +620,10 @@ esp_err_t usb_device_start(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    make_serial_number();
+    if (!make_serial_number()) {
+        ESP_LOGE(TAG, "TinyUSB requires a valid board product serial");
+        return ESP_ERR_INVALID_STATE;
+    }
     tinyusb_config_t tinyusb_config =
         TINYUSB_DEFAULT_CONFIG(tinyusb_device_event, NULL);
     tinyusb_config.phy.self_powered = true;
@@ -495,6 +670,10 @@ esp_err_t usb_device_start(void) {
         if (first_error == ESP_OK) {
             first_error = ret;
         }
+    } else {
+        portENTER_CRITICAL(&state_lock);
+        console_redirect_ready = true;
+        portEXIT_CRITICAL(&state_lock);
     }
     ESP_LOGI(TAG, "TinyUSB CDC+MSC composite device initialized");
     portENTER_CRITICAL(&state_lock);
@@ -507,6 +686,121 @@ esp_err_t usb_device_start(void) {
                  esp_err_to_name(storage_error));
     }
     return first_error;
+}
+
+esp_err_t usb_device_stop(void) {
+    usb_storage_owner_t owner;
+    bool driver_ready;
+    bool cdc_ready;
+    bool console_ready;
+    bool exposure_was_enabled;
+    uint32_t internal_pending_writes = 0U;
+    esp_err_t ret;
+
+    if (msc_policy_mutex == NULL) {
+        portENTER_CRITICAL(&state_lock);
+        driver_ready = usb_diagnostics.driver_ready;
+        portEXIT_CRITICAL(&state_lock);
+        if (driver_ready) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        return ESP_OK;
+    }
+    if (xSemaphoreTake(msc_policy_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&state_lock);
+    driver_ready = usb_diagnostics.driver_ready;
+    if (!driver_ready) {
+        usb_stopping = false;
+        portEXIT_CRITICAL(&state_lock);
+        (void) xSemaphoreGive(msc_policy_mutex);
+        return ESP_OK;
+    }
+    if (usb_diagnostics.storage_mode_active ||
+        usb_diagnostics.pending_write_count != 0U ||
+        usb_diagnostics.storage_owner == USB_STORAGE_SWITCHING) {
+        portEXIT_CRITICAL(&state_lock);
+        (void) xSemaphoreGive(msc_policy_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    usb_stopping = true;
+    exposure_was_enabled = msc_exposure_enabled;
+    msc_exposure_enabled = false;
+    owner = usb_diagnostics.storage_owner;
+    portEXIT_CRITICAL(&state_lock);
+
+    if (msc_storage != NULL) {
+        ret = tinyusb_msc_stop_host_io(msc_storage,
+                                       &internal_pending_writes);
+        if (ret != ESP_OK || internal_pending_writes != 0U) {
+            if (ret == ESP_OK) {
+                (void) tinyusb_msc_set_storage_mount_point(
+                    msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB);
+                ret = ESP_ERR_INVALID_STATE;
+            }
+            portENTER_CRITICAL(&state_lock);
+            usb_stopping = false;
+            msc_exposure_enabled = exposure_was_enabled;
+            portEXIT_CRITICAL(&state_lock);
+            (void) xSemaphoreGive(msc_policy_mutex);
+            return ret;
+        }
+    }
+
+    if (owner == USB_STORAGE_HOST_OWNED && msc_storage != NULL) {
+        ret = tinyusb_msc_set_storage_mount_point(
+            msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP);
+        if (ret != ESP_OK) {
+            portENTER_CRITICAL(&state_lock);
+            usb_stopping = false;
+            msc_exposure_enabled = exposure_was_enabled;
+            portEXIT_CRITICAL(&state_lock);
+            (void) xSemaphoreGive(msc_policy_mutex);
+            return ret;
+        }
+    }
+    (void) xSemaphoreGive(msc_policy_mutex);
+
+    portENTER_CRITICAL(&state_lock);
+    console_ready = console_redirect_ready;
+    cdc_ready = usb_diagnostics.cdc_ready;
+    portEXIT_CRITICAL(&state_lock);
+    if (console_ready) {
+        ret = tinyusb_console_deinit(TINYUSB_CDC_ACM_0);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "TinyUSB console deinitialization failed: %s",
+                     esp_err_to_name(ret));
+        }
+    }
+
+    ret = tinyusb_driver_uninstall();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "TinyUSB driver shutdown failed: %s",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+    if (cdc_ready) {
+        esp_err_t cdc_ret = tinyusb_cdcacm_deinit(TINYUSB_CDC_ACM_0);
+
+        if (cdc_ret != ESP_OK) {
+            ESP_LOGW(TAG, "TinyUSB CDC deinitialization failed: %s",
+                     esp_err_to_name(cdc_ret));
+        }
+    }
+
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.driver_ready = false;
+    usb_diagnostics.cdc_ready = false;
+    usb_diagnostics.msc_enabled = false;
+    usb_diagnostics.device_attached = false;
+    usb_diagnostics.cdc_connected = false;
+    console_redirect_ready = false;
+    usb_stopping = false;
+    portEXIT_CRITICAL(&state_lock);
+    ESP_LOGI(TAG, "application TinyUSB task and PHY stopped");
+    return ESP_OK;
 }
 
 esp_err_t usb_device_enable_msc(void) {
@@ -568,10 +862,32 @@ esp_err_t usb_device_enable_msc(void) {
         return ret;
     }
     if (owner != USB_STORAGE_HOST_OWNED) {
-        return storage_error == ESP_OK ? ESP_FAIL : storage_error;
+        if (storage_error == ESP_OK) {
+            return ESP_FAIL;
+        }
+        return storage_error;
     }
     ESP_LOGI(TAG, "MSC medium enabled for USB host");
     return ESP_OK;
+}
+
+void usb_device_set_storage_mode_callbacks(
+    usb_storage_mode_begin_cb_t begin_cb,
+    usb_storage_mode_end_cb_t end_cb, void *arg) {
+    portENTER_CRITICAL(&state_lock);
+    storage_mode_begin_cb = begin_cb;
+    storage_mode_end_cb = end_cb;
+    storage_mode_callback_arg = arg;
+    portEXIT_CRITICAL(&state_lock);
+}
+
+bool usb_device_storage_mode_active(void) {
+    bool active = false;
+
+    portENTER_CRITICAL(&state_lock);
+    active = usb_diagnostics.storage_mode_active;
+    portEXIT_CRITICAL(&state_lock);
+    return active;
 }
 
 esp_err_t usb_device_storage_begin_app_io(uint32_t timeout_ms) {
@@ -583,7 +899,7 @@ esp_err_t usb_device_storage_begin_app_io(uint32_t timeout_ms) {
     portENTER_CRITICAL(&state_lock);
     owner = usb_diagnostics.storage_owner;
     portEXIT_CRITICAL(&state_lock);
-    if (owner != USB_STORAGE_APP_OWNED) {
+    if (!usb_storage_policy_app_io_allowed(owner)) {
         return ESP_ERR_INVALID_STATE;
     }
     if (xSemaphoreTake(storage_io_mutex, pdMS_TO_TICKS(timeout_ms)) !=
@@ -594,7 +910,7 @@ esp_err_t usb_device_storage_begin_app_io(uint32_t timeout_ms) {
     portENTER_CRITICAL(&state_lock);
     owner = usb_diagnostics.storage_owner;
     portEXIT_CRITICAL(&state_lock);
-    if (owner != USB_STORAGE_APP_OWNED) {
+    if (!usb_storage_policy_app_io_allowed(owner)) {
         (void) xSemaphoreGive(storage_io_mutex);
         return ESP_ERR_INVALID_STATE;
     }
@@ -703,7 +1019,7 @@ bool usb_device_write(const char *text) {
 bool usb_device_cdc_connected(void) {
     bool connected;
     portENTER_CRITICAL(&state_lock);
-    connected = usb_diagnostics.cdc_ready &&
+    connected = !usb_stopping && usb_diagnostics.cdc_ready &&
                 usb_diagnostics.cdc_connected;
     portEXIT_CRITICAL(&state_lock);
     return connected;

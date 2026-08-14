@@ -38,6 +38,8 @@ flasher_args.json
 /components/esp_tinyusb/CHECKSUMS.json
 /components/esp_tinyusb/test_apps/
 /.espressif/
+/.ccache/
+/.ccache-tmp/
 
 # CMake generated files
 CMakeCache.txt
@@ -75,6 +77,4 @@ env/
 .agents/
 .codex/
 
-# Local test, validation, and planning work
-/tests/
-
+# Local planning work remains untracked; regression tests are repository assets.

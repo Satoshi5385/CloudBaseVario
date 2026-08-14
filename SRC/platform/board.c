@@ -23,6 +23,8 @@
 
 static const char *TAG = "board";
 static bool green_led_pwm_initialized = false;
+static board_identity_t active_identity;
+static const board_descriptor_t *active_descriptor;
 static const imu_axis_map_t aohazuku_rev0_imu_axis_map = {
     .accel_source = {0U, 1U, 2U},
     .accel_sign = {1.0f, 1.0f, 1.0f},
@@ -106,6 +108,32 @@ esp_err_t board_init_power_hold(void) {
     return gpio_set_level(PIN_PWR_HOLD, 1U);
 }
 
+bool board_select_identity(const board_identity_t *identity) {
+    const board_descriptor_t *descriptor = NULL;
+
+    if (!board_identity_validate(identity)) {
+        return false;
+    }
+    descriptor = board_identity_descriptor(identity->board_id);
+    if (descriptor == NULL) {
+        return false;
+    }
+    active_identity = *identity;
+    active_descriptor = descriptor;
+    return true;
+}
+
+const board_identity_t *board_active_identity(void) {
+    if (active_descriptor == NULL) {
+        return NULL;
+    }
+    return &active_identity;
+}
+
+const board_descriptor_t *board_active_descriptor(void) {
+    return active_descriptor;
+}
+
 esp_err_t board_init_safe_gpio(void) {
     gpio_config_t output_config = {
         .pin_bit_mask = BOARD_OUTPUT_MASK,
@@ -161,6 +189,12 @@ esp_err_t board_init_safe_gpio(void) {
 bool board_config_is_valid(void) {
     float scale_difference = fabsf(BAT_ADC_SCALE - BOARD_EXPECTED_BAT_SCALE);
 
+    if (active_descriptor == NULL ||
+        active_descriptor->id != BOARD_ID_AOHAZUKU_REV0) {
+        ESP_LOGE(TAG, "board identity has not selected Aohazuku Rev.0");
+        return false;
+    }
+
     if (BAT_ADC_R_HIGH_OHM != UINT32_C(1000000)) {
         ESP_LOGE(TAG, "invalid battery high-side resistor configuration");
         return false;
@@ -197,13 +231,22 @@ void board_set_audio_shutdown(void) {
 }
 
 void board_set_status_leds(bool green_enabled, bool yellow_enabled) {
-    board_set_status_leds_brightness(green_enabled ? 100U : 0U,
-                                     yellow_enabled);
+    uint32_t green_brightness_percent = 0U;
+
+    if (green_enabled) {
+        green_brightness_percent = 100U;
+    }
+    board_set_status_leds_brightness(green_brightness_percent, yellow_enabled);
 }
 
 void board_set_status_leds_brightness(uint32_t green_brightness_percent,
                                       bool yellow_enabled) {
-    uint32_t yellow_level = yellow_enabled ? 0U : 1U;
+    uint32_t green_level = 1U;
+    uint32_t yellow_level = 1U;
+
+    if (yellow_enabled) {
+        yellow_level = 0U;
+    }
 
     if (green_brightness_percent > 100U) {
         green_brightness_percent = 100U;
@@ -218,8 +261,10 @@ void board_set_status_leds_brightness(uint32_t green_brightness_percent,
         (void) ledc_update_duty(BOARD_LEDC_MODE,
                                 BOARD_GREEN_LED_LEDC_CHANNEL);
     } else {
-        (void) gpio_set_level(PIN_LED_1,
-                              green_brightness_percent > 0U ? 0U : 1U);
+        if (green_brightness_percent > 0U) {
+            green_level = 0U;
+        }
+        (void) gpio_set_level(PIN_LED_1, green_level);
     }
     (void) gpio_set_level(PIN_LED_2, yellow_level);
 }

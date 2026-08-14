@@ -5,16 +5,10 @@
 #include <stdint.h>
 
 #include "domain/app_config.h"
+#include "domain/usb_storage_policy.h"
 #include "esp_err.h"
 #include "platform/config_storage.h"
 #include "platform/imu_calibration_storage.h"
-
-typedef enum {
-    USB_STORAGE_UNAVAILABLE = 0,
-    USB_STORAGE_APP_OWNED,
-    USB_STORAGE_SWITCHING,
-    USB_STORAGE_HOST_OWNED,
-} usb_storage_owner_t;
 
 typedef struct {
     bool driver_ready;
@@ -37,7 +31,20 @@ typedef struct {
     uint32_t format_required_count;
     uint32_t rx_error_count;
     uint32_t tx_error_count;
+    bool storage_mode_active;
+    uint32_t pending_write_count;
+    uint32_t storage_mode_start_count;
+    uint32_t storage_mode_end_count;
+    uint32_t storage_mode_quiesce_timeout_count;
+    uint32_t msc_write_count;
+    uint32_t msc_write_error_count;
+    uint64_t msc_written_bytes;
+    uint32_t last_msc_write_duration_us;
+    uint32_t max_msc_write_duration_us;
 } usb_device_diagnostics_t;
+
+typedef bool (*usb_storage_mode_begin_cb_t)(uint32_t timeout_ms, void *arg);
+typedef void (*usb_storage_mode_end_cb_t)(void *arg);
 
 /**
  * @brief Prepare the shared FAT volume and load parameters before USB starts.
@@ -52,11 +59,27 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
 esp_err_t usb_device_start(void);
 
 /**
+ * @brief Stop the application TinyUSB task and PHY without deleting FAT/MSC storage.
+ *
+ * The call is idempotent, but refuses to stop while an MSC write session is
+ * active or a write remains pending.
+ */
+esp_err_t usb_device_stop(void);
+
+/**
  * Allow the already-enumerated composite device to expose its MSC medium.
  * Until this is called, USB attach events return the FAT volume to APP ownership
  * so startup calibration, OTA cleanup, and configuration writes can complete.
  */
 esp_err_t usb_device_enable_msc(void);
+
+/** Register application quiesce/resume hooks used around actual MSC writes. */
+void usb_device_set_storage_mode_callbacks(
+    usb_storage_mode_begin_cb_t begin_cb,
+    usb_storage_mode_end_cb_t end_cb, void *arg);
+
+/** Return true from the first WRITE(10) until one second of write inactivity. */
+bool usb_device_storage_mode_active(void);
 
 /** Save parameters while the application owns the FAT volume. */
 esp_err_t usb_device_save_config(const app_config_profiles_t *profiles);
@@ -98,4 +121,5 @@ const char *usb_device_storage_mount_path(void);
 /** Snapshot TinyUSB and shared-storage diagnostics. */
 void usb_device_get_diagnostics(usb_device_diagnostics_t *diagnostics);
 
+/** Return the diagnostic name of a shared-storage owner. */
 const char *usb_device_storage_owner_name(usb_storage_owner_t owner);

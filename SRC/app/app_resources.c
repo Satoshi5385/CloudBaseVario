@@ -412,10 +412,10 @@ bool app_resources_apply_debug_vario(vario_result_t *result,
     active = debug_vario.active;
     if (active) {
         if (!debug_vario.altitude_valid) {
-            debug_vario.altitude_m =
-                result->estimate_valid && isfinite(result->altitude_m)
-                    ? result->altitude_m
-                    : 0.0f;
+            debug_vario.altitude_m = 0.0f;
+            if (result->estimate_valid && isfinite(result->altitude_m)) {
+                debug_vario.altitude_m = result->altitude_m;
+            }
             debug_vario.altitude_timestamp_us = current_time_us;
             debug_vario.altitude_valid = true;
         } else if (current_time_us > debug_vario.altitude_timestamp_us) {

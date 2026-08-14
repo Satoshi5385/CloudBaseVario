@@ -284,7 +284,11 @@ void vario_audio_step(vario_audio_state_t *state,
         int64_t duration_us =
             (int64_t) config->predictive_duration_ms * INT64_C(1000);
         int64_t elapsed_us = now_us - state->phase_started_us;
-        int64_t position_us = elapsed_us >= 0 ? elapsed_us % interval_us : 0;
+        int64_t position_us = 0;
+
+        if (elapsed_us >= 0) {
+            position_us = elapsed_us % interval_us;
+        }
 
         state->phase_on = position_us < duration_us;
         command->frequency_hz = lift_frequency_hz(config, climb_rate_mps);

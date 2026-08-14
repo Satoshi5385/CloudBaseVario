@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "platform/switch_preferences.h"
 #include "platform/imu_calibration_storage.h"
 
@@ -14,6 +15,15 @@
 
 _Static_assert(POWER_ON_HOLD_MS > 0U,
                "Power-on hold duration must be nonzero");
+
+typedef enum {
+    APP_TASK_WORKER_SENSOR = 0,
+    APP_TASK_WORKER_AUDIO,
+    APP_TASK_WORKER_SYSTEM,
+    APP_TASK_WORKER_CONSOLE,
+    APP_TASK_WORKER_BLE_TX,
+    APP_TASK_WORKER_COUNT,
+} app_task_worker_t;
 
 /** Provide the startup mc_data.json result before app_tasks_start(). */
 void app_tasks_set_imu_accel_calibration(
@@ -52,6 +62,15 @@ bool app_tasks_system_started(void);
 
 /** Report whether all five required long-lived software workers exist. */
 bool app_tasks_required_workers_started(void);
+
+/** Return a worker handle for diagnostics; NULL when it was not created. */
+TaskHandle_t app_tasks_worker_handle(app_task_worker_t worker);
+
+/** Request sensor/audio quiescence before an MSC flash write. */
+bool app_tasks_begin_storage_mode(uint32_t timeout_ms, void *arg);
+
+/** Release workers after the MSC write inactivity interval. */
+void app_tasks_end_storage_mode(void *arg);
 
 /**
  * @brief Release power hold and remain safely stopped while external power remains.

@@ -65,6 +65,8 @@ typedef struct {
     int64_t timestamp_us;
     float battery_voltage_v;
     bool battery_valid;
+    float battery_display_voltage_v;
+    bool battery_display_valid;
     int32_t battery_raw;
     int32_t battery_adc_mv;
     uint32_t battery_sample_count;

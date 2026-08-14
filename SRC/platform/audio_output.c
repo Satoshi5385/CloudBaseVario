@@ -8,6 +8,15 @@
 #define AUDIO_LEDC_CHANNEL BOARD_AUDIO_LEDC_CHANNEL
 #define AUDIO_LEDC_DUTY_RESOLUTION LEDC_TIMER_10_BIT
 #define AUDIO_SAFE_FREQUENCY_HZ UINT32_C(1300)
+#define AUDIO_MIN_FREQUENCY_HZ UINT32_C(130)
+#define AUDIO_MAX_FREQUENCY_HZ UINT32_C(5000)
+#define AUDIO_MIN_DUTY_PERCENT UINT32_C(1)
+#define AUDIO_MAX_DUTY_PERCENT UINT32_C(99)
+#define AUDIO_PERCENT_SCALE UINT32_C(100)
+#define AUDIO_PERCENT_ROUNDING UINT32_C(50)
+#define AUDIO_MIN_AMPLIFIER_MODE UINT32_C(1)
+#define AUDIO_MAX_AMPLIFIER_MODE UINT32_C(3)
+#define AUDIO_MODE1_HIGH_FROM_MODE UINT32_C(2)
 #define AUDIO_SILENT_DUTY UINT32_C(0)
 #define AUDIO_DUTY_MAX UINT32_C(1023)
 
@@ -54,11 +63,16 @@ esp_err_t audio_output_init(void) {
 esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
                              uint32_t amplifier_mode) {
     uint32_t duty = 0U;
+    uint32_t mode1_level = 0U;
+    uint32_t mode2_level = 0U;
     esp_err_t ret = ESP_OK;
 
-    if (!timer_initialized || frequency_hz < 130U || frequency_hz > 5000U ||
-        duty_percent < 1U || duty_percent > 99U || amplifier_mode < 1U ||
-        amplifier_mode > 3U) {
+    if (!timer_initialized || frequency_hz < AUDIO_MIN_FREQUENCY_HZ ||
+        frequency_hz > AUDIO_MAX_FREQUENCY_HZ ||
+        duty_percent < AUDIO_MIN_DUTY_PERCENT ||
+        duty_percent > AUDIO_MAX_DUTY_PERCENT ||
+        amplifier_mode < AUDIO_MIN_AMPLIFIER_MODE ||
+        amplifier_mode > AUDIO_MAX_AMPLIFIER_MODE) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -75,7 +89,8 @@ esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
         return ret;
     }
 
-    duty = (AUDIO_DUTY_MAX * duty_percent + 50U) / 100U;
+    duty = (AUDIO_DUTY_MAX * duty_percent + AUDIO_PERCENT_ROUNDING) /
+           AUDIO_PERCENT_SCALE;
     ret = ledc_set_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL, duty);
     if (ret == ESP_OK) {
         ret = ledc_update_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL);
@@ -86,10 +101,16 @@ esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
     }
 
     /* PAM8904E truth table: 1x=01, 2x=10, 3x=11 (EN1, EN2). */
-    ret = gpio_set_level(PIN_BUZZER_MODE1, amplifier_mode >= 2U ? 1U : 0U);
+    if (amplifier_mode >= AUDIO_MODE1_HIGH_FROM_MODE) {
+        mode1_level = 1U;
+    }
+    if (amplifier_mode == AUDIO_MIN_AMPLIFIER_MODE ||
+        amplifier_mode == AUDIO_MAX_AMPLIFIER_MODE) {
+        mode2_level = 1U;
+    }
+    ret = gpio_set_level(PIN_BUZZER_MODE1, mode1_level);
     if (ret == ESP_OK) {
-        ret = gpio_set_level(PIN_BUZZER_MODE2,
-                             amplifier_mode == 1U || amplifier_mode == 3U ? 1U : 0U);
+        ret = gpio_set_level(PIN_BUZZER_MODE2, mode2_level);
     }
     if (ret != ESP_OK) {
         audio_output_shutdown();

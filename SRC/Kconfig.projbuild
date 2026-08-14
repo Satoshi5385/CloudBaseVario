@@ -1,13 +1,5 @@
 menu "CloudBaseVario application"
 
-    choice CBV_BOARD_REVISION
-        prompt "Board revision"
-        default CBV_BOARD_AOHAZUKU_REV0
-
-        config CBV_BOARD_AOHAZUKU_REV0
-            bool "Aohazuku Rev.0"
-    endchoice
-
     config CBV_SENSOR_RETRY_INTERVAL_MS
         int "Sensor re-detection interval (ms)"
         range 100 10000

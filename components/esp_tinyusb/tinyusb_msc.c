@@ -75,6 +75,9 @@ typedef struct {
     // Buffer for storage operations
     msc_storage_buffer_t storage_buffer;        /*!< Buffer for storing data during write operations. */
     uint32_t deffered_writes;                   /*!< Number of deferred writes pending in the buffer. */
+    tinyusb_msc_mount_point_t requested_mount_point; /*!< Latest ownership requested by attach/eject/detach. */
+    bool mount_transition_pending;              /*!< Apply requested ownership after accepted writes drain. */
+    bool host_io_enabled;                       /*!< Host read/write gate used during shutdown. */
     SemaphoreHandle_t mux_lock;                 /**< Mutex for storage operations */
 } tinyusb_msc_storage_s;
 
@@ -86,6 +89,8 @@ typedef struct {
         uint8_t lun_count;              /*!< Number of logical units (LUNs) supported by the storage. */
         tusb_msc_callback_t event_cb;   /*!< Callback for mount changed events. */
         void *event_arg;                /*!< Argument to pass to the event callback. */
+        tusb_msc_write_callback_t write_cb; /*!< Callback for deferred write lifecycle. */
+        void *write_arg;                /*!< Argument to pass to the write callback. */
     } dynamic;
 
     struct {
@@ -108,6 +113,10 @@ static tinyusb_msc_driver_t *p_msc_driver;
 static portMUX_TYPE msc_lock = portMUX_INITIALIZER_UNLOCKED;
 #define MSC_ENTER_CRITICAL()   portENTER_CRITICAL(&msc_lock)
 #define MSC_EXIT_CRITICAL()    portEXIT_CRITICAL(&msc_lock)
+
+static esp_err_t msc_storage_request_mount(
+    msc_storage_obj_t *storage, tinyusb_msc_mount_point_t mount_point);
+static void tusb_apply_requested_mount(void *param);
 
 #define MSC_GOTO_ON_FALSE_CRITICAL(cond, err)    \
     do {                                        \
@@ -247,9 +256,13 @@ static inline esp_err_t msc_storage_read_sector(uint8_t lun, uint32_t lba, uint3
 
     MSC_ENTER_CRITICAL();
     bool found = _msc_storage_get_by_lun(lun, &storage);
+    bool host_io_enabled = found && storage != NULL &&
+                           storage->host_io_enabled &&
+                           storage->mount_point ==
+                               TINYUSB_MSC_STORAGE_MOUNT_USB;
     MSC_EXIT_CRITICAL();
 
-    if (!found || storage == NULL) {
+    if (!found || storage == NULL || !host_io_enabled) {
         ESP_LOGE(TAG, "Storage not found for LUN %d", lun);
         return ESP_ERR_NOT_FOUND;
     }
@@ -309,6 +322,28 @@ static void tusb_write_func(void *param)
     assert(param); // Ensure storage is not NULL
     msc_storage_obj_t *storage = (msc_storage_obj_t *)param;
     const uint32_t completed_size = storage->storage_buffer.bufsize;
+    tusb_msc_write_callback_t write_cb = NULL;
+    void *write_arg = NULL;
+    tinyusb_msc_write_event_t write_event = {
+        .id = TINYUSB_MSC_WRITE_EVENT_BEGIN,
+        .lun = storage->storage_buffer.lun,
+        .lba = storage->storage_buffer.lba,
+        .offset = storage->storage_buffer.offset,
+        .size = storage->storage_buffer.bufsize,
+        .result = ESP_OK,
+    };
+
+    MSC_ENTER_CRITICAL();
+    write_event.pending_count = storage->deffered_writes;
+    if (p_msc_driver != NULL) {
+        write_cb = p_msc_driver->dynamic.write_cb;
+        write_arg = p_msc_driver->dynamic.write_arg;
+    }
+    MSC_EXIT_CRITICAL();
+    if (write_cb != NULL) {
+        write_cb((tinyusb_msc_storage_handle_t)storage, &write_event,
+                 write_arg);
+    }
 
     esp_err_t err = msc_storage_write_sector(
                         storage->storage_buffer.lun,
@@ -322,7 +357,17 @@ static void tusb_write_func(void *param)
     MSC_ENTER_CRITICAL();
     assert(storage->deffered_writes > 0); // Ensure there are deferred writes pending
     storage->deffered_writes--;
+    write_event.pending_count = storage->deffered_writes;
+    bool apply_requested_mount = storage->mount_transition_pending &&
+                                 storage->deffered_writes == 0U;
     MSC_EXIT_CRITICAL();
+
+    write_event.id = TINYUSB_MSC_WRITE_EVENT_COMPLETE;
+    write_event.result = err;
+    if (write_cb != NULL) {
+        write_cb((tinyusb_msc_storage_handle_t)storage, &write_event,
+                 write_arg);
+    }
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Write failed, error=0x%x", err);
@@ -345,6 +390,14 @@ static void tusb_write_func(void *param)
          * there is no host command left to acknowledge, so do not panic.
          */
         ESP_LOGW(TAG, "WRITE(10) completion discarded after USB reset");
+    }
+    if (apply_requested_mount) {
+        /*
+         * Queue the ownership transition after TinyUSB processes the async
+         * WRITE completion. On reset the command may already be gone, but
+         * the flash write above is complete before this transition.
+         */
+        usbd_defer_func(tusb_apply_requested_mount, (void *)storage, false);
     }
 }
 
@@ -371,9 +424,13 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
 
     MSC_ENTER_CRITICAL();
     bool found = _msc_storage_get_by_lun(lun, &storage);
+    bool host_io_enabled = found && storage != NULL &&
+                           storage->host_io_enabled &&
+                           storage->mount_point ==
+                               TINYUSB_MSC_STORAGE_MOUNT_USB;
     MSC_EXIT_CRITICAL();
 
-    if (!found || storage == NULL) {
+    if (!found || storage == NULL || !host_io_enabled) {
         ESP_LOGE(TAG, "LUN %d is not mapped to any storage", lun);
         return ESP_ERR_NOT_FOUND;
     }
@@ -397,6 +454,10 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
 
     // Increment the deferred writes counter
     MSC_ENTER_CRITICAL();
+    if (!storage->host_io_enabled) {
+        MSC_EXIT_CRITICAL();
+        return ESP_ERR_INVALID_STATE;
+    }
     storage->deffered_writes++;
     MSC_EXIT_CRITICAL();
 
@@ -607,6 +668,116 @@ static esp_err_t msc_storage_unmount(msc_storage_obj_t *storage)
     return ESP_OK;
 }
 
+static esp_err_t msc_storage_apply_requested_mount(
+    msc_storage_obj_t *storage)
+{
+    tinyusb_msc_mount_point_t requested_mount_point;
+    bool transition_pending;
+    uint32_t pending_writes;
+
+    MSC_ENTER_CRITICAL();
+    transition_pending = storage->mount_transition_pending;
+    requested_mount_point = storage->requested_mount_point;
+    pending_writes = storage->deffered_writes;
+    MSC_EXIT_CRITICAL();
+
+    if (!transition_pending) {
+        return ESP_OK;
+    }
+    if (pending_writes != 0U) {
+        return ESP_ERR_NOT_FINISHED;
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (requested_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
+        ret = msc_storage_mount(storage);
+    } else {
+        ret = msc_storage_unmount(storage);
+    }
+
+    MSC_ENTER_CRITICAL();
+    if (ret == ESP_OK &&
+        storage->requested_mount_point == requested_mount_point &&
+        storage->deffered_writes == 0U) {
+        storage->mount_transition_pending = false;
+        storage->host_io_enabled =
+            requested_mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB;
+    } else if (ret != ESP_OK) {
+        storage->mount_transition_pending = false;
+        storage->host_io_enabled =
+            storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB;
+    }
+    MSC_EXIT_CRITICAL();
+    return ret;
+}
+
+static esp_err_t msc_storage_request_mount(
+    msc_storage_obj_t *storage, tinyusb_msc_mount_point_t mount_point)
+{
+    uint32_t pending_writes;
+
+    ESP_RETURN_ON_FALSE(storage != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Storage handle can't be NULL");
+    MSC_ENTER_CRITICAL();
+    storage->requested_mount_point = mount_point;
+    storage->mount_transition_pending = true;
+    /* Freeze new host commands before inspecting accepted writes. */
+    storage->host_io_enabled = false;
+    pending_writes = storage->deffered_writes;
+    MSC_EXIT_CRITICAL();
+
+    if (pending_writes != 0U) {
+        return ESP_ERR_NOT_FINISHED;
+    }
+    return msc_storage_apply_requested_mount(storage);
+}
+
+static void tusb_apply_requested_mount(void *param)
+{
+    msc_storage_obj_t *storage = (msc_storage_obj_t *)param;
+    esp_err_t ret;
+
+    if (storage == NULL) {
+        return;
+    }
+    ret = msc_storage_apply_requested_mount(storage);
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+        ESP_LOGE(TAG, "Deferred storage ownership transition failed: %s",
+                 esp_err_to_name(ret));
+    }
+}
+
+static esp_err_t msc_storage_sync_lun(uint8_t lun)
+{
+    msc_storage_obj_t *storage = NULL;
+    bool ready;
+
+    MSC_ENTER_CRITICAL();
+    bool found = _msc_storage_get_by_lun(lun, &storage);
+    ready = found && storage != NULL && storage->host_io_enabled &&
+            storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB &&
+            storage->deffered_writes == 0U &&
+            !storage->mount_transition_pending;
+    MSC_EXIT_CRITICAL();
+    if (!ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /*
+     * Every medium write is synchronous. Taking the medium mutex and
+     * rechecking the state makes SYNCHRONIZE CACHE a real drain barrier.
+     */
+    xSemaphoreTake(storage->mux_lock, portMAX_DELAY);
+    MSC_ENTER_CRITICAL();
+    ready = storage->host_io_enabled &&
+            storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB &&
+            storage->deffered_writes == 0U &&
+            !storage->mount_transition_pending;
+    MSC_EXIT_CRITICAL();
+    xSemaphoreGive(storage->mux_lock);
+    return ready ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 static void msc_storage_event_default_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
 {
     (void) handle;
@@ -654,6 +825,10 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
     storage_obj->medium = medium;
     storage_obj->mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB; // Default mount point is USB host
     storage_obj->deffered_writes = 0;
+    storage_obj->requested_mount_point = config->mount_point;
+    storage_obj->mount_transition_pending = false;
+    storage_obj->host_io_enabled =
+        config->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB;
     // In case the user does not set mount_config.max_files
     // and for backward compatibility with versions <1.4.2
     // max_files is set to 2
@@ -747,6 +922,8 @@ static esp_err_t msc_driver_install(const tinyusb_msc_driver_config_t *config, b
         msc_driver->dynamic.event_cb = config->callback;
         msc_driver->dynamic.event_arg = config->callback_arg;
     }
+    msc_driver->dynamic.write_cb = config->write_callback;
+    msc_driver->dynamic.write_arg = config->write_callback_arg;
 
     msc_driver->dynamic.lun_count = 0; // LUN will be added with storage initialization
     msc_driver->constant.flags.val = (uint16_t) config->user_flags.val; // Config flags for the MSC driver
@@ -775,7 +952,10 @@ void msc_storage_mount_to_app(void)
 
     for (uint8_t i = 0; i < TINYUSB_MSC_STORAGE_MAX_LUNS; i++) {
         if (p_msc_driver->dynamic.storage[i] != NULL && !p_msc_driver->constant.flags.auto_mount_off) {
-            if (msc_storage_mount(p_msc_driver->dynamic.storage[i]) != ESP_OK) {
+            esp_err_t ret = msc_storage_request_mount(
+                p_msc_driver->dynamic.storage[i],
+                TINYUSB_MSC_STORAGE_MOUNT_APP);
+            if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
                 ESP_LOGW(TAG, "Unable to mount storage to app");
                 tinyusb_event_cb(p_msc_driver->dynamic.storage[i], TINYUSB_MSC_EVENT_MOUNT_FAILED);
             }
@@ -791,7 +971,10 @@ void msc_storage_mount_to_usb(void)
 
     for (uint8_t i = 0; i < TINYUSB_MSC_STORAGE_MAX_LUNS; i++) {
         if (p_msc_driver->dynamic.storage[i] != NULL && !p_msc_driver->constant.flags.auto_mount_off) {
-            if (msc_storage_unmount(p_msc_driver->dynamic.storage[i]) != ESP_OK) {
+            esp_err_t ret = msc_storage_request_mount(
+                p_msc_driver->dynamic.storage[i],
+                TINYUSB_MSC_STORAGE_MOUNT_USB);
+            if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
                 ESP_LOGW(TAG, "Unable to mount storage to usb");
                 tinyusb_event_cb(p_msc_driver->dynamic.storage[i], TINYUSB_MSC_EVENT_MOUNT_FAILED);
             }
@@ -1072,21 +1255,25 @@ esp_err_t tinyusb_msc_set_storage_mount_point(tinyusb_msc_storage_handle_t handl
     ESP_RETURN_ON_FALSE(p_msc_driver != NULL, ESP_ERR_INVALID_STATE, TAG, "MSC driver is not initialized");
 
     msc_storage_obj_t *storage = (msc_storage_obj_t *)handle;
+    return msc_storage_request_mount(storage, mount_point);
+}
 
-    if (storage->mount_point == mount_point) {
-        // If the storage is already mounted to the requested mount point, do nothing
-        return ESP_OK;
-    }
+esp_err_t tinyusb_msc_stop_host_io(
+    tinyusb_msc_storage_handle_t handle,
+    uint32_t *pending_write_count)
+{
+    ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Storage handle can't be NULL");
+    ESP_RETURN_ON_FALSE(pending_write_count != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Pending write count can't be NULL");
 
-    if (mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
-        // If the storage is mounted to application, mount it
-        msc_storage_mount(storage);
-    } else {
-        // If the storage is mounted to USB host, unmount it
-        msc_storage_unmount(storage);
-    }
-    storage->mount_point = mount_point;
+    msc_storage_obj_t *storage = (msc_storage_obj_t *)handle;
 
+    MSC_ENTER_CRITICAL();
+    MSC_CHECK_ON_CRITICAL(p_msc_driver != NULL, ESP_ERR_INVALID_STATE);
+    storage->host_io_enabled = false;
+    *pending_write_count = storage->deffered_writes;
+    MSC_EXIT_CRITICAL();
     return ESP_OK;
 }
 
@@ -1222,7 +1409,8 @@ bool tud_msc_test_unit_ready_cb(uint8_t lun)
     bool found = _msc_storage_get_by_lun(lun, &storage);
     MSC_EXIT_CRITICAL();
 
-    if (found && (storage != NULL) && (storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB)) {
+    if (found && (storage != NULL) && storage->host_io_enabled &&
+        (storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB)) {
         // Storage media is ready for access by USB host
         return true;
     }
@@ -1259,12 +1447,22 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
 // - Start = 1 : active mode, if load_eject = 1 : load disk storage
 bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, bool load_eject)
 {
-    (void) lun;
     (void) power_condition;
 
     if (load_eject && !start) {
-        // Eject media from the storage
-        msc_storage_mount_to_app();
+        msc_storage_obj_t *storage = NULL;
+
+        MSC_ENTER_CRITICAL();
+        bool found = _msc_storage_get_by_lun(lun, &storage);
+        MSC_EXIT_CRITICAL();
+        if (!found || storage == NULL ||
+            msc_storage_request_mount(
+                storage, TINYUSB_MSC_STORAGE_MOUNT_APP) != ESP_OK) {
+            tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY,
+                              SCSI_CODE_ASC_MEDIUM_NOT_PRESENT,
+                              SCSI_CODE_ASCQ);
+            return false;
+        }
     }
     return true;
 }
@@ -1333,11 +1531,14 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     switch (scsi_cmd[0]) {
     case SCSI_CMD_SYNCHRONIZE_CACHE_10:
     case SCSI_CMD_SYNCHRONIZE_CACHE_16:
-        /*
-         * WRITE(10) now completes only after the underlying flash write, so
-         * there is no additional device-side cache to flush.
-         */
-        ret = 0;
+        if (msc_storage_sync_lun(lun) == ESP_OK) {
+            ret = 0;
+        } else {
+            tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY,
+                              SCSI_CODE_ASC_MEDIUM_NOT_PRESENT,
+                              SCSI_CODE_ASCQ);
+            ret = -1;
+        }
         break;
     case SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
         /* SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL is the Prevent/Allow Medium Removal

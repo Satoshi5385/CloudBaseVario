@@ -39,6 +39,7 @@ typedef struct {
     bool sounding;
 } vario_audio_command_t;
 
+/** Reset audio state, history, and transition timing to silence. */
 void vario_audio_reset(vario_audio_state_t *state);
 
 /**

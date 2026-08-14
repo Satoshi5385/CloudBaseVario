@@ -6,12 +6,9 @@
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
 #include "driver/ledc.h"
+#include "domain/board_identity.h"
 #include "domain/imu_fusion.h"
 #include "esp_err.h"
-
-#if !CONFIG_CBV_BOARD_AOHAZUKU_REV0
-#error "A supported CloudBaseVario board revision must be selected"
-#endif
 
 /* Aohazuku Rev.0 GPIO assignment. GPIO19/20 and GPIO35/36/37 are not touched. */
 #define PIN_BOOTMODE GPIO_NUM_0
@@ -65,6 +62,15 @@
  * @return ESP_OK on success, otherwise the first GPIO driver error.
  */
 esp_err_t board_init_power_hold(void);
+
+/** Select the validated immutable identity before board GPIO initialization. */
+bool board_select_identity(const board_identity_t *identity);
+
+/** Return the active identity, or NULL before successful selection. */
+const board_identity_t *board_active_identity(void);
+
+/** Return the active board descriptor, or NULL before successful selection. */
+const board_descriptor_t *board_active_descriptor(void);
 
 /**
  * @brief Configure safe startup levels, digital inputs, and green LED PWM.

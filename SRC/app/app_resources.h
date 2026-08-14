@@ -2,38 +2,11 @@
 
 #include <stdbool.h>
 
+#include "app/app_events.h"
 #include "domain/app_config.h"
 #include "domain/app_types.h"
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
-
-#define APP_EVENT_STOP_REQUEST BIT0
-#define APP_EVENT_FATAL_STATE BIT1
-#define APP_EVENT_AUDIO_ACK BIT2
-#define APP_EVENT_SENSOR_ACK BIT3
-#define APP_EVENT_SYSTEM_ACK BIT4
-#define APP_EVENT_CONSOLE_ACK BIT5
-#define APP_EVENT_BLE_TX_ACK BIT6
-#define APP_EVENT_SAFE_SLEEP_BLOCKED BIT7
-#define APP_EVENT_BMP581_STARTUP_COMPLETE BIT8
-#define APP_EVENT_FATAL_BMP581 BIT9
-#define APP_EVENT_BMP581_RECOVERING BIT10
-#define APP_EVENT_IMU_CALIBRATING BIT11
-#define APP_EVENT_IMU_DEGRADED BIT12
-#define APP_EVENT_AUDIO_QUIESCED BIT13
-#define APP_EVENT_SHUTDOWN_SOUND_REQUEST BIT14
-#define APP_EVENT_SHUTDOWN_SOUND_DONE BIT15
-#define APP_EVENT_SHUTDOWN_SOUND_ABORT BIT16
-#define APP_EVENT_IMU_ACCEL_CALIBRATION_SAVED BIT20
-#define APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED BIT21
-#define APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST BIT22
-#define APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED BIT23
-
-#define APP_EVENT_ALL_TASK_ACKS                                                                    \
-    (APP_EVENT_AUDIO_ACK | APP_EVENT_SENSOR_ACK | APP_EVENT_SYSTEM_ACK | APP_EVENT_CONSOLE_ACK |   \
-     APP_EVENT_BLE_TX_ACK)
 
 /**
  * @brief Allocate the startup-only queues, mutexes, and event group.

@@ -80,6 +80,25 @@ typedef struct {
  */
 typedef void(*tusb_msc_callback_t)(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg);
 
+typedef enum {
+    TINYUSB_MSC_WRITE_EVENT_BEGIN = 0,
+    TINYUSB_MSC_WRITE_EVENT_COMPLETE,
+} tinyusb_msc_write_event_id_t;
+
+typedef struct {
+    tinyusb_msc_write_event_id_t id;
+    uint8_t lun;
+    uint32_t lba;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t pending_count;
+    esp_err_t result;
+} tinyusb_msc_write_event_t;
+
+typedef void(*tusb_msc_write_callback_t)(
+    tinyusb_msc_storage_handle_t handle,
+    const tinyusb_msc_write_event_t *event, void *arg);
+
 /**
  * @brief TinyUSB MSC storage configuration.
  */
@@ -107,6 +126,8 @@ typedef struct {
     } user_flags;                           /*!< Driver flags. */
     tusb_msc_callback_t callback;           /*!< Optional storage event callback. */
     void *callback_arg;                     /*!< User argument passed to `callback`. */
+    tusb_msc_write_callback_t write_callback; /*!< Optional deferred write lifecycle callback. */
+    void *write_callback_arg;               /*!< User argument passed to `write_callback`. */
 } tinyusb_msc_driver_config_t;
 
 // ----------------------------- Driver API ---------------------------------
@@ -232,18 +253,32 @@ esp_err_t tinyusb_msc_config_storage_fat_fs(tinyusb_msc_storage_handle_t handle,
  * This function requests switching storage ownership between the application
  * and the USB host.
  *
- * @note This function does not propagate failures from the internal
- *       mount/unmount helpers to the caller.
- *
  * @param[in] handle Storage handle returned by a storage creation function.
  * @param[in] mount_point Requested mount point.
  *
  * @return
  *      - ESP_OK on success
+ *      - ESP_ERR_NOT_FINISHED if accepted host writes must drain first
  *      - ESP_ERR_INVALID_STATE if the MSC driver is not installed
+ *      - Other errors from the mount/unmount operation
  */
 esp_err_t tinyusb_msc_set_storage_mount_point(tinyusb_msc_storage_handle_t handle,
                                               tinyusb_msc_mount_point_t mount_point);
+
+/**
+ * @brief Atomically reject new host reads/writes and report queued writes.
+ *
+ * This is intended for orderly USB device shutdown. The storage object and
+ * its LUN remain allocated. Setting the mount point back to USB re-enables
+ * host I/O when shutdown is cancelled.
+ *
+ * @param[in] handle Storage handle returned by a storage creation function.
+ * @param[out] pending_write_count Number of deferred writes already accepted.
+ * @return ESP_OK on success, or an argument/state error.
+ */
+esp_err_t tinyusb_msc_stop_host_io(
+    tinyusb_msc_storage_handle_t handle,
+    uint32_t *pending_write_count);
 
 // ------------------------------------ Getters ------------------------------------
 

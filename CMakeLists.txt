@@ -3,10 +3,10 @@
 cmake_minimum_required(VERSION 3.22)
 
 set(EXTRA_COMPONENT_DIRS "SRC")
-set(COMPONENTS SRC)
+set(COMPONENTS SRC espcoredump)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(CloudBaseVario)
+project(CloudBaseVario-Aohazuku)
 
 # The only image accepted as /UPDATE.BIN is the raw ESP-IDF application
 # binary. Generate a clearly named, size-checked copy beside the normal image.

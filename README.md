@@ -7,16 +7,16 @@ CloudBaseVarioは、ハンググライダーおよびパラグライダー向け
 - 高分解能気圧センサーとIMUを融合した昇降率推定
 - ピエゾドライバと大型スピーカーを使った大きなバリオ音
 - Bluetooth(BLE)経由でのXCTrack連携
-- (オプション)GPS、microSDカード、LCD
+- USB CDC/MSCによるモニター、設定、およびファームウェア更新
 
 
 > [!WARNING]
 > 本プロジェクトは開発中の実験用機器です。動作・精度・安全性を保証しません。本機器に依存せずにフライトできる環境で使用してください。
 
 
-## 開発状況
+## 実装機能
 
-現在は初期実装段階です。次の機能が実装されています。
+ファームウェアは次の機能を提供します。
 
 - メインボードのGPIO定義と安全な初期状態
 - 電源自己保持、スイッチ、LED、バッテリーADC
@@ -48,24 +48,34 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
-消去済みまたは新品のFlashへ初めて書き込む場合は、設定用FAT領域を一度だけ初期化してからアプリを書き込みます。
+消去済みまたは新品のFlashへの初期書込みは、非公開の製造手順に従ってください。
 
-```console
-idf.py -p <PORT> config-flash
-idf.py -p <PORT> flash
+```powershell
+python -m venv .venv-manufacturing
+.\.venv-manufacturing\Scripts\python.exe -m pip install -r manufacturing_tools\requirements.txt
+.\.venv-manufacturing\Scripts\python.exe manufacturing_tools\manufacturing_tool.py
 ```
 
-代わりに、アプリを書き込んだ後、SW2とSW3を同時に押したまま電源ONしても設定FATをformatできます。両スイッチは電源投入から1秒程度押し続けてください。format後は組込み既定値の `parameters.json` が自動生成されます。この操作と `config-flash` は保存済み設定を消去するため、初期化が必要な場合だけ使用してください。
+製造ツールの一般的な操作は[製造ツール説明](manufacturing_tools/README.md)を参照してください。
+
+製造後、SW2とSW3を同時に押したまま電源ONすると設定FATをformatできます。
+両スイッチは電源投入から1秒程度押し続けてください。format後は組込み既定値の
+`setting.json`が自動生成されます。
 
 以後の通常のファームウェア更新では `flash` だけを実行します。通常起動またはFAT mount失敗時に自動formatは行いません。FATをmountできない場合もバリオ、BLE、音声およびTinyUSB CDCは起動を継続し、MSCは「メディアなし」として安全に応答します。この状態は `DIAG STATUS` の `msc_driver=1 msc_media=0` と `storage_error` で確認できます。FATを復旧するには、SW2とSW3による起動時初期化または `config-flash` を実行してください。
 
 FATが正常な場合、TinyUSB CDCのCOMポートは起動処理の早い段階から利用できます。初回IMU校正、OTA確認および起動時ファイル処理が完了するまでは、config FATをESP32側の`APP_OWNED`に維持し、MSC媒体はhostへ公開しません。全ゲート完了後、同じUSB接続のMSCドライブを有効化して`HOST_OWNED`へ切り替えます。MSCをhostが所有している間、`PARAM SAVE`は `ERR SAVE BUSY`を返します。安全な取り外しまたはUSB切断後にESP32側へremountします。
 
-`mc_data.json`がない初回水平校正中にSW3を3秒長押しすると、その起動に限って校正をスキップします。未保存の校正候補は破棄され、IMUを停止して気圧単独で動作し、正式ビルドではMSC媒体を公開します。`mc_data.json`や設定ファイルへスキップ状態を保存しないため、次回起動では初回水平校正を再び要求します。校正中の3秒未満のSW3操作は、ボタンを離した時点で従来のシンク音ON/OFFとして処理します。
+SW1による明示的な電源OFFでは、USB給電が残っていてもMSC書込み完了とworker停止を確認した後にアプリケーション側TinyUSBを停止します。この時点でCDC COMポートとMSCドライブは切断され、SAFE_STOPのLight-sleep待機へ移ります。SW1を一度解放してから2秒長押しして再起動すると再び公開されます。ROM download用USB Serial/JTAGはアプリケーション側TinyUSBとは別のため、この停止対象には含まれません。
+
+電池駆動で起動したとき、有効な電池電圧が3.2 V以下なら通常起動せず電源保持を解除します。動作中に3.1 V以下を検出した場合は安全終了を要求し、MSC書込み中なら書込み完了後にシャットダウンします。USB外部給電中はこれらの低電圧停止を適用しません。Battery ServiceとLK8EX1の残量%は、3.2 Vを0 %、4.1 Vを100 %とする簡単なリチウムイオン放電曲線近似で表示します。
+
+`mc_data.json`がない初回水平校正中にSW3を3秒長押しすると、その起動に限って校正をスキップします。未保存の校正候補は破棄され、IMUを停止して気圧単独で動作し、正式ビルドではMSC媒体を公開します。`mc_data.json`や設定ファイルへスキップ状態を保存しないため、次回起動では初回水平校正を再び要求します。校正中の3秒未満のSW3操作は、ボタンを離した時点で次のパラメータセットへ切り替えます。
 
 wear levelling Performance modeを使用していた旧ファームウェアから更新した実機では、Safety modeへの変更により既存FATをmountできない場合があります。その場合は必要な設定値を事前に控え、SW2とSW3による起動時初期化または `config-flash` を実行してください。
 
-旧partition tableから本構成へ初めて移行するときは、MSC更新だけではpartition tableを変更できません。設定値を控えたうえで、GPIO0 + resetのROM download modeから `idf.py flash`でfactory imageと新partition tableを書き、その後 `config-flash`またはSW2 + SW3起動で新しい4 MiB FATを初期化してください。以後はMSCの `UPDATE.BIN`でapplicationだけを更新できます。
+partition tableの完全復旧には、GPIO0 + resetのROM download modeと
+製造ツールを使用します。MSCの`UPDATE.BIN`はapplicationだけを更新します。
 
 TinyUSB CDCのCOMポートを指定してモニターを開始します。
 
@@ -77,17 +87,17 @@ idf.py -p <PORT> monitor
 
 ### MSCファームウェア更新
 
-`idf.py build`は通常の `build/CloudBaseVario.bin`に加えて、同一内容で3.5 MiB上限を確認した `build/UPDATE.BIN`を生成します。
+`idf.py build`は通常の `build/CloudBaseVario-Aohazuku.bin`に加えて、同一内容で3.5 MiB上限を確認した `build/UPDATE.BIN`を生成します。両方のESP-IDF project nameはAohazukuシリーズ共通の機種ID `CloudBaseVario-Aohazuku`です。
 
 1. USBのMSCドライブ直下へ `UPDATE.BIN`をコピーします。
 2. OSの「安全な取り外し」を実行します。
-3. USB外部給電を接続した状態で本体を再起動します。
+3. USB外部給電を接続した状態、または有効な電池電圧が3.4 Vを超える状態で本体を再起動します。
 
-MSCの各WRITE(10)はwear levelling領域への実書込みが完了してからhostへ成功応答し、SCSI SYNCHRONIZE CACHEにも応答します。このため、安全な取り外しの完了時点では端末側に未完了の遅延書込みを残しません。
+MSCの各WRITE(10)はwear levelling領域への実書込みが完了してからhostへ成功応答します。SCSI SYNCHRONIZE CACHEは受理済みWRITEが0で実媒体mutexを取得できた場合だけ成功し、eject／detachでは新規host I/Oを閉じてから残るWRITEとTinyUSB非同期完了をドレインします。このため、安全な取り外しの完了時点では端末側に未完了の遅延書込みを残しません。
 
-次回起動時、通常task開始前にESP32-S3用application imageとproject名を検証し、inactive OTA slotへ書き込みます。成功後は更新firmwareで再起動し、必須taskが生成されて10秒動作すると確定します。初回bootの確認中もTinyUSB CDC診断は開始しますが、config FATは`APP_OWNED`のままとしてMSC媒体を公開しません。確定後に `UPDATE.TXT`を `CONFIRMED`へ更新して `UPDATE.PND`を削除し、その完了後にだけMSC媒体を公開します。確定前のresetまたはcrashでは以前のfirmwareへrollbackします。
+次回起動時、通常task開始前にESP32-S3用application imageとproject名を検証し、`CloudBaseVario-Aohazuku`と完全一致する場合だけinactive OTA slotへ書き込みます。旧project名 `CloudBaseVario`や他機種向けのイメージは `UPDATE.BAD`へ移し、`UPDATE.TXT`へ期待値と実際のproject名を記録します。USB外部給電がなく、有効な電池電圧が3.4 V以下または取得できない場合は、`UPDATE.BIN`を保持して`UPDATE.TXT`へ延期理由と判定値を記録します。成功後は更新firmwareで再起動し、必須taskが生成されて10秒動作すると確定します。初回bootの確認中もTinyUSB CDC診断は開始しますが、config FATは`APP_OWNED`のままとしてMSC媒体を公開しません。確定後に `UPDATE.TXT`を `CONFIRMED`へ更新して `UPDATE.PND`を削除し、その完了後にだけMSC媒体を公開します。確定前のresetまたはcrashでは以前のfirmwareへrollbackします。
 
-同じドライブに `parameters.json`と更新ファイルを共存できます。`UPDATE.PND`は確認待ち、`UPDATE.BAD`は拒否・rollbackされたimage、`UPDATE.TXT`はASCIIの状態表示です。USB DFU classは使用せず、MSC更新が使えない場合の最終復旧手段はGPIO0 + resetのROM download modeです。同一versionとdowngradeは許可し、secure boot／署名検証は現時点では行いません。
+同じドライブに `setting.json`と更新ファイルを共存できます。`UPDATE.PND`は確認待ち、`UPDATE.BAD`は拒否・rollbackされたimage、`UPDATE.TXT`はASCIIの状態表示です。旧project名のfirmwareから基板固有ID版へ初めて移行するときは、GPIO0 + resetのROM download modeまたは `idf.py flash`による有線書込みが必要です。移行後のMSC更新では、同じ機種ID内に限り同一versionとdowngradeを許可します。USB DFU classは使用せず、secure boot／署名検証は現時点では行いません。
 
 ### Python GUI
 
@@ -107,11 +117,17 @@ VS CodeではESP-IDF拡張機能を使用してください。共有設定では
 
 ## リポジトリ構成
 
-- `SRC/`: ESP-IDFコンポーネントとファームウェア実装
+- `SRC/app/`: 薄い入口、段階化した起動処理、task生成・起動状態、worker実行管理
+- `SRC/domain/`: SDK非依存の推定・音・system・USB所有権・LK8EX1処理
+- `SRC/platform/`: ESP-IDF、NimBLE、TinyUSBおよびハードウェアアクセス
+- `tools/`: Monitor GUI、Sound Simulator、共通version 1 parameter model
+- `manufacturing_tools/`: カメラQR認識、製造書込み、CSV serial台帳
+- `tests/`: Python回帰テストとSDK非依存Cテスト
 - `components/esp_tinyusb/`: MSC書込み完了保証の修正を含むローカル`esp_tinyusb` component
 - `DOC/SW_spec.md`: ソフトウェア要件と簡易設計
-- `DOC/hw_spec.md`: ESP32-S3 GPIO・周辺インターフェース仕様
-- `DOC/ble.md`: XCTrack連携用BLEインターフェース仕様
+- `DOC/HW_spec.md`: ESP32-S3 GPIO・周辺インターフェース仕様
+- `DOC/BLE_IF.md`: XCTrack連携用BLEインターフェース仕様
+- `DOC/setting_json.md`: version 1設定ファイル仕様
 - `DOC/vario_sound_spec.md`: バリオ音仕様
 - `DOC/CODING_RULES.md`: C言語コーディングルール
 

@@ -421,9 +421,10 @@ static bool update_attitude(imu_fusion_t *fusion, const imu_sample_t *sample,
         fusion->quasi_stationary_since_us = 0;
         fusion->ki_active = false;
     }
-    fusion->ki_effective = fusion->ki_active
-                               ? config->imu_mahony_ki * fusion->confidence
-                               : 0.0f;
+    fusion->ki_effective = 0.0f;
+    if (fusion->ki_active) {
+        fusion->ki_effective = config->imu_mahony_ki * fusion->confidence;
+    }
 
     if (accel_norm_g <= 0.0f || !isfinite(accel_norm_g)) {
         return false;

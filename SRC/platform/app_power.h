@@ -43,6 +43,20 @@ esp_err_t app_power_sensor_work_end(void);
 esp_err_t app_power_enter_safe_stop(void);
 
 /**
+ * @brief Ensure PM is initialized and permit automatic light sleep in SAFE_STOP.
+ *
+ * This is safe to call from startup rejection paths which enter SAFE_STOP
+ * before normal application power initialization.
+ */
+esp_err_t app_power_prepare_safe_stop(void);
+
+/** Temporarily prevent light sleep while qualifying a SAFE_STOP SW1 action. */
+esp_err_t app_power_safe_stop_interaction_begin(void);
+
+/** Permit light sleep again after a SAFE_STOP SW1 action ends. */
+esp_err_t app_power_safe_stop_interaction_end(void);
+
+/**
  * @brief Copy a non-blocking snapshot of application power-management diagnostics.
  * @param[out] diagnostics Destination diagnostics structure.
  */

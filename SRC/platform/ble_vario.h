@@ -4,7 +4,10 @@
 #include <stdint.h>
 
 #include "domain/app_types.h"
+#include "domain/lk8ex1.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE 3U
 
@@ -17,14 +20,7 @@ typedef struct {
     bool subscribed;
 } ble_vario_diagnostics_t;
 
-typedef struct {
-    char raw_pressure[16];
-    char altitude[16];
-    char vario[16];
-    char temperature[16];
-    char battery[16];
-    bool sentence_available;
-} ble_vario_lk8ex1_fields_t;
+typedef lk8ex1_fields_t ble_vario_lk8ex1_fields_t;
 
 /**
  * @brief Initialize NimBLE, register NUS and Battery Service, and start its host task.
@@ -44,6 +40,9 @@ void ble_vario_begin_shutdown(void);
  */
 esp_err_t ble_vario_stop(void);
 
+/** Register or clear the BLE TX worker task notified by GAP state changes. */
+void ble_vario_set_tx_wakeup_task(TaskHandle_t task);
+
 /**
  * @brief Report whether a peer currently enabled NUS TX notifications.
  * @return true only while connected and subscribed.
@@ -56,7 +55,7 @@ bool ble_vario_can_notify(void);
  */
 bool ble_vario_notify_active(void);
 
-/** Convert a valid battery voltage to a 0-100% level using 3.0-4.2 V endpoints. */
+/** Convert a valid battery voltage to a 0-100% level using 3.0-4.1 V endpoints. */
 uint8_t ble_vario_battery_level_from_voltage(float battery_voltage_v);
 
 /** Format the three-byte Battery Level Status value defined by GSS. */
@@ -73,6 +72,7 @@ void ble_vario_update_battery(const system_snapshot_t *system);
  */
 bool ble_vario_format_lk8ex1_fields(
     const vario_result_t *vario, const system_snapshot_t *system,
+    app_bluetooth_battery_mode_t battery_mode,
     ble_vario_lk8ex1_fields_t *fields);
 
 /**
@@ -82,7 +82,8 @@ bool ble_vario_format_lk8ex1_fields(
  *         ESP_FAIL for a dropped NimBLE notification.
  */
 esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
-                                  const system_snapshot_t *system);
+                                  const system_snapshot_t *system,
+                                  app_bluetooth_battery_mode_t battery_mode);
 
 /** Copy notification counters without blocking the NimBLE host. */
 void ble_vario_get_diagnostics(ble_vario_diagnostics_t *diagnostics);

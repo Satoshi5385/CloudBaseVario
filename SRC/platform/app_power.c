@@ -266,7 +266,7 @@ esp_err_t app_power_enter_safe_stop(void) {
     }
     if (fixed_frequency_fallback) {
         portEXIT_CRITICAL(&state_lock);
-        return ESP_OK;
+        return ESP_ERR_NOT_SUPPORTED;
     }
     if (sensor_cpu_lock_held || !light_sleep_lock_held) {
         portEXIT_CRITICAL(&state_lock);
@@ -286,6 +286,90 @@ esp_err_t app_power_enter_safe_stop(void) {
     portEXIT_CRITICAL(&state_lock);
     observe_cpu_frequency();
     ESP_LOGI(TAG, "safe-stop automatic light sleep permitted");
+    return ESP_OK;
+}
+
+esp_err_t app_power_prepare_safe_stop(void) {
+    bool initialized;
+    bool fallback;
+    bool sleep_blocked;
+    esp_err_t ret;
+
+    portENTER_CRITICAL(&state_lock);
+    initialized = configured;
+    fallback = fixed_frequency_fallback;
+    sleep_blocked = light_sleep_lock_held;
+    portEXIT_CRITICAL(&state_lock);
+    if (!initialized) {
+        ret = app_power_init();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        sleep_blocked = true;
+        fallback = false;
+    }
+    if (fallback) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (!sleep_blocked) {
+        return ESP_OK;
+    }
+    return app_power_enter_safe_stop();
+}
+
+esp_err_t app_power_safe_stop_interaction_begin(void) {
+    bool initialized;
+    bool fallback;
+    bool held;
+    esp_err_t ret;
+
+    portENTER_CRITICAL(&state_lock);
+    initialized = configured;
+    fallback = fixed_frequency_fallback;
+    held = light_sleep_lock_held;
+    portEXIT_CRITICAL(&state_lock);
+    if (!initialized || fallback) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (held) {
+        return ESP_OK;
+    }
+    ret = esp_pm_lock_acquire(no_light_sleep_lock);
+    if (ret != ESP_OK) {
+        record_lock_error();
+        return ret;
+    }
+    portENTER_CRITICAL(&state_lock);
+    light_sleep_lock_held = true;
+    portEXIT_CRITICAL(&state_lock);
+    return ESP_OK;
+}
+
+esp_err_t app_power_safe_stop_interaction_end(void) {
+    bool initialized;
+    bool fallback;
+    bool held;
+    esp_err_t ret;
+
+    portENTER_CRITICAL(&state_lock);
+    initialized = configured;
+    fallback = fixed_frequency_fallback;
+    held = light_sleep_lock_held;
+    portEXIT_CRITICAL(&state_lock);
+    if (!initialized || fallback) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!held) {
+        return ESP_OK;
+    }
+    ret = esp_pm_lock_release(no_light_sleep_lock);
+    if (ret != ESP_OK) {
+        record_lock_error();
+        return ret;
+    }
+    portENTER_CRITICAL(&state_lock);
+    light_sleep_lock_held = false;
+    portEXIT_CRITICAL(&state_lock);
     return ESP_OK;
 }
 

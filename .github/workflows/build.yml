@@ -17,8 +17,74 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Check Python tools
+        run: python -m compileall -q tools manufacturing_tools
+
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Build and run host C tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_auto_power_off.c SRC/domain/auto_power_off.c -lm -o /tmp/test_auto_power_off
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_update_policy.c SRC/domain/firmware_update_policy.c -lm -o /tmp/test_firmware_update_policy
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_vario_audio.c SRC/domain/app_config.c SRC/domain/vario_audio.c -lm -o /tmp/test_vario_audio
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_system_policy.c SRC/domain/system_policy.c -o /tmp/test_system_policy
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_imu_calibration_controller.c SRC/domain/imu_calibration_controller.c SRC/domain/imu_fusion.c SRC/domain/app_config.c -lm -o /tmp/test_imu_calibration_controller
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_lk8ex1.c SRC/domain/lk8ex1.c SRC/domain/battery_level.c -lm -o /tmp/test_lk8ex1
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_usb_storage_policy.c SRC/domain/usb_storage_policy.c -o /tmp/test_usb_storage_policy
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_watchdog_recovery_policy.c SRC/domain/watchdog_recovery_policy.c -o /tmp/test_watchdog_recovery_policy
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_identity.c SRC/domain/board_identity.c -o /tmp/test_board_identity
+          /tmp/test_auto_power_off
+          /tmp/test_firmware_update_policy
+          /tmp/test_vario_audio
+          /tmp/test_system_policy
+          /tmp/test_imu_calibration_controller
+          /tmp/test_lk8ex1
+          /tmp/test_usb_storage_policy
+          /tmp/test_watchdog_recovery_policy
+          /tmp/test_board_identity
+
       - name: Configure ESP32-S3 target
         run: /opt/esp/entrypoint.sh idf.py set-target esp32s3
 
       - name: Build firmware
         run: /opt/esp/entrypoint.sh idf.py build
+
+      - name: Verify effective watchdog configuration
+        run: |
+          grep -Fx '#define CONFIG_BOOTLOADER_WDT_TIME_MS 9000' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_INT_WDT_TIMEOUT_MS 300' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_INT_WDT_CHECK_CPU1 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_TASK_WDT_PANIC 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_TASK_WDT_TIMEOUT_S 5' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_ESP_COREDUMP_ENABLE_TO_NONE 1' build/config/sdkconfig.h
+
+      - name: Verify manufacturing artifacts
+        run: |
+          grep -F 'board_data,data,nvs,0xf20000,4K,readonly' <(python "$IDF_PATH/components/partition_table/gen_esp32part.py" build/partition_table/partition-table.bin)
+          python - <<'PY'
+          from pathlib import Path
+          import tempfile
+          from manufacturing_tools.board_data import generate_board_data
+          from manufacturing_tools.flash_programmer import load_build_artifacts
+          from manufacturing_tools.serial_model import parse_product_serial
+
+          artifacts = load_build_artifacts(Path("build"))
+          with tempfile.TemporaryDirectory() as directory:
+              output = Path(directory) / "board_data.bin"
+              generate_board_data(
+                  parse_product_serial("CBV_A0_73I0j_0009"),
+                  output,
+                  python_executable=artifacts.python_executable,
+                  idf_path=artifacts.idf_path,
+              )
+              assert output.stat().st_size == 0x1000
+          PY

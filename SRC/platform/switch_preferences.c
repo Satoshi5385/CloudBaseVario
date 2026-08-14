@@ -136,7 +136,10 @@ esp_err_t switch_preferences_save(const switch_preferences_t *preferences) {
         goto done;
     }
     payload[1] = (uint8_t) preferences->volume_level;
-    payload[2] = preferences->sink_enabled ? 1U : 0U;
+    payload[2] = 0U;
+    if (preferences->sink_enabled) {
+        payload[2] = 1U;
+    }
     payload[3] = preferences->parameter_number;
     ret = nvs_open(SWITCH_PREFERENCES_NAMESPACE, NVS_READWRITE, &handle);
     if (ret == ESP_OK) {
@@ -197,7 +200,10 @@ void switch_preferences_get_diagnostics(
 
 const char *switch_preferences_source_name(
     switch_preferences_source_t source) {
-    return source == SWITCH_PREFERENCES_SOURCE_NVS ? "NVS" : "DEFAULT";
+    if (source == SWITCH_PREFERENCES_SOURCE_NVS) {
+        return "NVS";
+    }
+    return "DEFAULT";
 }
 
 const char *switch_preferences_load_result_name(

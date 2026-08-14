@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "domain/battery_level.h"
 #include "esp_bt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -38,8 +39,8 @@
 #error "CloudBaseVario registers its own Battery Service 1.1"
 #endif
 
-#if CONFIG_BT_NIMBLE_MAX_CCCDS < 2
-#error "CloudBaseVario requires CCCDs for NUS TX and Battery Level Status"
+#if CONFIG_BT_NIMBLE_MAX_CCCDS < 3
+#error "CloudBaseVario requires CCCDs for NUS TX and Battery Service"
 #endif
 
 #define BLE_DEVICE_NAME "CloudBaseVario"
@@ -52,9 +53,6 @@
 #define BATTERY_SERVICE_UUID UINT16_C(0x180F)
 #define BATTERY_LEVEL_UUID UINT16_C(0x2A19)
 #define BATTERY_LEVEL_STATUS_UUID UINT16_C(0x2BED)
-#define BATTERY_LEVEL_EMPTY_V 3.0f
-#define BATTERY_LEVEL_FULL_V 4.2f
-#define BATTERY_LEVEL_MAX_PERCENT 100.0f
 #define BATTERY_POWER_STATE_PRESENT UINT16_C(0x0001)
 #define BATTERY_POWER_STATE_WIRED_EXTERNAL UINT16_C(0x0002)
 #define BATTERY_POWER_STATE_CHARGING UINT16_C(0x0020)
@@ -88,6 +86,7 @@ static const ble_uuid16_t battery_level_status_uuid =
 static portMUX_TYPE ble_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint16_t connection_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t nus_tx_value_handle = 0U;
+static uint16_t battery_level_value_handle = 0U;
 static uint16_t battery_level_status_value_handle = 0U;
 static uint8_t own_address_type = 0U;
 static uint8_t battery_level_percent = 0U;
@@ -104,9 +103,18 @@ static uint32_t sentence_count = 0U;
 static uint32_t dropped_sentence_count = 0U;
 static int32_t last_notify_error = 0;
 static int64_t last_notify_success_us = 0;
+static TaskHandle_t tx_wakeup_task;
 
 static int ble_gap_event_handler(struct ble_gap_event *event, void *context);
 static int ble_start_advertising(void);
+
+static void ble_notify_tx_worker(void) {
+    portENTER_CRITICAL(&ble_state_lock);
+    if (tx_wakeup_task != NULL) {
+        xTaskNotifyGive(tx_wakeup_task);
+    }
+    portEXIT_CRITICAL(&ble_state_lock);
+}
 
 static void ble_set_connection_state(uint16_t handle, bool subscribed) {
     portENTER_CRITICAL(&ble_state_lock);
@@ -114,6 +122,9 @@ static void ble_set_connection_state(uint16_t handle, bool subscribed) {
     notification_subscribed = subscribed;
     if (handle == BLE_HS_CONN_HANDLE_NONE || !subscribed) {
         last_notify_success_us = 0;
+    }
+    if (tx_wakeup_task != NULL) {
+        xTaskNotifyGive(tx_wakeup_task);
     }
     portEXIT_CRITICAL(&ble_state_lock);
 }
@@ -179,9 +190,10 @@ static int battery_access_callback(
     if (value_size == 0U) {
         return BLE_ATT_ERR_UNLIKELY;
     }
-    return os_mbuf_append(context->om, value, (uint16_t) value_size) == 0
-               ? 0
-               : BLE_ATT_ERR_INSUFFICIENT_RES;
+    if (os_mbuf_append(context->om, value, (uint16_t) value_size) != 0) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
 }
 
 static const struct ble_gatt_chr_def nus_characteristics[] = {
@@ -212,7 +224,8 @@ static const struct ble_gatt_chr_def battery_characteristics[] = {
     {
         .uuid = &battery_level_uuid.u,
         .access_cb = battery_access_callback,
-        .flags = BLE_GATT_CHR_F_READ,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = &battery_level_value_handle,
     },
     {
         .uuid = &battery_level_status_uuid.u,
@@ -343,7 +356,13 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *context) {
             ble_set_connection_state(event->subscribe.conn_handle, subscribed);
             ESP_LOGI(TAG, "NUS notifications enabled=%d", subscribed);
         } else if (event->subscribe.attr_handle ==
+                   battery_level_value_handle) {
+            ble_notify_tx_worker();
+            ESP_LOGI(TAG, "Battery Level notifications enabled=%d",
+                     event->subscribe.cur_notify != 0U);
+        } else if (event->subscribe.attr_handle ==
                    battery_level_status_value_handle) {
+            ble_notify_tx_worker();
             ESP_LOGI(TAG, "Battery Level Status notifications enabled=%d",
                      event->subscribe.cur_notify != 0U);
         }
@@ -469,6 +488,9 @@ void ble_vario_begin_shutdown(void) {
     stop_requested = true;
     handle = connection_handle;
     notification_subscribed = false;
+    if (tx_wakeup_task != NULL) {
+        xTaskNotifyGive(tx_wakeup_task);
+    }
     portEXIT_CRITICAL(&ble_state_lock);
 
     rc = ble_gap_adv_stop();
@@ -482,6 +504,12 @@ void ble_vario_begin_shutdown(void) {
             ESP_LOGW(TAG, "disconnect request failed: %d", rc);
         }
     }
+}
+
+void ble_vario_set_tx_wakeup_task(TaskHandle_t task) {
+    portENTER_CRITICAL(&ble_state_lock);
+    tx_wakeup_task = task;
+    portEXIT_CRITICAL(&ble_state_lock);
 }
 
 esp_err_t ble_vario_stop(void) {
@@ -542,20 +570,7 @@ bool ble_vario_notify_active(void) {
 }
 
 uint8_t ble_vario_battery_level_from_voltage(float battery_voltage_v) {
-    float level = 0.0f;
-
-    if (!isfinite(battery_voltage_v) ||
-        battery_voltage_v <= BATTERY_LEVEL_EMPTY_V) {
-        return 0U;
-    }
-    if (battery_voltage_v >= BATTERY_LEVEL_FULL_V) {
-        return (uint8_t) BATTERY_LEVEL_MAX_PERCENT;
-    }
-
-    level = (battery_voltage_v - BATTERY_LEVEL_EMPTY_V) *
-            BATTERY_LEVEL_MAX_PERCENT /
-            (BATTERY_LEVEL_FULL_V - BATTERY_LEVEL_EMPTY_V);
-    return (uint8_t) lroundf(level);
+    return battery_level_percent_from_voltage(battery_voltage_v);
 }
 
 void ble_vario_format_battery_level_status(
@@ -581,8 +596,11 @@ void ble_vario_format_battery_level_status(
 void ble_vario_update_battery(const system_snapshot_t *system) {
     uint8_t next_status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE] = {0};
     uint8_t next_level = 0U;
+    uint16_t level_handle = 0U;
     uint16_t status_handle = 0U;
+    bool level_changed = false;
     bool level_valid = false;
+    bool notify_level = false;
     bool status_changed = false;
     bool notify_status = false;
 
@@ -591,16 +609,18 @@ void ble_vario_update_battery(const system_snapshot_t *system) {
     }
     ble_vario_format_battery_level_status(
         system->external_power_present, next_status);
-    level_valid = system->battery_valid &&
-                  isfinite(system->battery_voltage_v) &&
-                  system->battery_voltage_v >= 0.0f;
+    level_valid = system->battery_display_valid &&
+                  isfinite(system->battery_display_voltage_v) &&
+                  system->battery_display_voltage_v >= 0.0f;
     if (level_valid) {
         next_level =
-            ble_vario_battery_level_from_voltage(system->battery_voltage_v);
+            ble_vario_battery_level_from_voltage(
+                system->battery_display_voltage_v);
     }
 
     portENTER_CRITICAL(&ble_state_lock);
     if (level_valid) {
+        level_changed = battery_level_percent != next_level;
         battery_level_percent = next_level;
     }
     status_changed =
@@ -610,27 +630,22 @@ void ble_vario_update_battery(const system_snapshot_t *system) {
         memcpy(battery_level_status, next_status,
                sizeof(battery_level_status));
     }
+    notify_level = level_changed && nimble_initialized &&
+                   !stop_requested &&
+                   battery_level_value_handle != 0U;
     notify_status = status_changed && nimble_initialized &&
                     !stop_requested &&
                     battery_level_status_value_handle != 0U;
+    level_handle = battery_level_value_handle;
     status_handle = battery_level_status_value_handle;
     portEXIT_CRITICAL(&ble_state_lock);
 
+    if (notify_level) {
+        ble_gatts_chr_updated(level_handle);
+    }
     if (notify_status) {
         ble_gatts_chr_updated(status_handle);
     }
-}
-
-static uint8_t lk8ex1_checksum(const char *body) {
-    uint8_t checksum = 0U;
-
-    if (body != NULL) {
-        for (const unsigned char *cursor = (const unsigned char *) body;
-             *cursor != '\0'; cursor++) {
-            checksum ^= *cursor;
-        }
-    }
-    return checksum;
 }
 
 static void record_notify_result(bool success, int error) {
@@ -652,78 +667,33 @@ static void record_notify_result(bool success, int error) {
 
 bool ble_vario_format_lk8ex1_fields(
     const vario_result_t *vario, const system_snapshot_t *system,
+    app_bluetooth_battery_mode_t battery_mode,
     ble_vario_lk8ex1_fields_t *fields) {
-    int written = 0;
-
-    if (vario == NULL || system == NULL || fields == NULL) {
-        return false;
-    }
-    memset(fields, 0, sizeof(*fields));
-    (void) strcpy(fields->raw_pressure, "999999");
-    (void) strcpy(fields->altitude, "99999");
-    (void) strcpy(fields->vario, "9999");
-    (void) strcpy(fields->temperature, "99");
-    (void) strcpy(fields->battery, "999");
-
-    if (vario->pressure_valid) {
-        written = snprintf(
-            fields->raw_pressure, sizeof(fields->raw_pressure), "%ld",
-            (long) lroundf((float) vario->pressure_pa_x100 / 100.0f));
-        if (written <= 0 ||
-            (size_t) written >= sizeof(fields->raw_pressure)) {
-            return false;
-        }
-    }
-    if (vario->climb_rate_valid && isfinite(vario->climb_rate_mps)) {
-        written = snprintf(fields->vario, sizeof(fields->vario), "%ld",
-                           (long) lroundf(vario->climb_rate_mps * 100.0f));
-        if (written <= 0 || (size_t) written >= sizeof(fields->vario)) {
-            return false;
-        }
-    }
-    if (system->battery_valid && isfinite(system->battery_voltage_v) &&
-        system->battery_voltage_v >= 0.0f) {
-        written = snprintf(fields->battery, sizeof(fields->battery), "%.2f",
-                           (double) system->battery_voltage_v);
-        if (written <= 0 || (size_t) written >= sizeof(fields->battery)) {
-            return false;
-        }
-    }
-    fields->sentence_available =
-        vario->pressure_valid || vario->climb_rate_valid;
-    return true;
+    return lk8ex1_format_fields(vario, system, battery_mode, fields);
 }
 
 esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
-                                  const system_snapshot_t *system) {
-    char body[96] = {0};
-    char sentence[104] = {0};
+                                  const system_snapshot_t *system,
+                                  app_bluetooth_battery_mode_t battery_mode) {
+    char sentence[LK8EX1_SENTENCE_MAX_LENGTH] = {0};
     ble_vario_lk8ex1_fields_t fields = {0};
     uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
     uint16_t mtu = 23U;
     size_t chunk_size = 20U;
     size_t sentence_length = 0U;
-    int written = 0;
 
-    if (!ble_vario_format_lk8ex1_fields(vario, system, &fields)) {
+    if (!ble_vario_format_lk8ex1_fields(vario, system, battery_mode,
+                                        &fields)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!fields.sentence_available) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    written = snprintf(body, sizeof(body), "LK8EX1,%s,%s,%s,%s,%s,",
-                       fields.raw_pressure, fields.altitude, fields.vario,
-                       fields.temperature, fields.battery);
-    if (written <= 0 || (size_t) written >= sizeof(body)) {
+    if (!lk8ex1_format_sentence(vario, system, battery_mode, sentence,
+                                sizeof(sentence), &sentence_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    written = snprintf(sentence, sizeof(sentence), "$%s*%02X\r\n", body,
-                       lk8ex1_checksum(body));
-    if (written <= 0 || (size_t) written >= sizeof(sentence)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    sentence_length = (size_t) written;
 
     portENTER_CRITICAL(&ble_state_lock);
     if (nimble_initialized && !stop_requested && notification_subscribed) {
@@ -740,10 +710,16 @@ esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
     }
     for (size_t offset = 0U; offset < sentence_length; offset += chunk_size) {
         size_t remaining = sentence_length - offset;
-        size_t chunk_length = remaining < chunk_size ? remaining : chunk_size;
+        size_t chunk_length = chunk_size;
         struct os_mbuf *packet =
-            ble_hs_mbuf_from_flat(&sentence[offset], (uint16_t) chunk_length);
+            NULL;
         int rc = 0;
+
+        if (remaining < chunk_length) {
+            chunk_length = remaining;
+        }
+        packet = ble_hs_mbuf_from_flat(&sentence[offset],
+                                       (uint16_t) chunk_length);
 
         if (packet == NULL) {
             record_notify_result(false, BLE_HS_ENOMEM);

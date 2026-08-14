@@ -1,0 +1,97 @@
+{
+  "format_version": 1,
+  "mc_parameters": {
+    "sea_level_pressure_pa": 101325.0,
+    "auto_power_off_minutes": 60,
+    "filter_mode": "AUTO",
+    "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_notify_rate_hz": 10,
+    "i2c_reinit_error_count": 10,
+    "imu_gyro_calibration_samples": 200,
+    "imu_mahony_kp": 5.0,
+    "imu_mahony_ki": 0.05
+  },
+  "vario_parameter_sets": [
+    {
+      "parameter_number": 1,
+      "parameters": {
+        "predictive_buzzer_enabled": false,
+        "audio_climb_rate_average_s": 1.0,
+        "lift_start_mps": 0.1,
+        "lift_end_mps": 0.08,
+        "sink_start_mps": -1.8,
+        "sink_end_mps": -1.7,
+        "audio_state_hold_ms": 200,
+        "audio_stale_ms": 500,
+        "lift_freq_base_hz": 1047,
+        "lift_freq_rate_hz_per_mps": 100.0,
+        "lift_freq_max_hz": 2600,
+        "lift_time_ms_at_0p2": 400,
+        "lift_time_ms_at_1p0": 300,
+        "lift_time_ms_at_2p5": 200,
+        "lift_time_ms_at_5p0": 100,
+        "sink_freq_start_hz": 523,
+        "sink_freq_rate_hz_per_mps": 40.0,
+        "sink_freq_min_hz": 240,
+        "audio_duty_percent": 50,
+        "predictive_interval_ms": 1000,
+        "predictive_duration_ms": 150,
+        "predictive_min_mps": 0.01
+      }
+    },
+    {
+      "parameter_number": 2,
+      "parameters": {
+        "predictive_buzzer_enabled": false,
+        "audio_climb_rate_average_s": 1.0,
+        "lift_start_mps": 0.2,
+        "lift_end_mps": 0.18,
+        "sink_start_mps": -2.0,
+        "sink_end_mps": -1.9,
+        "audio_state_hold_ms": 200,
+        "audio_stale_ms": 500,
+        "lift_freq_base_hz": 1047,
+        "lift_freq_rate_hz_per_mps": 100.0,
+        "lift_freq_max_hz": 2600,
+        "lift_time_ms_at_0p2": 400,
+        "lift_time_ms_at_1p0": 300,
+        "lift_time_ms_at_2p5": 200,
+        "lift_time_ms_at_5p0": 100,
+        "sink_freq_start_hz": 523,
+        "sink_freq_rate_hz_per_mps": 40.0,
+        "sink_freq_min_hz": 240,
+        "audio_duty_percent": 50,
+        "predictive_interval_ms": 1000,
+        "predictive_duration_ms": 150,
+        "predictive_min_mps": 0.01
+      }
+    },
+    {
+      "parameter_number": 3,
+      "parameters": {
+        "predictive_buzzer_enabled": false,
+        "audio_climb_rate_average_s": 1.0,
+        "lift_start_mps": 0.3,
+        "lift_end_mps": 0.29,
+        "sink_start_mps": -2.2,
+        "sink_end_mps": -2.1,
+        "audio_state_hold_ms": 200,
+        "audio_stale_ms": 500,
+        "lift_freq_base_hz": 1047,
+        "lift_freq_rate_hz_per_mps": 100.0,
+        "lift_freq_max_hz": 2600,
+        "lift_time_ms_at_0p2": 400,
+        "lift_time_ms_at_1p0": 300,
+        "lift_time_ms_at_2p5": 200,
+        "lift_time_ms_at_5p0": 100,
+        "sink_freq_start_hz": 523,
+        "sink_freq_rate_hz_per_mps": 40.0,
+        "sink_freq_min_hz": 240,
+        "audio_duty_percent": 50,
+        "predictive_interval_ms": 1000,
+        "predictive_duration_ms": 150,
+        "predictive_min_mps": 0.01
+      }
+    }
+  ]
+}

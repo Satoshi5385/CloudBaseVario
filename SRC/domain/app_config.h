@@ -9,10 +9,17 @@ typedef enum {
     APP_FILTER_MODE_BARO_ONLY,
 } app_filter_mode_t;
 
+typedef enum {
+    APP_BLUETOOTH_BATTERY_MODE_VOLTAGE = 0,
+    APP_BLUETOOTH_BATTERY_MODE_PERCENT,
+} app_bluetooth_battery_mode_t;
+
 typedef struct {
     float sea_level_pressure_pa;
     uint32_t auto_power_off_minutes;
     app_filter_mode_t filter_mode;
+    app_bluetooth_battery_mode_t bluetooth_battery_mode;
+    uint32_t bluetooth_notify_rate_hz;
     uint32_t i2c_reinit_error_count;
     uint32_t imu_gyro_calibration_samples;
     float imu_mahony_kp;
@@ -75,7 +82,7 @@ typedef union {
     bool boolean;
     uint32_t uint32;
     float real;
-    app_filter_mode_t filter_mode;
+    int32_t enumeration;
 } app_parameter_value_t;
 
 typedef struct {
@@ -155,3 +162,15 @@ bool app_config_format_value(const app_config_t *config, size_t index,
 
 /** Convert the filter enum to its stable JSON/console name. */
 const char *app_config_filter_mode_name(app_filter_mode_t mode);
+
+/** Convert an LK8EX1 battery mode to its stable JSON/console name. */
+const char *app_config_bluetooth_battery_mode_name(
+    app_bluetooth_battery_mode_t mode);
+
+/** Parse a stable enum value for the named public parameter. */
+bool app_config_parse_enum_value(const char *parameter_name,
+                                 const char *text, int32_t *value);
+
+/** Format a stable enum value for the named public parameter. */
+const char *app_config_enum_value_name(const char *parameter_name,
+                                       int32_t value);
