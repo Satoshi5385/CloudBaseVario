@@ -32,6 +32,7 @@ jobs:
           set -euo pipefail
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_auto_power_off.c SRC/domain/auto_power_off.c -lm -o /tmp/test_auto_power_off
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_update_policy.c SRC/domain/firmware_update_policy.c -lm -o /tmp/test_firmware_update_policy
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_metadata.c SRC/domain/firmware_metadata.c -o /tmp/test_firmware_metadata
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_vario_audio.c SRC/domain/app_config.c SRC/domain/vario_audio.c -lm -o /tmp/test_vario_audio
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_system_policy.c SRC/domain/system_policy.c -o /tmp/test_system_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_imu_calibration_controller.c SRC/domain/imu_calibration_controller.c SRC/domain/imu_fusion.c SRC/domain/app_config.c -lm -o /tmp/test_imu_calibration_controller
@@ -41,6 +42,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_identity.c SRC/domain/board_identity.c -o /tmp/test_board_identity
           /tmp/test_auto_power_off
           /tmp/test_firmware_update_policy
+          /tmp/test_firmware_metadata
           /tmp/test_vario_audio
           /tmp/test_system_policy
           /tmp/test_imu_calibration_controller

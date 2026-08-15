@@ -17,6 +17,7 @@
 #include "domain/app_types.h"
 #include "domain/auto_power_off.h"
 #include "domain/battery_level.h"
+#include "domain/firmware_metadata.h"
 #include "domain/imu_calibration_controller.h"
 #include "domain/imu_fusion.h"
 #include "domain/system_policy.h"
@@ -2573,7 +2574,7 @@ static void console_print_board_info(void) {
     const char *model = "-";
     const char *serial = "-";
     const char *project = "-";
-    const char *version = "-";
+    firmware_metadata_t firmware = {0};
     uint8_t schema = 0U;
     uint16_t board_id = 0U;
 
@@ -2588,16 +2589,19 @@ static void console_print_board_info(void) {
     }
     if (app != NULL) {
         project = app->project_name;
-        version = app->version;
+        (void) firmware_metadata_parse(app->version, sizeof(app->version),
+                                       &firmware);
+    } else {
+        (void) firmware_metadata_parse(NULL, 0U, &firmware);
     }
     (void) esp_read_mac(mac, ESP_MAC_WIFI_STA);
     console_writef(
         "BOARD status=%s schema=%u id=0x%04x code=%s model=%s "
         "serial=%s mac=%02X%02X%02X%02X%02X%02X "
-        "firmware_project=%s firmware_version=%s\r\n",
+        "firmware_project=%s firmware_version=%s firmware_hash=%s\r\n",
         status, (unsigned int) schema, (unsigned int) board_id,
         code, model, serial, mac[0], mac[1], mac[2], mac[3], mac[4],
-        mac[5], project, version);
+        mac[5], project, firmware.version, firmware.git_hash);
 }
 
 static void console_diag_status(void) {
@@ -2614,6 +2618,7 @@ static void console_diag_status(void) {
     const char *config_key = usb.config.key;
     const char *update_target = update.target_partition;
     const char *update_version = update.image_version;
+    const char *update_hash = update.image_hash;
     const char *update_fingerprint = update.image_fingerprint;
 
     console_print_board_info();
@@ -2636,6 +2641,9 @@ static void console_diag_status(void) {
     }
     if (update.image_version[0] == '\0') {
         update_version = "-";
+    }
+    if (update.image_hash[0] == '\0') {
+        update_hash = "-";
     }
     if (update.image_fingerprint[0] == '\0') {
         update_fingerprint = "-";
@@ -2794,7 +2802,7 @@ static void console_diag_status(void) {
         " written=%" PRIu32 " confirm=%d workers=%d"
         " power_allowed=%d ext_power=%d battery_valid=%d"
         " battery_v=%.2f threshold_v=%.2f target=%s"
-        " version=%s fingerprint=%s\r\n",
+        " version=%s hash=%s fingerprint=%s\r\n",
         firmware_update_state_name(update.state),
         esp_err_to_name(update.last_error), update.image_size_bytes,
         update.bytes_written, update.confirmation_required,
@@ -2802,7 +2810,7 @@ static void console_diag_status(void) {
         update.external_power_present, update.battery_valid,
         (double) update.battery_voltage_v,
         (double) update.minimum_battery_voltage_v,
-        update_target, update_version, update_fingerprint);
+        update_target, update_version, update_hash, update_fingerprint);
     console_writef(
         "WATCHDOG reset=%s action=%s recoveries=%" PRIu32
         " stable_ms=%" PRIu32 " previous_stage=%s suspected=%s"

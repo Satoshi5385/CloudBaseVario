@@ -6,6 +6,70 @@ set(EXTRA_COMPONENT_DIRS "SRC")
 set(COMPONENTS SRC espcoredump)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# Keep the manually managed release version in a C header so firmware code and
+# the build metadata share one source of truth. The Git hash intentionally does
+# not include a dirty suffix; the application SHA-256 identifies exact bytes.
+set(CBV_VERSION_HEADER "${CMAKE_CURRENT_LIST_DIR}/SRC/firmware_version.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CBV_VERSION_HEADER}")
+file(STRINGS "${CBV_VERSION_HEADER}" CBV_VERSION_DEFINE
+    REGEX "^#define[ \t]+CBV_FIRMWARE_VERSION[ \t]+\"[0-9]+\\.[0-9]+\\.[0-9]+\"$"
+    LIMIT_COUNT 1)
+if(NOT CBV_VERSION_DEFINE)
+    message(FATAL_ERROR
+        "SRC/firmware_version.h must define CBV_FIRMWARE_VERSION as major.minor.patch")
+endif()
+string(REGEX REPLACE
+    "^#define[ \t]+CBV_FIRMWARE_VERSION[ \t]+\"([^\"]+)\"$" "\\1"
+    CBV_RELEASE_VERSION "${CBV_VERSION_DEFINE}")
+
+execute_process(
+    COMMAND git rev-parse --short=7 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    RESULT_VARIABLE CBV_GIT_RESULT
+    OUTPUT_VARIABLE CBV_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT CBV_GIT_RESULT EQUAL 0 OR
+   NOT CBV_GIT_HASH MATCHES "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$")
+    message(FATAL_ERROR "A seven-character lowercase Git HEAD hash is required")
+endif()
+
+execute_process(
+    COMMAND git rev-parse --git-path HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    OUTPUT_VARIABLE CBV_GIT_HEAD_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+    COMMAND git symbolic-ref -q HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    RESULT_VARIABLE CBV_GIT_REF_RESULT
+    OUTPUT_VARIABLE CBV_GIT_REF
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(CBV_GIT_HEAD_PATH)
+    get_filename_component(CBV_GIT_HEAD_PATH "${CBV_GIT_HEAD_PATH}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CBV_GIT_HEAD_PATH}")
+endif()
+if(CBV_GIT_REF_RESULT EQUAL 0 AND CBV_GIT_REF)
+    execute_process(
+        COMMAND git rev-parse --git-path "${CBV_GIT_REF}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+        OUTPUT_VARIABLE CBV_GIT_REF_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(CBV_GIT_REF_PATH "${CBV_GIT_REF_PATH}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CBV_GIT_REF_PATH}")
+endif()
+
+set(PROJECT_VER "${CBV_RELEASE_VERSION}+${CBV_GIT_HASH}")
+string(LENGTH "${PROJECT_VER}" CBV_PROJECT_VER_LENGTH)
+if(CBV_PROJECT_VER_LENGTH GREATER 31)
+    message(FATAL_ERROR "Combined firmware version exceeds esp_app_desc_t capacity")
+endif()
 project(CloudBaseVario-Aohazuku)
 
 # The only image accepted as /UPDATE.BIN is the raw ESP-IDF application

@@ -11,6 +11,7 @@ idf_component_register(
         "domain/board_identity.c"
         "domain/auto_power_off.c"
         "domain/firmware_update_policy.c"
+        "domain/firmware_metadata.c"
         "domain/imu_calibration_controller.c"
         "domain/imu_fusion.c"
         "domain/lk8ex1.c"

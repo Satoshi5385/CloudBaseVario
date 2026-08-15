@@ -16,6 +16,7 @@ MAC = "001122334455"
 ARTIFACTS = SimpleNamespace(
     project="CloudBaseVario-Aohazuku",
     version="test-version",
+    firmware_hash="abcdef0",
 )
 
 
@@ -25,7 +26,7 @@ def board_response(serial: str) -> list[bytes]:
             "BOARD status=VALID schema=1 id=0x0100 code=A0 "
             f"model=Aohazuku-Rev0 serial={serial} mac={MAC} "
             "firmware_project=CloudBaseVario-Aohazuku "
-            "firmware_version=test-version\r\n"
+            "firmware_version=test-version firmware_hash=abcdef0\r\n"
         ).encode("ascii"),
         b"OK\r\n",
     ]

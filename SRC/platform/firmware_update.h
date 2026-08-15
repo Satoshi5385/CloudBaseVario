@@ -32,6 +32,7 @@ typedef struct {
     float minimum_battery_voltage_v;
     char target_partition[17];
     char image_version[33];
+    char image_hash[8];
     char image_fingerprint[65];
 } firmware_update_diagnostics_t;
 

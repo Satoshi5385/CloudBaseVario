@@ -16,6 +16,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "domain/firmware_metadata.h"
 #include "domain/firmware_update_policy.h"
 #include "platform/board.h"
 #include "platform/usb_device_service.h"
@@ -151,16 +152,30 @@ static void bytes_to_hex(const uint8_t *bytes, size_t length,
     output[length * 2U] = '\0';
 }
 
-static void record_image_info(const update_image_info_t *info) {
+static void record_descriptor_info(const esp_app_desc_t *descriptor) {
+    firmware_metadata_t metadata;
+
+    (void) firmware_metadata_parse(descriptor->version,
+                                   sizeof(descriptor->version),
+                                   &metadata);
     portENTER_CRITICAL(&update_lock);
-    update_diagnostics.image_size_bytes = (uint32_t) info->size;
     (void) snprintf(update_diagnostics.image_version,
                     sizeof(update_diagnostics.image_version), "%s",
-                    info->descriptor.version);
-    bytes_to_hex(info->descriptor.app_elf_sha256,
-                 sizeof(info->descriptor.app_elf_sha256),
+                    metadata.version);
+    (void) snprintf(update_diagnostics.image_hash,
+                    sizeof(update_diagnostics.image_hash), "%s",
+                    metadata.git_hash);
+    bytes_to_hex(descriptor->app_elf_sha256,
+                 sizeof(descriptor->app_elf_sha256),
                  update_diagnostics.image_fingerprint,
                  sizeof(update_diagnostics.image_fingerprint));
+    portEXIT_CRITICAL(&update_lock);
+}
+
+static void record_image_info(const update_image_info_t *info) {
+    record_descriptor_info(&info->descriptor);
+    portENTER_CRITICAL(&update_lock);
+    update_diagnostics.image_size_bytes = (uint32_t) info->size;
     portEXIT_CRITICAL(&update_lock);
 }
 
@@ -264,12 +279,25 @@ static void stop_update_indicator(void) {
     board_set_status_leds(false, false);
 }
 
-static esp_err_t reject_input(esp_err_t reason, const char *message) {
+static esp_err_t reject_input(esp_err_t reason, const char *message,
+                              const update_image_info_t *info) {
     esp_err_t move_result = move_state_file(UPDATE_INPUT_NAME,
                                             UPDATE_BAD_NAME);
+    firmware_metadata_t metadata;
+
+    if (info != NULL) {
+        (void) firmware_metadata_parse(info->descriptor.version,
+                                       sizeof(info->descriptor.version),
+                                       &metadata);
+    } else {
+        (void) firmware_metadata_parse(NULL, 0U, &metadata);
+    }
     set_state(FIRMWARE_UPDATE_REJECTED, reason);
-    (void) write_status("state=REJECTED\r\nreason=%s\r\nerror=%s\r\n",
-                        message, esp_err_to_name(reason));
+    (void) write_status(
+        "state=REJECTED\r\nreason=%s\r\nerror=%s\r\n"
+        "version=%s\r\nhash=%s\r\n",
+        message, esp_err_to_name(reason), metadata.version,
+        metadata.git_hash);
     if (move_result != ESP_OK) {
         return move_result;
     }
@@ -298,12 +326,16 @@ static void sanitize_project_name(const char *input, size_t input_capacity,
 
 static esp_err_t reject_project_mismatch(const update_image_info_t *info) {
     char actual_project[sizeof(info->descriptor.project_name) + 1U];
+    firmware_metadata_t metadata;
     esp_err_t reason = ESP_ERR_INVALID_RESPONSE;
     esp_err_t move_result = ESP_FAIL;
 
     sanitize_project_name(info->descriptor.project_name,
                           sizeof(info->descriptor.project_name),
                           actual_project, sizeof(actual_project));
+    (void) firmware_metadata_parse(info->descriptor.version,
+                                   sizeof(info->descriptor.version),
+                                   &metadata);
     move_result = move_state_file(UPDATE_INPUT_NAME, UPDATE_BAD_NAME);
     set_state(FIRMWARE_UPDATE_REJECTED, reason);
     (void) write_status(
@@ -311,8 +343,10 @@ static esp_err_t reject_project_mismatch(const update_image_info_t *info) {
         "reason=firmware target mismatch\r\n"
         "expected_project=%s\r\n"
         "actual_project=%s\r\n"
-        "error=%s\r\n",
-        CBV_FIRMWARE_PROJECT_NAME, actual_project, esp_err_to_name(reason));
+        "error=%s\r\n"
+        "version=%s\r\nhash=%s\r\n",
+        CBV_FIRMWARE_PROJECT_NAME, actual_project, esp_err_to_name(reason),
+        metadata.version, metadata.git_hash);
     if (move_result != ESP_OK) {
         return move_result;
     }
@@ -321,6 +355,7 @@ static esp_err_t reject_project_mismatch(const update_image_info_t *info) {
 
 static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
     update_image_info_t pending_info;
+    firmware_metadata_t metadata;
     esp_err_t ret;
 
     if (!file_exists(UPDATE_PENDING_NAME)) {
@@ -331,8 +366,13 @@ static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
         memcmp(pending_info.descriptor.app_elf_sha256,
                running_desc->app_elf_sha256,
                sizeof(running_desc->app_elf_sha256)) == 0) {
-        ret = write_status("state=CONFIRMED\r\nversion=%s\r\n",
-                           running_desc->version);
+        (void) firmware_metadata_parse(running_desc->version,
+                                       sizeof(running_desc->version),
+                                       &metadata);
+        ret = write_status(
+            "state=CONFIRMED\r\nversion=%s\r\nhash=%s\r\n",
+            metadata.version, metadata.git_hash);
+        record_descriptor_info(running_desc);
         if (ret == ESP_OK) {
             ret = remove_if_present(UPDATE_PENDING_NAME);
         }
@@ -348,8 +388,17 @@ static esp_err_t reconcile_pending_file(const esp_app_desc_t *running_desc) {
 
     (void) move_state_file(UPDATE_PENDING_NAME, UPDATE_BAD_NAME);
     set_state(FIRMWARE_UPDATE_ROLLED_BACK, ret);
+    if (ret == ESP_OK) {
+        (void) firmware_metadata_parse(pending_info.descriptor.version,
+                                       sizeof(pending_info.descriptor.version),
+                                       &metadata);
+    } else {
+        (void) firmware_metadata_parse(NULL, 0U, &metadata);
+    }
     (void) write_status(
-        "state=ROLLED_BACK\r\nreason=staged image is not running\r\n");
+        "state=ROLLED_BACK\r\nreason=staged image is not running\r\n"
+        "version=%s\r\nhash=%s\r\n",
+        metadata.version, metadata.git_hash);
     return ESP_OK;
 }
 
@@ -361,6 +410,11 @@ static esp_err_t apply_update(const update_image_info_t *info) {
     esp_ota_handle_t ota_handle = 0;
     esp_err_t ret;
     bool ota_started = false;
+    firmware_metadata_t metadata;
+
+    (void) firmware_metadata_parse(info->descriptor.version,
+                                   sizeof(info->descriptor.version),
+                                   &metadata);
 
     target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL || info->size > target->size) {
@@ -392,8 +446,10 @@ static esp_err_t apply_update(const update_image_info_t *info) {
     start_update_indicator();
     set_state(FIRMWARE_UPDATE_WRITING, ESP_OK);
     (void) write_status(
-        "state=WRITING\r\nversion=%s\r\nsize=%u\r\ntarget=%s\r\n",
-        info->descriptor.version, (unsigned int) info->size, target->label);
+        "state=WRITING\r\nversion=%s\r\nhash=%s\r\n"
+        "size=%u\r\ntarget=%s\r\n",
+        metadata.version, metadata.git_hash, (unsigned int) info->size,
+        target->label);
 
     (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
     ret = esp_ota_begin(target, info->size, &ota_handle);
@@ -442,8 +498,10 @@ static esp_err_t apply_update(const update_image_info_t *info) {
         return ret;
     }
     ret = write_status(
-        "state=STAGED\r\nversion=%s\r\nsize=%u\r\ntarget=%s\r\n",
-        info->descriptor.version, (unsigned int) info->size, target->label);
+        "state=STAGED\r\nversion=%s\r\nhash=%s\r\n"
+        "size=%u\r\ntarget=%s\r\n",
+        metadata.version, metadata.git_hash, (unsigned int) info->size,
+        target->label);
     if (ret != ESP_OK) {
         (void) move_state_file(UPDATE_PENDING_NAME, UPDATE_BAD_NAME);
         return ret;
@@ -490,6 +548,7 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
     portEXIT_CRITICAL(&update_lock);
 
     if (firmware_update_running_image_pending_verify()) {
+        record_descriptor_info(running_desc);
         portENTER_CRITICAL(&update_lock);
         update_diagnostics.state = FIRMWARE_UPDATE_PENDING_CONFIRMATION;
         update_diagnostics.confirmation_required = true;
@@ -521,7 +580,8 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
             "external_power=%d\r\n"
             "battery_valid=%d\r\n"
             "battery_v=%.2f\r\n"
-            "threshold_v=%.2f\r\n",
+            "threshold_v=%.2f\r\n"
+            "version=-\r\nhash=-\r\n",
             external_power_present, battery_valid,
             (double) battery_voltage_v,
             (double) FIRMWARE_UPDATE_MIN_BATTERY_V);
@@ -536,7 +596,8 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
         if (project_mismatch) {
             ret = reject_project_mismatch(&image_info);
         } else {
-            ret = reject_input(ret, "invalid ESP32-S3 application image");
+            ret = reject_input(ret, "invalid ESP32-S3 application image",
+                               NULL);
         }
         usb_device_storage_end_app_io();
         return ret;
@@ -548,7 +609,8 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
 
     ret = apply_update(&image_info);
     if (ret != ESP_OK) {
-        (void) reject_input(ret, "OTA write or verification failed");
+        (void) reject_input(ret, "OTA write or verification failed",
+                            &image_info);
         usb_device_storage_end_app_io();
     }
     return ret;
@@ -558,6 +620,7 @@ static void confirmation_task(void *argument) {
     bool workers_started;
     const esp_app_desc_t *running_desc = NULL;
     esp_err_t ret;
+    firmware_metadata_t metadata;
     (void) argument;
 
     vTaskDelay(pdMS_TO_TICKS(UPDATE_CONFIRMATION_DELAY_MS));
@@ -585,8 +648,12 @@ static void confirmation_task(void *argument) {
     ret = usb_device_storage_begin_app_io(UPDATE_STORAGE_TIMEOUT_MS);
     if (ret == ESP_OK) {
         running_desc = esp_app_get_description();
-        ret = write_status("state=CONFIRMED\r\nversion=%s\r\n",
-                           running_desc->version);
+        (void) firmware_metadata_parse(running_desc->version,
+                                       sizeof(running_desc->version),
+                                       &metadata);
+        ret = write_status(
+            "state=CONFIRMED\r\nversion=%s\r\nhash=%s\r\n",
+            metadata.version, metadata.git_hash);
         if (ret == ESP_OK) {
             ret = remove_if_present(UPDATE_PENDING_NAME);
         }

@@ -9,6 +9,7 @@ from manufacturing_tools.serial_model import parse_product_serial
 FIRMWARE = {
     "project": "CloudBaseVario-Aohazuku",
     "version": "test",
+    "hash": "abcdef0",
     "application_sha256": "a" * 64,
     "board_data_sha256": "b" * 64,
 }
@@ -32,6 +33,9 @@ class ManufacturingRegistryTests(unittest.TestCase):
         attempt = self.begin()
         self.registry.finish_attempt(attempt, success=True, stage="PASS")
         self.assertEqual(self.registry.list_devices()[0]["status"], "PASS")
+        self.assertEqual(
+            self.registry.list_devices()[0]["firmware_hash"], "abcdef0"
+        )
         with self.assertRaises(RegistryError):
             self.begin()
         retry = self.begin(rework=True)
@@ -65,7 +69,21 @@ class ManufacturingRegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.list_devices()[0]["status"], "FAIL")
         self.assertEqual(self.registry.list_attempts()[0]["result"], "INTERRUPTED")
 
+    def test_existing_registry_rows_gain_an_empty_firmware_hash(self) -> None:
+        self.registry.directory.mkdir(parents=True, exist_ok=True)
+        self.registry.devices_path.write_text(
+            "serial,status,firmware_version\nlegacy,PASS,old\n", encoding="utf-8"
+        )
+        self.registry.attempts_path.write_text(
+            "attempt_id,result\nold-attempt,PASS\n", encoding="utf-8"
+        )
+
+        self.begin()
+
+        devices = self.registry.list_devices()
+        self.assertEqual(devices[0]["serial"], "legacy")
+        self.assertEqual(devices[0]["firmware_hash"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
-

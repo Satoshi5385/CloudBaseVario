@@ -48,17 +48,12 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
-消去済みまたは新品のFlashへの初期書込みは、非公開の製造手順に従ってください。
+ファームウェアのリリース版番号は `SRC/firmware_version.h` の
+`CBV_FIRMWARE_VERSION`を手動で更新します。ビルド時にはこの版番号とHEADの
+7桁Git hashを組み合わせてimageへ埋め込みます。未コミット変更の有無はhashへ
+含めないため、実際のバイナリ内容を厳密に識別するときはSHA-256も併用します。
 
-```powershell
-python -m venv .venv-manufacturing
-.\.venv-manufacturing\Scripts\python.exe -m pip install -r manufacturing_tools\requirements.txt
-.\.venv-manufacturing\Scripts\python.exe manufacturing_tools\manufacturing_tool.py
-```
-
-製造ツールの一般的な操作は[製造ツール説明](manufacturing_tools/README.md)を参照してください。
-
-製造後、SW2とSW3を同時に押したまま電源ONすると設定FATをformatできます。
+SW2とSW3を同時に押したまま電源ONすると設定FATをformatできます。
 両スイッチは電源投入から1秒程度押し続けてください。format後は組込み既定値の
 `setting.json`が自動生成されます。
 
@@ -93,11 +88,13 @@ idf.py -p <PORT> monitor
 2. OSの「安全な取り外し」を実行します。
 3. USB外部給電を接続した状態、または有効な電池電圧が3.4 Vを超える状態で本体を再起動します。
 
-MSCの各WRITE(10)はwear levelling領域への実書込みが完了してからhostへ成功応答します。SCSI SYNCHRONIZE CACHEは受理済みWRITEが0で実媒体mutexを取得できた場合だけ成功し、eject／detachでは新規host I/Oを閉じてから残るWRITEとTinyUSB非同期完了をドレインします。このため、安全な取り外しの完了時点では端末側に未完了の遅延書込みを残しません。
+更新中はMSCドライブが一時的に表示されなくなります。新しいファームウェアで10秒間正常に起動すると更新完了となり、再表示されたドライブの `UPDATE.TXT`で `state=CONFIRMED`、手動管理の`version`、7桁Git `hash`を確認できます。`setting.json`は更新時もそのまま保持されます。
 
-次回起動時、通常task開始前にESP32-S3用application imageとproject名を検証し、`CloudBaseVario-Aohazuku`と完全一致する場合だけinactive OTA slotへ書き込みます。旧project名 `CloudBaseVario`や他機種向けのイメージは `UPDATE.BAD`へ移し、`UPDATE.TXT`へ期待値と実際のproject名を記録します。USB外部給電がなく、有効な電池電圧が3.4 V以下または取得できない場合は、`UPDATE.BIN`を保持して`UPDATE.TXT`へ延期理由と判定値を記録します。成功後は更新firmwareで再起動し、必須taskが生成されて10秒動作すると確定します。初回bootの確認中もTinyUSB CDC診断は開始しますが、config FATは`APP_OWNED`のままとしてMSC媒体を公開しません。確定後に `UPDATE.TXT`を `CONFIRMED`へ更新して `UPDATE.PND`を削除し、その完了後にだけMSC媒体を公開します。確定前のresetまたはcrashでは以前のfirmwareへrollbackします。
+更新できなかった場合も、次のように元のファームウェアで動作を継続または復旧します。詳しい理由は `UPDATE.TXT`で確認できます。
 
-同じドライブに `setting.json`と更新ファイルを共存できます。`UPDATE.PND`は確認待ち、`UPDATE.BAD`は拒否・rollbackされたimage、`UPDATE.TXT`はASCIIの状態表示です。旧project名のfirmwareから基板固有ID版へ初めて移行するときは、GPIO0 + resetのROM download modeまたは `idf.py flash`による有線書込みが必要です。移行後のMSC更新では、同じ機種ID内に限り同一versionとdowngradeを許可します。USB DFU classは使用せず、secure boot／署名検証は現時点では行いません。
+- USB外部給電がなく、電池電圧が3.4 V以下または取得できない場合: 更新を延期し、`UPDATE.BIN`を残します。USBを接続するか十分に充電して再起動してください。
+- 別機種向け、旧project名 `CloudBaseVario`、または破損したファイルの場合: 更新を拒否し、ファイルを `UPDATE.BAD`へ移します。
+- 新しいファームウェアが確認中にresetまたはcrashした場合: 自動的に以前のファームウェアへ戻します。
 
 ### Python GUI
 

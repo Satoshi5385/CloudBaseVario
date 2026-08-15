@@ -8,8 +8,10 @@ from manufacturing_tools.flash_programmer import (
     EXPECTED_BOARD_DATA_OFFSET,
     EXPECTED_CONFIG_OFFSET,
     FlashProgrammer,
+    FlashProgrammerError,
     _config_generator_command,
     _image_is_fully_erased,
+    _parse_app_version,
 )
 
 
@@ -33,6 +35,7 @@ class ManufacturingFlashTests(unittest.TestCase):
             idf_path=root,
             project="CloudBaseVario-Aohazuku",
             version="test",
+            firmware_hash="abcdef0",
             application=files["app.bin"],
             application_sha256="a" * 64,
             write_flash_args=("--flash-size", "16MB"),
@@ -99,6 +102,14 @@ class ManufacturingFlashTests(unittest.TestCase):
         self.assertEqual(command[command.index("--sector_size") + 1], "512")
         self.assertIn("--wl_mode", command)
         self.assertEqual(command[command.index("--wl_mode") + 1], "safe")
+
+    def test_app_version_is_split_into_release_and_git_hash(self) -> None:
+        self.assertEqual(_parse_app_version("0.1.0+48a4472"), ("0.1.0", "48a4472"))
+
+    def test_invalid_app_versions_are_rejected(self) -> None:
+        for value in ("48a4472", "0.1+48a4472", "0.1.0+48A4472", "0.1.0+48a4472-dirty"):
+            with self.subTest(value=value), self.assertRaises(FlashProgrammerError):
+                _parse_app_version(value)
 
 
 if __name__ == "__main__":

@@ -356,7 +356,7 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 - MSC class driverはFAT mountより先に初期化する。FATをmountできない場合はLUNへmediaを登録せず、CDC + MSC descriptorを維持してSCSI要求へ「メディアなし」として応答する。未初期化のMSC class callbackをhostへ公開してはならない。
 - FAT mount失敗時もTinyUSB CDC、センサー、推定、音声およびBLEを継続する。MSC class driver自体を初期化できない場合はTinyUSB compositeを開始せず、USB以外の主要機能を継続する。
 - self-powered deviceとしてGPIO42をVBUS監視に使用する。CDCまたはMSCがhostに接続している間はLight-sleepへ移行しない。
-- `DIAG STATUS`はBOARD identity、製品serial、ESP MAC、firmware identity、TinyUSB driver、CDC、MSC class driver、MSC media、DTR、VBUS、FAT所有者、最後のstorage error、mount失敗、MSC作業モード、pending write、書込み回数・byte数・エラー数、休止timeout数、直近／最大実書込み時間、設定読込み・保存結果、スイッチ設定のNVS読込み元・現在値・dirty・直近load/save結果・失敗回数、OTA状態、およびWatchdog状態を表示する。Watchdog診断にはreset reason、boot action、5分window内の復帰回数、ACTIVE継続時間、前回boot stage、heartbeatから推定した停止task、登録／給餌失敗回数およびRTC記録の有効性を含める。OTA診断には起動時の外部給電、電池測定有効性、測定電圧、3.4 V閾値および更新許可結果を含める。
+- `DIAG STATUS`はBOARD identity、製品serial、ESP MAC、firmware identity、TinyUSB driver、CDC、MSC class driver、MSC media、DTR、VBUS、FAT所有者、最後のstorage error、mount失敗、MSC作業モード、pending write、書込み回数・byte数・エラー数、休止timeout数、直近／最大実書込み時間、設定読込み・保存結果、スイッチ設定のNVS読込み元・現在値・dirty・直近load/save結果・失敗回数、OTA状態、およびWatchdog状態を表示する。firmware identityは手動管理versionと7桁Git hashを分離して示し、OTA診断では対象imageのversion、hashおよび64桁ELF SHA-256 fingerprintも区別する。Watchdog診断にはreset reason、boot action、5分window内の復帰回数、ACTIVE継続時間、前回boot stage、heartbeatから推定した停止task、登録／給餌失敗回数およびRTC記録の有効性を含める。OTA診断には起動時の外部給電、電池測定有効性、測定電圧、3.4 V閾値および更新許可結果を含める。
 - MSCへ接続しているだけの状態ではセンサー、音声およびBLEの通常動作を継続する。最初のWRITE(10)を受信したときだけストレージ作業モードへ入り、BMP581／IMU取得、通常音、BLE NotifyおよびCDC 10 Hz自動monitorを休止する。BLE接続とGATT service、CDCコマンド、SW入力、Watchdogおよび電源保持は継続する。
 
 ### コンソールと診断
@@ -426,12 +426,13 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
 #### MSCファイルによるファームウェア更新
 
 - Aohazukuシリーズ共通のESP-IDF project nameを `CloudBaseVario-Aohazuku`とする。build成功時に通常の `CloudBaseVario-Aohazuku.bin` と同一内容の `UPDATE.BIN`を生成し、3.5 MiB（`0x380000` byte）を超える場合はbuildを失敗させる。
+- release versionの正本は `SRC/firmware_version.h` の `CBV_FIRMWARE_VERSION`とし、`major.minor.patch`形式で手動管理する。初期値は`0.1.0`とする。build時のHEADを7桁小文字hexのGit hashとして取得し、dirty suffixは付けず、`esp_app_desc_t.version`へ `<version>+<hash>`形式で格納する。31文字を超える値、形式不正またはGit hashを取得できないbuildは失敗させる。バイナリ内容の識別には別途ELF/application SHA-256を維持する。
 - USBドライブ直下へ `UPDATE.BIN`をコピーして安全な取り外しを行い、次回起動時にだけ更新を適用する。稼働中に検出または適用しない。
 - 更新処理は通常task開始前に行い、GPIO42がHighの外部給電中、またはGPIO42がLowでも有効かつ有限な電池電圧が3.4 Vを超える場合に許可する。3.4 Vちょうどは許可しない。外部給電がない場合は電池ADCを一度だけ初期化し、100 ms間隔、最大5 sample（500 ms以内）で既存の中央値測定を成立させる。ADC初期化失敗、測定無効、非有限、saturationまたは3.4 V以下では、`UPDATE.BIN`を保持して `UPDATE.TXT`へ外部給電、電池有効性、測定電圧および閾値を含むdeferred理由を記録し、現在のfirmwareを起動する。GPIO42がHighの場合は電池測定の成立を待たない。
 - 入力はESP-IDFが生成したraw application imageとし、3.5 MiB以下、ESP image magic、ESP32-S3 chip ID、`esp_app_desc_t` magic、project nameのNUL終端、およびproject name `CloudBaseVario-Aohazuku`との完全一致をOTA書込み前に検証する。project nameが一致しないimageは拒否する。同じproject name内では同一versionとdowngradeを許可する。
 - `esp_ota_begin/write/end`でinactive OTA partitionへ書き、`esp_ota_end`によるimage checksum検証に成功した場合だけboot partitionを変更する。更新中は電源保持を継続し、緑LEDを消灯、黄LEDを100 ms周期で点滅させ、通常taskを開始しない。
 - partition tableは `nvs 0x9000/0x6000`、`phy_init 0xf000/0x1000`、`factory 0x10000/4 MiB`、`config 0x410000/4 MiB`、`otadata 0x810000/0x2000`、`ota_0 0x820000/0x380000`、`ota_1 0xba0000/0x380000`とする。
-- `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`は拒否またはrollbackされたimage、`UPDATE.TXT`はASCIIの状態・理由・version・対象partitionを記録するstatus fileとする。
+- `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`は拒否またはrollbackされたimage、`UPDATE.TXT`はASCIIの状態・理由・手動`version`・7桁Git `hash`・対象partitionを記録するstatus fileとする。対象imageを検査できない状態では`version=-`、`hash=-`とする。旧形式の7桁hashだけを持つ同一project imageは拒否せず、`version=-`とhashへ分離する。version/hashはupgradeまたはdowngradeの拒否判定に使用しない。
 - 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
