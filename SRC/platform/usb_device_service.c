@@ -4,7 +4,12 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "diskio_wl.h"
+#include "domain/board_info.h"
+#include "domain/firmware_metadata.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
@@ -25,6 +30,8 @@
 #define CONFIG_PARTITION_LABEL "config"
 #define CONFIG_MOUNT_PATH "/config"
 #define CONFIG_VOLUME_LABEL "CBVARIO"
+#define INFO_FILENAME "INFO.TXT"
+#define INFO_PATH_CAPACITY 16U
 #define STORAGE_MUTEX_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_QUIESCE_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_IDLE_US INT64_C(1000000)
@@ -274,6 +281,73 @@ static void log_config_load_result(void) {
     }
 }
 
+static esp_err_t write_info_file(wl_handle_t wl_handle) {
+    const board_identity_t *identity = board_active_identity();
+    const board_descriptor_t *descriptor = board_active_descriptor();
+    const esp_app_desc_t *app = esp_app_get_description();
+    firmware_metadata_t firmware = {0};
+    char contents[BOARD_INFO_TEXT_CAPACITY] = {0};
+    char fat_path[INFO_PATH_CAPACITY] = {0};
+    BYTE pdrv;
+    FRESULT attribute_result;
+    FILE *file;
+    size_t content_length;
+    int path_length;
+    bool write_succeeded;
+
+    if (app != NULL) {
+        (void) firmware_metadata_parse(app->version, sizeof(app->version),
+                                       &firmware);
+    } else {
+        (void) firmware_metadata_parse(NULL, 0U, &firmware);
+    }
+    if (!board_info_format(identity, descriptor, &firmware, contents)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    pdrv = ff_diskio_get_pdrv_wl(wl_handle);
+    if (pdrv > 9U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    path_length = snprintf(fat_path, sizeof(fat_path), "%u:/%s",
+                           (unsigned int) pdrv, INFO_FILENAME);
+    if (path_length <= 0 || (size_t) path_length >= sizeof(fat_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    attribute_result = f_chmod(fat_path, 0U, AM_RDO);
+    if (attribute_result != FR_OK && attribute_result != FR_NO_FILE) {
+        ESP_LOGE(TAG, "INFO.TXT read-only attribute clear failed: %d",
+                 (int) attribute_result);
+        return ESP_FAIL;
+    }
+
+    file = fopen(CONFIG_MOUNT_PATH "/" INFO_FILENAME, "wb");
+    if (file == NULL) {
+        ESP_LOGE(TAG, "INFO.TXT create failed");
+        return ESP_FAIL;
+    }
+    content_length = strlen(contents);
+    write_succeeded =
+        fwrite(contents, 1U, content_length, file) == content_length &&
+        fflush(file) == 0 && fsync(fileno(file)) == 0;
+    if (fclose(file) != 0) {
+        write_succeeded = false;
+    }
+    if (!write_succeeded) {
+        ESP_LOGE(TAG, "INFO.TXT write or sync failed");
+        return ESP_FAIL;
+    }
+
+    attribute_result = f_chmod(fat_path, AM_RDO, AM_RDO);
+    if (attribute_result != FR_OK) {
+        ESP_LOGE(TAG, "INFO.TXT read-only attribute set failed: %d",
+                 (int) attribute_result);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 static bool make_serial_number(void) {
     const board_identity_t *identity = board_active_identity();
 
@@ -503,6 +577,15 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         if (ret == ESP_ERR_NOT_FOUND) {
             increment_counter(&usb_diagnostics.format_required_count);
         }
+        return ret;
+    }
+
+    ret = write_info_file(preflight_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "INFO.TXT generation failed: %s", esp_err_to_name(ret));
+        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
+                                                   preflight_handle);
+        set_storage_unavailable(ret);
         return ret;
     }
 

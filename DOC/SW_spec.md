@@ -428,12 +428,13 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
 - Aohazukuシリーズ共通のESP-IDF project nameを `CloudBaseVario-Aohazuku`とする。build成功時に通常の `CloudBaseVario-Aohazuku.bin` と同一内容の `UPDATE.BIN`を生成し、3.5 MiB（`0x380000` byte）を超える場合はbuildを失敗させる。
 - release versionの正本は `SRC/firmware_version.h` の `CBV_FIRMWARE_VERSION`とし、`major.minor.patch`形式で手動管理する。初期値は`0.1.0`とする。build時のHEADを7桁小文字hexのGit hashとして取得し、dirty suffixは付けず、`esp_app_desc_t.version`へ `<version>+<hash>`形式で格納する。31文字を超える値、形式不正またはGit hashを取得できないbuildは失敗させる。バイナリ内容の識別には別途ELF/application SHA-256を維持する。
 - USBドライブ直下へ `UPDATE.BIN`をコピーして安全な取り外しを行い、次回起動時にだけ更新を適用する。稼働中に検出または適用しない。
-- 更新処理は通常task開始前に行い、GPIO42がHighの外部給電中、またはGPIO42がLowでも有効かつ有限な電池電圧が3.4 Vを超える場合に許可する。3.4 Vちょうどは許可しない。外部給電がない場合は電池ADCを一度だけ初期化し、100 ms間隔、最大5 sample（500 ms以内）で既存の中央値測定を成立させる。ADC初期化失敗、測定無効、非有限、saturationまたは3.4 V以下では、`UPDATE.BIN`を保持して `UPDATE.TXT`へ外部給電、電池有効性、測定電圧および閾値を含むdeferred理由を記録し、現在のfirmwareを起動する。GPIO42がHighの場合は電池測定の成立を待たない。
+- 更新処理は通常task開始前に行い、GPIO42がHighの外部給電中、またはGPIO42がLowでも有効かつ有限な電池電圧が3.4 Vを超える場合に許可する。3.4 Vちょうどは許可しない。外部給電がない場合は電池ADCを一度だけ初期化し、100 ms間隔、最大5 sample（500 ms以内）で既存の中央値測定を成立させる。ADC初期化失敗、測定無効、非有限、saturationまたは3.4 V以下では、`UPDATE.BIN`を保持して `UPDATE_RESULT.TXT`へ外部給電、電池有効性、測定電圧および閾値を含むdeferred理由を記録し、現在のfirmwareを起動する。GPIO42がHighの場合は電池測定の成立を待たない。
 - 入力はESP-IDFが生成したraw application imageとし、3.5 MiB以下、ESP image magic、ESP32-S3 chip ID、`esp_app_desc_t` magic、project nameのNUL終端、およびproject name `CloudBaseVario-Aohazuku`との完全一致をOTA書込み前に検証する。project nameが一致しないimageは拒否する。同じproject name内では同一versionとdowngradeを許可する。
 - `esp_ota_begin/write/end`でinactive OTA partitionへ書き、`esp_ota_end`によるimage checksum検証に成功した場合だけboot partitionを変更する。更新中は電源保持を継続し、緑LEDを消灯、黄LEDを100 ms周期で点滅させ、通常taskを開始しない。
 - partition tableは `nvs 0x9000/0x6000`、`phy_init 0xf000/0x1000`、`factory 0x10000/4 MiB`、`config 0x410000/4 MiB`、`otadata 0x810000/0x2000`、`ota_0 0x820000/0x380000`、`ota_1 0xba0000/0x380000`とする。
-- `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`は拒否またはrollbackされたimage、`UPDATE.TXT`はASCIIの状態・理由・手動`version`・7桁Git `hash`・対象partitionを記録するstatus fileとする。対象imageを検査できない状態では`version=-`、`hash=-`とする。旧形式の7桁hashだけを持つ同一project imageは拒否せず、`version=-`とhashへ分離する。version/hashはupgradeまたはdowngradeの拒否判定に使用しない。
-- 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
+- `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`は拒否またはrollbackされたimage、`UPDATE_RESULT.TXT`はASCIIの状態・理由・手動`version`・7桁Git `hash`・対象partitionを記録するstatus fileとする。対象imageを検査できない状態では`version=-`、`hash=-`とする。旧形式の7桁hashだけを持つ同一project imageは拒否せず、`version=-`とhashへ分離する。version/hashはupgradeまたはdowngradeの拒否判定に使用しない。
+- config FAT直下の`INFO.TXT`は実行中のボード情報を示す読み取り専用ASCIIファイルとし、`Board name`、`Board ID`、`Serial number`、`Firmware version`および`Firmware git hash`をCRLF改行で記録する。内容は有効なboard identity/descriptorと実行imageの`esp_app_desc_t.version`から生成する。起動時にFATをAPP側へmountした直後、`setting.json`読込みおよびMSC公開前に必ず全量再生成する。既存ファイルは読み取り専用属性を一時解除して置換、flush/sync後に属性を再設定する。削除、編集または属性変更されても次回起動時に復元する。生成または属性設定に失敗した場合はMSCを公開しない。
+- 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
 
@@ -743,9 +744,9 @@ typedef struct {
 | MSC host所有中の `PARAM SAVE` | 保存を予約せずファイルを変更せずに `ERR SAVE BUSY`を返す |
 | USB外部給電なし、かつ起動時の有効な電池電圧が3.2 V以下 | 起動サウンドおよび通常初期化を開始せず、電源保持を解除して`SAFE_STOP`へ移る |
 | USB外部給電なし、かつ動作中の有効な電池電圧が3.1 V以下 | 電源OFF要求をラッチする。MSC書込み中は完了まで延期し、その後は通常の安全終了シーケンスで停止する |
-| USB外部給電なし、かつ電池測定無効または3.4 V以下 | `UPDATE.BIN`を変更せず保持し、電源判定値を `UPDATE.TXT`へ記録して現行firmwareを継続する。次回起動時に再判定する |
-| `UPDATE.BIN`のproject name不一致 | OTA partitionへ書き込まず入力を `UPDATE.BAD`へ移し、`firmware target mismatch`、期待project名、および安全にASCII化した実project名を `UPDATE.TXT`へ記録して現行firmwareを継続する |
-| `UPDATE.BIN`不正／OTA書込み失敗 | boot partitionを変更せず入力を `UPDATE.BAD`へ移し、理由を `UPDATE.TXT`へ記録して現行firmwareを継続する |
+| USB外部給電なし、かつ電池測定無効または3.4 V以下 | `UPDATE.BIN`を変更せず保持し、電源判定値を `UPDATE_RESULT.TXT`へ記録して現行firmwareを継続する。次回起動時に再判定する |
+| `UPDATE.BIN`のproject name不一致 | OTA partitionへ書き込まず入力を `UPDATE.BAD`へ移し、`firmware target mismatch`、期待project名、および安全にASCII化した実project名を `UPDATE_RESULT.TXT`へ記録して現行firmwareを継続する |
+| `UPDATE.BIN`不正／OTA書込み失敗 | boot partitionを変更せず入力を `UPDATE.BAD`へ移し、理由を `UPDATE_RESULT.TXT`へ記録して現行firmwareを継続する |
 | OTA初回bootで必須worker生成失敗／reset | CDC診断は利用可能としてもMSC媒体を公開せず、現firmwareを有効化せずbootloader rollbackを実行し、次回bootで `UPDATE.PND`を `UPDATE.BAD`へ移す |
 | OTA確定後の状態ファイル更新／`UPDATE.PND`削除失敗 | CDC診断は継続するがMSC媒体を公開せず主要機能を継続し、次回bootでFATをhostへ公開する前に整理を再試行する |
 | 起動サウンド初期化／出力失敗 | ブザーをshutdown状態へ戻し、app resources生成後に警告を診断して起動処理を継続する |

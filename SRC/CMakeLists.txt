@@ -8,6 +8,7 @@ idf_component_register(
         "app/ble_tx_worker.c"
         "domain/app_config.c"
         "domain/battery_level.c"
+        "domain/board_info.c"
         "domain/board_identity.c"
         "domain/auto_power_off.c"
         "domain/firmware_update_policy.c"
