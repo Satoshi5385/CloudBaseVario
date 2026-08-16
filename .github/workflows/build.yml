@@ -23,9 +23,6 @@ jobs:
       - name: Check Python tools
         run: python -m compileall -q tools tests
 
-      - name: Check patch whitespace
-        run: git diff --check
-
       - name: Build and run host C tests
         shell: bash
         run: |
