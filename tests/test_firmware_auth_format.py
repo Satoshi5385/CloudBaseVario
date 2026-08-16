@@ -8,7 +8,7 @@ import unittest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
-from tools.firmware_auth_format import (
+from tools.firmware_signing.firmware_auth_format import (
     CHIP_ID_ESP32S3,
     HEADER,
     HEADER_SIZE,
@@ -17,7 +17,7 @@ from tools.firmware_auth_format import (
     RECORD_SIZE,
     SIGNATURE_DOMAIN,
 )
-from tools.sign_update import create_signed_artifacts
+from tools.firmware_signing.sign_update import create_signed_artifacts
 
 
 def raw_application(project: str = PROJECT_NAME) -> bytes:

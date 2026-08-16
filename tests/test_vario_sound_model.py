@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.vario_sound_model import (
+from tools.vario_sound_simulator.vario_sound_model import (
     AUDIO_PARAMETER_NAMES,
     PARAMETER_SPECS,
     PROFILE_PARAMETER_SPECS,
@@ -33,7 +33,10 @@ from tools.vario_sound_model import (
     sink_frequency_hz,
     vario_audio_step,
 )
-from tools.vario_sound_simulator import CLIMB_RATE_MAX_MPS, CLIMB_RATE_MIN_MPS
+from tools.vario_sound_simulator.vario_sound_simulator import (
+    CLIMB_RATE_MAX_MPS,
+    CLIMB_RATE_MIN_MPS,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]

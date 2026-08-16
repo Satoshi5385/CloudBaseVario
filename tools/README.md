@@ -1,4 +1,13 @@
-# CloudBaseVario Monitor
+# CloudBaseVario Host Tools
+
+ツールは用途別のサブディレクトリに分けています。
+
+- `monitor_gui/`: TinyUSB CDC telemetry monitor
+- `vario_sound_simulator/`: standalone sound simulator
+- `firmware_signing/`: owner-signing helpers; keep generated private keys outside the repository
+- `firmware_update/`: CMake helper for unsigned OTA payload validation
+
+## CloudBaseVario Monitor
 
 `cloudbasevario_gui.py`は、CloudBaseVarioのTinyUSB CDCへ接続するWindows向けホストGUIです。
 
@@ -22,7 +31,7 @@ Python 3.10以降をインストールし、リポジトリのルートで実行
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r tools\requirements-gui.txt
+.\.venv\Scripts\python.exe -m pip install -r tools\monitor_gui\requirements-gui.txt
 ```
 
 ## 起動
@@ -30,7 +39,7 @@ python -m venv .venv
 ESP-IDF monitorや他のターミナルが対象COMポートを使用している場合は、先に終了してください。
 
 ```powershell
-.\.venv\Scripts\python.exe tools\cloudbasevario_gui.py
+.\.venv\Scripts\python.exe tools\monitor_gui\cloudbasevario_gui.py
 ```
 
 GUI上部でCloudBaseVarioのTinyUSB CDC COMポートを選び、`Connect`を押します。接続後、テレメトリー受信と`PARAM LIST`取得が自動的に始まります。USB CDCではbaud値は実質的な通信速度を決めませんが、pyserialのポート設定として既定値115200を使用します。
@@ -64,8 +73,8 @@ GUI上部でCloudBaseVarioのTinyUSB CDC COMポートを選び、`Connect`を押
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r tools\requirements-vario-simulator.txt
-.\.venv\Scripts\python.exe tools\vario_sound_simulator.py
+.\.venv\Scripts\python.exe -m pip install -r tools\vario_sound_simulator\requirements-vario-simulator.txt
+.\.venv\Scripts\python.exe tools\vario_sound_simulator\vario_sound_simulator.py
 ```
 
 音声は48 kHz、モノラルでWindowsの既定出力デバイスへ送ります。起動時に依存関係または出力デバイスを使用できない場合は、`Start`を押したときにエラーを表示します。

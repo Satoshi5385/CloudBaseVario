@@ -9,10 +9,10 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping
 
-# Keep the supported ``python tools/vario_sound_simulator.py`` entry point
+# Keep the supported ``python tools/vario_sound_simulator/vario_sound_simulator.py`` entry point
 # working while the shared parameter contract is maintained with the tests.
 if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 try:
     from tests.parameters_model import (

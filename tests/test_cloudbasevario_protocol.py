@@ -1,6 +1,6 @@
 import unittest
 
-from tools.cloudbasevario_protocol import (
+from tools.monitor_gui.cloudbasevario_protocol import (
     DISPLAY_ERROR,
     DISPLAY_UNAVAILABLE,
     DISPLAY_WARNING,

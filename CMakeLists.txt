@@ -85,7 +85,7 @@ add_custom_target(
         "-DINPUT_FILE=${CBV_UPDATE_INPUT}"
         "-DOUTPUT_FILE=${CBV_UPDATE_UNSIGNED_OUTPUT}"
         -DMAX_SIZE=3665920
-        -P "${CMAKE_SOURCE_DIR}/tools/check_update_image.cmake"
+        -P "${CMAKE_SOURCE_DIR}/tools/firmware_update/check_update_image.cmake"
     DEPENDS "gen_${PROJECT_NAME}_binary"
     COMMENT "Generating size-checked unsigned OTA payload"
     VERBATIM

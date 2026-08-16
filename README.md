@@ -101,8 +101,8 @@ Windows上でテレメトリー、グラフ、姿勢、BLE送信値を表示し�
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r tools\requirements-gui.txt
-.\.venv\Scripts\python.exe tools\cloudbasevario_gui.py
+.\.venv\Scripts\python.exe -m pip install -r tools\monitor_gui\requirements-gui.txt
+.\.venv\Scripts\python.exe tools\monitor_gui\cloudbasevario_gui.py
 ```
 
 使用方法とパラメーター保存時の注意は [tools/README.md](tools/README.md) を参照してください。GUIとESP-IDF monitorは同じCOMポートを同時に開けないため、GUI接続前にmonitorを終了します。

@@ -22,7 +22,7 @@
 
 ### 2.1 推奨する変更方法
 
-動作中の設定変更には TinyUSB CDC のコマンド、または `tools/cloudbasevario_gui.py` を使用します。
+動作中の設定変更には TinyUSB CDC のコマンド、または `tools/monitor_gui/cloudbasevario_gui.py` を使用します。
 
 ```text
 PARAM LIST
