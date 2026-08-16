@@ -61,18 +61,15 @@ SW2とSW3を同時に押したまま電源ONすると設定FATをformatできま
 
 FATが正常な場合、TinyUSB CDCのCOMポートは起動処理の早い段階から利用できます。初回IMU校正、OTA確認および起動時ファイル処理が完了するまでは、config FATをESP32側の`APP_OWNED`に維持し、MSC媒体はhostへ公開しません。全ゲート完了後、同じUSB接続のMSCドライブを有効化して`HOST_OWNED`へ切り替えます。MSCをhostが所有している間、`PARAM SAVE`は `ERR SAVE BUSY`を返します。安全な取り外しまたはUSB切断後にESP32側へremountします。
 
-MSCドライブ直下の`INFO.TXT`には、ボード名称、ボードID、製造シリアル番号、実行中ファームウェアの版番号および7桁Git hashを表示します。このファイルは読み取り専用です。削除、編集または属性変更は次回起動時に正しい内容と読み取り専用属性へ戻されます。
+MSCドライブ直下の`INFO.TXT`には、ボード情報、実行中ファームウェアの版番号および正規性を表示します。`Firmware authenticity: OFFICIAL`は正規の署名済みファームウェアです。このファイルは読み取り専用です。削除、編集または属性変更は次回起動時に正しい内容と読み取り専用属性へ戻されます。
 
-SW1による明示的な電源OFFでは、USB給電が残っていてもMSC書込み完了とworker停止を確認した後にアプリケーション側TinyUSBを停止します。この時点でCDC COMポートとMSCドライブは切断され、SAFE_STOPのLight-sleep待機へ移ります。SW1を一度解放してから2秒長押しして再起動すると再び公開されます。ROM download用USB Serial/JTAGはアプリケーション側TinyUSBとは別のため、この停止対象には含まれません。
+SW1による明示的な電源OFFでは、USB給電が残っていてもMSC書込み完了とworker停止を確認した後にアプリケーション側TinyUSBを停止します。この時点でCDC COMポートとMSCドライブは切断され、SAFE_STOPのLight-sleep待機へ移ります。SW1を一度解放してから2秒長押しして再起動すると再び公開されます。
 
 電池駆動で起動したとき、有効な電池電圧が3.2 V以下なら通常起動せず電源保持を解除します。動作中に3.1 V以下を検出した場合は安全終了を要求し、MSC書込み中なら書込み完了後にシャットダウンします。USB外部給電中はこれらの低電圧停止を適用しません。Battery ServiceとLK8EX1の残量%は、3.2 Vを0 %、4.1 Vを100 %とする簡単なリチウムイオン放電曲線近似で表示します。
 
 `mc_data.json`がない初回水平校正中にSW3を3秒長押しすると、その起動に限って校正をスキップします。未保存の校正候補は破棄され、IMUを停止して気圧単独で動作し、正式ビルドではMSC媒体を公開します。`mc_data.json`や設定ファイルへスキップ状態を保存しないため、次回起動では初回水平校正を再び要求します。校正中の3秒未満のSW3操作は、ボタンを離した時点で次のパラメータセットへ切り替えます。
 
 wear levelling Performance modeを使用していた旧ファームウェアから更新した実機では、Safety modeへの変更により既存FATをmountできない場合があります。その場合は必要な設定値を事前に控え、SW2とSW3による起動時初期化または `config-flash` を実行してください。
-
-partition tableの完全復旧には、GPIO0 + resetのROM download modeと
-製造ツールを使用します。MSCの`UPDATE.BIN`はapplicationだけを更新します。
 
 TinyUSB CDCのCOMポートを指定してモニターを開始します。
 
@@ -84,7 +81,7 @@ idf.py -p <PORT> monitor
 
 ### MSCファームウェア更新
 
-`idf.py build`は通常の `build/CloudBaseVario-Aohazuku.bin`に加えて、同一内容で3.5 MiB上限を確認した `build/UPDATE.BIN`を生成します。両方のESP-IDF project nameはAohazukuシリーズ共通の機種ID `CloudBaseVario-Aohazuku`です。
+提供された署名済み `UPDATE.BIN` を使用します。ファイル名を変更したり、展開したりしないでください。
 
 1. USBのMSCドライブ直下へ `UPDATE.BIN`をコピーします。
 2. OSの「安全な取り外し」を実行します。
@@ -95,8 +92,8 @@ idf.py -p <PORT> monitor
 更新できなかった場合も、次のように元のファームウェアで動作を継続または復旧します。詳しい理由は `UPDATE_RESULT.TXT`で確認できます。
 
 - USB外部給電がなく、電池電圧が3.4 V以下または取得できない場合: 更新を延期し、`UPDATE.BIN`を残します。USBを接続するか十分に充電して再起動してください。
-- 別機種向け、旧project名 `CloudBaseVario`、または破損したファイルの場合: 更新を拒否し、ファイルを `UPDATE.BAD`へ移します。
-- 新しいファームウェアが確認中にresetまたはcrashした場合: 自動的に以前のファームウェアへ戻します。
+- `UPDATE_RESULT.TXT`が`REJECTED`の場合: 配布元から改めて取得した署名済み `UPDATE.BIN`をコピーしてください。
+- 新しいファームウェアが確認中にresetまたはcrashした場合: 自動的に以前のファームウェアへ戻ります。解決しない場合は配布元へ連絡してください。
 
 ### Python GUI
 
@@ -119,9 +116,8 @@ VS CodeではESP-IDF拡張機能を使用してください。共有設定では
 - `SRC/app/`: 薄い入口、段階化した起動処理、task生成・起動状態、worker実行管理
 - `SRC/domain/`: SDK非依存の推定・音・system・USB所有権・LK8EX1処理
 - `SRC/platform/`: ESP-IDF、NimBLE、TinyUSBおよびハードウェアアクセス
-- `tools/`: Monitor GUI、Sound Simulator、共通version 1 parameter model
-- `manufacturing_tools/`: カメラQR認識、製造書込み、CSV serial台帳
-- `tests/`: Python回帰テストとSDK非依存Cテスト
+- `tools/`: Monitor GUI、Sound Simulator
+- `tests/`: Python回帰テスト、SDK非依存Cテスト、およびテスト支援モジュール
 - `components/esp_tinyusb/`: MSC書込み完了保証の修正を含むローカル`esp_tinyusb` component
 - `DOC/SW_spec.md`: ソフトウェア要件と簡易設計
 - `DOC/HW_spec.md`: ESP32-S3 GPIO・周辺インターフェース仕様

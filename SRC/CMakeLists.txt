@@ -12,6 +12,7 @@ idf_component_register(
         "domain/board_identity.c"
         "domain/auto_power_off.c"
         "domain/firmware_update_policy.c"
+        "domain/firmware_authentication.c"
         "domain/firmware_metadata.c"
         "domain/imu_calibration_controller.c"
         "domain/imu_fusion.c"
@@ -30,6 +31,7 @@ idf_component_register(
         "platform/config_storage.c"
         "platform/config_json.c"
         "platform/firmware_update.c"
+        "platform/firmware_auth.c"
         "platform/icm42688_hxy.c"
         "platform/imu_calibration_storage.c"
         "platform/sensor_bus.c"
@@ -54,6 +56,7 @@ idf_component_register(
         esp_tinyusb
         esp_system
         fatfs
+        mbedtls
         heap
         cjson
         nvs_flash

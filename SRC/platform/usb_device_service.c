@@ -11,6 +11,7 @@
 #include "domain/firmware_metadata.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
@@ -19,6 +20,7 @@
 #include "freertos/semphr.h"
 #include "platform/board.h"
 #include "platform/imu_calibration_storage.h"
+#include "platform/firmware_auth.h"
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_console.h"
@@ -286,6 +288,8 @@ static esp_err_t write_info_file(wl_handle_t wl_handle) {
     const board_descriptor_t *descriptor = board_active_descriptor();
     const esp_app_desc_t *app = esp_app_get_description();
     firmware_metadata_t firmware = {0};
+    firmware_authentication_t authentication = {0};
+    const esp_partition_t *running_partition;
     char contents[BOARD_INFO_TEXT_CAPACITY] = {0};
     char fat_path[INFO_PATH_CAPACITY] = {0};
     BYTE pdrv;
@@ -301,7 +305,15 @@ static esp_err_t write_info_file(wl_handle_t wl_handle) {
     } else {
         (void) firmware_metadata_parse(NULL, 0U, &firmware);
     }
-    if (!board_info_format(identity, descriptor, &firmware, contents)) {
+    running_partition = esp_ota_get_running_partition();
+    if (running_partition == NULL ||
+        firmware_authenticate_partition(running_partition,
+                                        "CloudBaseVario-Aohazuku",
+                                        &authentication) != ESP_OK) {
+        authentication.authenticity = FIRMWARE_AUTH_UNKNOWN;
+    }
+    if (!board_info_format(identity, descriptor, &firmware, &authentication,
+                           contents)) {
         return ESP_ERR_INVALID_STATE;
     }
 

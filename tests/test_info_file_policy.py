@@ -36,6 +36,14 @@ class InfoFilePolicyTests(unittest.TestCase):
         self.assertIn("set_storage_unavailable(ret);", failure)
         self.assertIn("return ret;", failure)
 
+    def test_info_file_reports_running_firmware_authenticity(self) -> None:
+        start = USB_SOURCE.index("static esp_err_t write_info_file")
+        end = USB_SOURCE.index("static bool make_serial_number", start)
+        writer = USB_SOURCE[start:end]
+
+        self.assertIn("firmware_authenticate_partition", writer)
+        self.assertIn("FIRMWARE_AUTH_UNKNOWN", writer)
+
 
 if __name__ == "__main__":
     unittest.main()

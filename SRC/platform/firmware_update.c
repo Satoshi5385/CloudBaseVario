@@ -19,6 +19,7 @@
 #include "domain/firmware_metadata.h"
 #include "domain/firmware_update_policy.h"
 #include "platform/board.h"
+#include "platform/firmware_auth.h"
 #include "platform/usb_device_service.h"
 #include "platform/watchdog_service.h"
 
@@ -31,7 +32,7 @@
 #define UPDATE_BAD_NAME "UPDATE.BAD"
 #define UPDATE_STATUS_NAME "UPDATE_RESULT.TXT"
 #define UPDATE_STATUS_TEMP_NAME "UPDATE.TMP"
-#define UPDATE_MAX_IMAGE_BYTES UINT32_C(0x380000)
+#define UPDATE_MAX_IMAGE_BYTES FIRMWARE_AUTH_MAX_PAYLOAD_SIZE
 #define UPDATE_IO_BUFFER_BYTES 8192U
 #define UPDATE_STORAGE_TIMEOUT_MS UINT32_C(1000)
 #define UPDATE_LED_PERIOD_MS UINT32_C(100)
@@ -57,8 +58,10 @@ static firmware_update_diagnostics_t update_diagnostics = {
 
 typedef struct {
     size_t size;
+    size_t payload_offset;
     esp_image_header_t header;
     esp_app_desc_t descriptor;
+    firmware_auth_header_t authentication;
 } update_image_info_t;
 
 static void make_path(const char *name, char *path, size_t capacity) {
@@ -191,8 +194,7 @@ static esp_err_t inspect_image(const char *name, update_image_info_t *info,
     char path[UPDATE_PATH_BUFFER_SIZE];
     struct stat file_info;
     FILE *file = NULL;
-    size_t descriptor_offset =
-        sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+    size_t descriptor_offset;
     esp_err_t ret = ESP_OK;
 
     if (name == NULL || info == NULL) {
@@ -206,20 +208,31 @@ static esp_err_t inspect_image(const char *name, update_image_info_t *info,
     if (stat(path, &file_info) != 0 || !S_ISREG(file_info.st_mode)) {
         return ESP_ERR_NOT_FOUND;
     }
-    if (file_info.st_size <= 0 ||
-        (uint64_t) file_info.st_size > UPDATE_MAX_IMAGE_BYTES) {
+    if (file_info.st_size <= (off_t) FIRMWARE_AUTH_HEADER_SIZE ||
+        (uint64_t) file_info.st_size >
+            (uint64_t) UPDATE_MAX_IMAGE_BYTES + FIRMWARE_AUTH_HEADER_SIZE) {
         return ESP_ERR_INVALID_SIZE;
     }
-    info->size = (size_t) file_info.st_size;
     file = fopen(path, "rb");
     if (file == NULL) {
         return ESP_FAIL;
     }
-    if (fread(&info->header, 1, sizeof(info->header), file) !=
-            sizeof(info->header) ||
-        fseek(file, (long) descriptor_offset, SEEK_SET) != 0 ||
-        fread(&info->descriptor, 1, sizeof(info->descriptor), file) !=
-            sizeof(info->descriptor)) {
+    ret = firmware_auth_verify_package(file, (size_t) file_info.st_size,
+                                       CBV_FIRMWARE_PROJECT_NAME,
+                                       &info->authentication);
+    if (ret == ESP_OK) {
+        info->size = info->authentication.payload_size;
+        info->payload_offset = info->authentication.header_size;
+        descriptor_offset = info->payload_offset + sizeof(esp_image_header_t) +
+                            sizeof(esp_image_segment_header_t);
+    }
+    if (ret == ESP_OK &&
+        (fseek(file, (long) info->payload_offset, SEEK_SET) != 0 ||
+         fread(&info->header, 1, sizeof(info->header), file) !=
+             sizeof(info->header) ||
+         fseek(file, (long) descriptor_offset, SEEK_SET) != 0 ||
+         fread(&info->descriptor, 1, sizeof(info->descriptor), file) !=
+             sizeof(info->descriptor))) {
         ret = ESP_ERR_INVALID_SIZE;
     }
     if (fclose(file) != 0 && ret == ESP_OK) {
@@ -301,6 +314,17 @@ static esp_err_t reject_input(esp_err_t reason, const char *message,
     if (move_result != ESP_OK) {
         return move_result;
     }
+    return reason;
+}
+
+static esp_err_t reject_authentication(esp_err_t reason) {
+    set_state(FIRMWARE_UPDATE_REJECTED, reason);
+    (void) write_status(
+        "state=REJECTED\r\n"
+        "reason=firmware authentication failed\r\n"
+        "error=%s\r\n"
+        "version=-\r\nhash=-\r\n",
+        esp_err_to_name(reason));
     return reason;
 }
 
@@ -417,7 +441,8 @@ static esp_err_t apply_update(const update_image_info_t *info) {
                                    &metadata);
 
     target = esp_ota_get_next_update_partition(NULL);
-    if (target == NULL || info->size > target->size) {
+    if (target == NULL || target->size < FIRMWARE_AUTH_RECORD_SIZE ||
+        info->size > target->size - FIRMWARE_AUTH_RECORD_SIZE) {
         return ESP_ERR_INVALID_SIZE;
     }
     portENTER_CRITICAL(&update_lock);
@@ -457,6 +482,9 @@ static esp_err_t apply_update(const update_image_info_t *info) {
     if (ret == ESP_OK) {
         ota_started = true;
     }
+    if (ret == ESP_OK && fseek(file, (long) info->payload_offset, SEEK_SET) != 0) {
+        ret = ESP_FAIL;
+    }
     while (ret == ESP_OK) {
         size_t read_length = fread(buffer, 1, UPDATE_IO_BUFFER_BYTES, file);
         if (read_length > 0U) {
@@ -489,6 +517,19 @@ static esp_err_t apply_update(const update_image_info_t *info) {
         (void) esp_ota_abort(ota_handle);
     }
     stop_update_indicator();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = esp_partition_erase_range(target,
+                                    target->size - FIRMWARE_AUTH_RECORD_SIZE,
+                                    FIRMWARE_AUTH_RECORD_SIZE);
+    if (ret == ESP_OK) {
+        ret = esp_partition_write(target,
+                                  target->size - FIRMWARE_AUTH_RECORD_SIZE,
+                                  &info->authentication,
+                                  sizeof(info->authentication));
+    }
     if (ret != ESP_OK) {
         return ret;
     }
@@ -596,8 +637,7 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
         if (project_mismatch) {
             ret = reject_project_mismatch(&image_info);
         } else {
-            ret = reject_input(ret, "invalid ESP32-S3 application image",
-                               NULL);
+            ret = reject_authentication(ret);
         }
         usb_device_storage_end_app_io();
         return ret;

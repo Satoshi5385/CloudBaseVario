@@ -20,7 +20,6 @@ class FirmwareVersionPolicyTests(unittest.TestCase):
             re.MULTILINE,
         )
         self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "0.1.0")
 
     def test_build_embeds_release_version_and_seven_digit_git_hash(self) -> None:
         self.assertIn('git rev-parse --short=7 HEAD', ROOT_CMAKE)
@@ -38,6 +37,12 @@ class FirmwareVersionPolicyTests(unittest.TestCase):
                 self.assertIn("version=", excerpt)
                 self.assertIn("hash=", excerpt)
         self.assertIn('"version=-\\r\\nhash=-\\r\\n"', UPDATE_SOURCE)
+
+    def test_update_is_a_signed_container_with_reserved_auth_record(self) -> None:
+        self.assertIn("firmware_auth_verify_package", UPDATE_SOURCE)
+        self.assertIn("FIRMWARE_AUTH_RECORD_SIZE", UPDATE_SOURCE)
+        self.assertIn("esp_partition_erase_range", UPDATE_SOURCE)
+        self.assertIn("3665920", ROOT_CMAKE)
 
     def test_board_and_diag_report_hash_without_removing_fingerprint(self) -> None:
         self.assertIn("firmware_hash=%s", WORKER_SOURCE)

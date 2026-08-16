@@ -5,7 +5,7 @@ endif()
 file(SIZE "${INPUT_FILE}" image_size)
 if(image_size GREATER MAX_SIZE)
     message(FATAL_ERROR
-        "UPDATE.BIN is ${image_size} bytes; maximum is ${MAX_SIZE} bytes")
+        "Unsigned OTA payload is ${image_size} bytes; maximum is ${MAX_SIZE} bytes")
 endif()
 
 execute_process(
@@ -13,4 +13,4 @@ execute_process(
             "${INPUT_FILE}" "${OUTPUT_FILE}"
     COMMAND_ERROR_IS_FATAL ANY
 )
-message(STATUS "UPDATE.BIN: ${image_size}/${MAX_SIZE} bytes")
+message(STATUS "Unsigned OTA payload: ${image_size}/${MAX_SIZE} bytes")

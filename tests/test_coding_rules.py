@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.check_coding_rules import audit_source_tree, sanitize_c_source
+from tests.check_coding_rules import audit_source_tree, sanitize_c_source
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

@@ -355,7 +355,7 @@ class ParameterContractTests(unittest.TestCase):
             path = Path(directory) / "setting.json"
             path.write_text("original\n", encoding="utf-8")
             with mock.patch(
-                "tools.parameters_model.os.replace",
+                "tests.parameters_model.os.replace",
                 side_effect=OSError("injected failure"),
             ):
                 with self.assertRaisesRegex(ConfigError, "injected failure"):
