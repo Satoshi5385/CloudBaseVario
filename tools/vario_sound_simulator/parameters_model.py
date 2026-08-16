@@ -1,4 +1,4 @@
-"""Strict firmware-compatible setting.json model."""
+"""Strict firmware-compatible setting.json model for the sound simulator."""
 
 from __future__ import annotations
 

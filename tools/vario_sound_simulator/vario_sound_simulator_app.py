@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-import sys
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
-if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 try:
     from .vario_sound_audio import AudioEngine
-    from tests.parameters_model import (
+    from .parameters_model import (
         AUDIO_PARAMETER_NAMES,
         MODEL_PARAMETER_SPECS,
         PARAMETER_SPECS,
@@ -39,7 +35,7 @@ try:
     )
 except ImportError:
     from vario_sound_audio import AudioEngine
-    from tests.parameters_model import (
+    from parameters_model import (
         AUDIO_PARAMETER_NAMES,
         MODEL_PARAMETER_SPECS,
         PARAMETER_SPECS,

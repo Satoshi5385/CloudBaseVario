@@ -5,17 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import math
-from pathlib import Path
-import sys
 from typing import Any, Mapping
 
-# Keep the supported ``python tools/vario_sound_simulator/vario_sound_simulator.py`` entry point
-# working while the shared parameter contract is maintained with the tests.
-if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 try:
-    from tests.parameters_model import (
+    from .parameters_model import (
         AUDIO_PARAMETER_NAMES,
         FORMAT_VERSION,
         MAX_CONFIG_FILE_BYTES,
@@ -40,7 +33,7 @@ try:
         validate_parameters,
     )
 except ImportError:
-    from tests.parameters_model import (
+    from parameters_model import (
         AUDIO_PARAMETER_NAMES,
         FORMAT_VERSION,
         MAX_CONFIG_FILE_BYTES,
