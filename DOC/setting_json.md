@@ -2,7 +2,7 @@
 
 ## 1. 概要
 
-`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ9項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
+`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ10項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -48,7 +48,7 @@ PARAM SET predictive_buzzer_enabled true
 PARAM SAVE
 ```
 
-コマンドのパラメータ名と `true` / `false` / `AUTO` / `BARO_ONLY` / `VOLTAGE` / `PERCENT` は大文字・小文字を区別しません。JSON ファイル内の key と enum 文字列は、表記どおりの大文字・小文字で記述してください。
+コマンドのパラメータ名と `true` / `false` / `AUTO` / `BARO_ONLY` / `VOLTAGE` / `PERCENT` / `MIN` / `LOW` / `NORMAL` / `HIGH` は大文字・小文字を区別しません。JSON ファイル内の key と enum 文字列は、表記どおりの大文字・小文字で記述してください。
 
 ### 2.2 PC で直接編集する場合
 
@@ -80,6 +80,7 @@ PARAM SAVE
     "auto_power_off_minutes": 60,
     "filter_mode": "AUTO",
     "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,
@@ -176,7 +177,7 @@ PARAM SAVE
 
 - top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` だけが使用できます。
 - `format_version` は整数で、現行形式では `1` です。それ以外のversionは読み込みません。
-- top-level `mc_parameters` は共通9項目すべてを持つobjectです。
+- top-level `mc_parameters` は共通10項目すべてを持つobjectです。
 - `vario_parameter_sets` は1～5件の配列です。各要素は `parameter_number` と `parameters` だけを持ちます。
 - `parameter_number` は1～5の整数で重複できません。配列順は任意ですが、保存時は番号順に整列します。
 - `mc_parameters` と各セットの `parameters` は JSON object です。1セットでも不正ならファイル全体を無効とします。
@@ -186,12 +187,13 @@ PARAM SAVE
 - boolean は引用符なしの `true` または `false`、整数は小数部なし、float は有限の JSON number として記述します。
 - `filter_mode` は文字列 `"AUTO"` または `"BARO_ONLY"` です。
 - `bluetooth_battery_mode` は文字列 `"VOLTAGE"` または `"PERCENT"` です。
+- `bluetooth_tx_power` は文字列 `"MIN"`、`"LOW"`、`"NORMAL"` または `"HIGH"` です。
 - `NaN`、`Infinity`、非有限値、範囲外の値は使用できません。
 
 ## 4. パラメータ詳細
 
 範囲の両端は、特記がない限り使用できます。
-4.1と4.2の9項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
+4.1と4.2の10項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
 
 ### 4.1 電源・気圧・推定・I2C
 
@@ -201,6 +203,7 @@ PARAM SAVE
 | `auto_power_off_minutes` | uint32 | 60 | 0～1440 min | 外部給電がなく、有効な実センサー高度の期間内変動幅が10 m以下の状態が継続したときに自動電源OFFする時間です。`0`で無効にします。変動幅が10 mを超えた場合は現在高度から計時をやり直します。外部給電中、高度が無効・stale・非有限の場合、および設定変更時は計時状態をリセットします。デバッグ高度は判定に使用しません。 |
 | `filter_mode` | enum | `AUTO` | `AUTO`, `BARO_ONLY` | `AUTO` は、有効な姿勢補正済み IMU 鉛直加速度がある間、気圧と IMU を融合します。IMU が無効・停止・stale の場合は自動的に気圧単独へ戻ります。`BARO_ONLY` は常に気圧単独で昇降率を推定します。IMU の取得や診断そのものを無効にする設定ではありません。 |
 | `bluetooth_battery_mode` | enum | `VOLTAGE` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
+| `bluetooth_tx_power` | enum | `LOW` | `MIN`, `LOW`, `NORMAL`, `HIGH` | BLE送信電力です。`MIN`は-24 dBm、`LOW`は-12 dBm、`NORMAL`は0 dBm、`HIGH`は+9 dBmです。起動時および設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。 |
 | `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz | LK8EX1センテンスのNotify試行頻度です。BLEがbusyの場合はその周期のセンテンスを破棄して再送しないため、成功Notify数は設定値を下回ることがあります。Battery Serviceの更新周期には影響しません。 |
 | `i2c_reinit_error_count` | uint32 | 10 | 1～100 回 | BMP581 または ICM-42688P-HXY の連続 I2C エラーがこの回数に達したとき、センサを offline として共有 I2C bus の復旧・再初期化を試みます。小さすぎる値は一過性エラーで復旧処理を頻発させ、大きすぎる値は故障検出を遅らせます。 |
 
@@ -324,7 +327,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 | 状態 | 動作 |
 | --- | --- |
-| 正常な version 1 | 共通9項目と音関連22項目を持つ全セットを読込み |
+| 正常な version 1 | 共通10項目と音関連22項目を持つ全セットを読込み |
 | version 1以外 | 非対応versionとしてファイル全体を無効化 |
 | ファイルなし | 全項目を組込み既定値とし、既定ファイルを自動生成 |
 | JSON 構文、型、範囲、関係が不正 | ファイルの値を一切適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
@@ -350,7 +353,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 ## 8. versionの扱い
 
-ファームウェアはversion 1の構造だけを読み込みます。top-level、共通9項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。
+ファームウェアはversion 1の構造だけを読み込みます。top-level、共通10項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。
 
 ## 9. 実装上の正本
 

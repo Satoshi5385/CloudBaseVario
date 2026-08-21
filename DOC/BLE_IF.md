@@ -83,6 +83,7 @@ LK8EX1には充電状態を示す標準フィールドがないため、独自�
 
 * **データ送信頻度 (Update Rate):** `setting.json`の共有設定`bluetooth_notify_rate_hz`で1～50 Hzに設定します。既定値は10 Hzです。
 ※BLEがbusyの場合はその周期のセンテンスを破棄し、再送や追いつき連送は行いません。このため、実際の成功Notify数は設定値を下回ることがあります。
+* **送信電力:** `setting.json`の共有設定`bluetooth_tx_power`で`MIN`（-24 dBm）、`LOW`（-12 dBm、既定値）、`NORMAL`（0 dBm）、`HIGH`（+9 dBm）から選択します。起動時、接続成立時、および動作中の設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。
 * **データ送信時の注意点:**
 1つの `$LK8EX1` センテンスが `ATT_MTU - 3` を超える場合は、CRLFまでのbyte列を複数Notifyへ順序どおり分割します。別センテンスのfragmentを途中へ割り込ませてはなりません。
 

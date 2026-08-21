@@ -63,10 +63,11 @@ static void test_parameter_contract(void) {
     size_t profile_count = 0U;
 
     app_config_set_defaults(&config);
-    assert(app_config_parameter_count() == 31U);
+    assert(app_config_parameter_count() == 32U);
     assert(config.auto_power_off_minutes == 60U);
     assert(config.bluetooth_battery_mode ==
            APP_BLUETOOTH_BATTERY_MODE_VOLTAGE);
+    assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_LOW);
     assert(config.bluetooth_notify_rate_hz == 10U);
     assert(config.audio_climb_rate_average_s == 1.0f);
     assert(config.predictive_interval_ms == 1000U);
@@ -76,6 +77,7 @@ static void test_parameter_contract(void) {
     assert(has_parameter("predictive_interval_ms"));
     assert(has_parameter("predictive_duration_ms"));
     assert(has_parameter("bluetooth_battery_mode"));
+    assert(has_parameter("bluetooth_tx_power"));
     assert(has_parameter("bluetooth_notify_rate_hz"));
     assert(!has_parameter("lift_confirm_distance_m"));
     assert(!has_parameter("sink_confirm_distance_m"));
@@ -91,13 +93,29 @@ static void test_parameter_contract(void) {
             profile_count++;
         }
     }
-    assert(shared_count == 9U);
+    assert(shared_count == 10U);
     assert(profile_count == 22U);
     assert(app_config_validate(&config));
     assert(app_config_set_text(&config, "bluetooth_battery_mode", "PERCENT"));
     assert(config.bluetooth_battery_mode ==
            APP_BLUETOOTH_BATTERY_MODE_PERCENT);
     assert(!app_config_set_text(&config, "bluetooth_battery_mode", "INVALID"));
+    assert(app_config_set_text(&config, "bluetooth_tx_power", "MIN"));
+    assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_MIN);
+    assert(app_config_bluetooth_tx_power_dbm(config.bluetooth_tx_power) == -24);
+    assert(app_config_set_text(&config, "bluetooth_tx_power", "LOW"));
+    assert(app_config_bluetooth_tx_power_dbm(config.bluetooth_tx_power) == -12);
+    assert(app_config_set_text(&config, "bluetooth_tx_power", "NORMAL"));
+    assert(app_config_bluetooth_tx_power_dbm(config.bluetooth_tx_power) == 0);
+    assert(app_config_set_text(&config, "bluetooth_tx_power", "HIGH"));
+    assert(app_config_bluetooth_tx_power_dbm(config.bluetooth_tx_power) == 9);
+    assert(strcmp(app_config_bluetooth_tx_power_name(
+                      config.bluetooth_tx_power),
+                  "HIGH") == 0);
+    assert(!app_config_set_text(&config, "bluetooth_tx_power", "MAX"));
+    assert(!app_config_set_text(&config, "bluetooth_tx_power", "20"));
+    assert(app_config_reset(&config, 1U, "bluetooth_tx_power"));
+    assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_LOW);
     assert(app_config_set_text(&config, "bluetooth_notify_rate_hz", "1"));
     assert(config.bluetooth_notify_rate_hz == 1U);
     assert(app_config_set_text(&config, "bluetooth_notify_rate_hz", "50"));

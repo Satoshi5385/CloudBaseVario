@@ -24,9 +24,17 @@ typedef lk8ex1_fields_t ble_vario_lk8ex1_fields_t;
 
 /**
  * @brief Initialize NimBLE, register NUS and Battery Service, and start its host task.
+ * @param[in] tx_power Initial default, advertising, and connection TX power.
  * @return ESP_OK on success, otherwise an ESP-IDF or NimBLE setup error.
  */
-esp_err_t ble_vario_init(void);
+esp_err_t ble_vario_init(app_bluetooth_tx_power_t tx_power);
+
+/**
+ * @brief Apply one TX power preset to default, advertising, and any active link.
+ * @param[in] tx_power Valid public TX power preset.
+ * @return ESP_OK when every applicable controller setting succeeded.
+ */
+esp_err_t ble_vario_apply_tx_power(app_bluetooth_tx_power_t tx_power);
 
 /**
  * @brief Immediately gate new BLE traffic and request advertising/disconnect stop.

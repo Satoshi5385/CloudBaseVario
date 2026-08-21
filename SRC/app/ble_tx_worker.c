@@ -81,6 +81,7 @@ void ble_tx_worker_task(void *context) {
     int64_t next_battery_update_us = esp_timer_get_time();
     int64_t next_lk8ex1_notify_us = next_battery_update_us;
     uint32_t config_revision = 0U;
+    uint32_t previous_config_revision = 0U;
     uint32_t previous_notify_rate_hz = 0U;
     bool config_valid = false;
 
@@ -109,11 +110,23 @@ void ble_tx_worker_task(void *context) {
         if (app_resources_copy_config_with_revision(&config,
                                                     &config_revision)) {
             if (config_valid &&
+                config_revision != previous_config_revision) {
+                esp_err_t tx_power_ret =
+                    ble_vario_apply_tx_power(config.bluetooth_tx_power);
+
+                if (tx_power_ret != ESP_OK &&
+                    tx_power_ret != ESP_ERR_INVALID_STATE) {
+                    ESP_LOGW(TAG, "BLE TX power update failed: %s",
+                             esp_err_to_name(tx_power_ret));
+                }
+            }
+            if (config_valid &&
                 config.bluetooth_notify_rate_hz != previous_notify_rate_hz) {
                 next_lk8ex1_notify_us =
                     now_us + lk8ex1_notify_period_us(
                                  config.bluetooth_notify_rate_hz);
             }
+            previous_config_revision = config_revision;
             previous_notify_rate_hz = config.bluetooth_notify_rate_hz;
             config_valid = true;
         }

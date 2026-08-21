@@ -66,6 +66,9 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "bluetooth_battery_mode": ParameterSpec(
         "enum", "VOLTAGE", choices=("VOLTAGE", "PERCENT")
     ),
+    "bluetooth_tx_power": ParameterSpec(
+        "enum", "LOW", choices=("MIN", "LOW", "NORMAL", "HIGH")
+    ),
     "bluetooth_notify_rate_hz": ParameterSpec("uint", 10, 1.0, 50.0),
     "i2c_reinit_error_count": ParameterSpec("uint", 10, 1.0, 100.0),
     "imu_gyro_calibration_samples": ParameterSpec("uint", 200, 50.0, 2000.0),

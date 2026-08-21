@@ -14,11 +14,19 @@ typedef enum {
     APP_BLUETOOTH_BATTERY_MODE_PERCENT,
 } app_bluetooth_battery_mode_t;
 
+typedef enum {
+    APP_BLUETOOTH_TX_POWER_MIN = 0,
+    APP_BLUETOOTH_TX_POWER_LOW,
+    APP_BLUETOOTH_TX_POWER_NORMAL,
+    APP_BLUETOOTH_TX_POWER_HIGH,
+} app_bluetooth_tx_power_t;
+
 typedef struct {
     float sea_level_pressure_pa;
     uint32_t auto_power_off_minutes;
     app_filter_mode_t filter_mode;
     app_bluetooth_battery_mode_t bluetooth_battery_mode;
+    app_bluetooth_tx_power_t bluetooth_tx_power;
     uint32_t bluetooth_notify_rate_hz;
     uint32_t i2c_reinit_error_count;
     uint32_t imu_gyro_calibration_samples;
@@ -166,6 +174,14 @@ const char *app_config_filter_mode_name(app_filter_mode_t mode);
 /** Convert an LK8EX1 battery mode to its stable JSON/console name. */
 const char *app_config_bluetooth_battery_mode_name(
     app_bluetooth_battery_mode_t mode);
+
+/** Convert a Bluetooth TX power preset to its stable JSON/console name. */
+const char *app_config_bluetooth_tx_power_name(
+    app_bluetooth_tx_power_t power);
+
+/** Convert a Bluetooth TX power preset to its nominal dBm value. */
+int32_t app_config_bluetooth_tx_power_dbm(
+    app_bluetooth_tx_power_t power);
 
 /** Parse a stable enum value for the named public parameter. */
 bool app_config_parse_enum_value(const char *parameter_name,

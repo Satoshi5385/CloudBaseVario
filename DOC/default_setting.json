@@ -5,6 +5,7 @@
     "auto_power_off_minutes": 60,
     "filter_mode": "AUTO",
     "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,

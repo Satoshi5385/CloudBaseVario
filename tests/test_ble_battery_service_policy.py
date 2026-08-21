@@ -215,6 +215,32 @@ class BleBatteryServicePolicyTests(unittest.TestCase):
         lk8ex1_notify = BLE_WORKER_SOURCE.index("ble_vario_notify_lk8ex1(")
         self.assertLess(battery_update, lk8ex1_notify)
 
+    def test_tx_power_presets_cover_advertising_and_connections(self) -> None:
+        for preset, level in (
+            ("APP_BLUETOOTH_TX_POWER_MIN", "ESP_PWR_LVL_N24"),
+            ("APP_BLUETOOTH_TX_POWER_LOW", "ESP_PWR_LVL_N12"),
+            ("APP_BLUETOOTH_TX_POWER_NORMAL", "ESP_PWR_LVL_N0"),
+            ("APP_BLUETOOTH_TX_POWER_HIGH", "ESP_PWR_LVL_P9"),
+        ):
+            self.assertIn(f"case {preset}:", BLE_SOURCE)
+            self.assertIn(f"*level = {level};", BLE_SOURCE)
+        self.assertNotIn("ESP_PWR_LVL_P20", BLE_SOURCE)
+        self.assertIn("ESP_BLE_PWR_TYPE_DEFAULT", BLE_SOURCE)
+        self.assertIn("ESP_BLE_PWR_TYPE_ADV", BLE_SOURCE)
+        self.assertIn("ESP_BLE_ENHANCED_PWR_TYPE_CONN", BLE_SOURCE)
+        self.assertIn(
+            "config_revision != previous_config_revision", BLE_WORKER_SOURCE
+        )
+        self.assertIn(
+            "ble_vario_apply_tx_power(config.bluetooth_tx_power)",
+            BLE_WORKER_SOURCE,
+        )
+        connect = BLE_SOURCE.index("case BLE_GAP_EVENT_CONNECT:")
+        disconnect = BLE_SOURCE.index("case BLE_GAP_EVENT_DISCONNECT:")
+        self.assertIn(
+            "ble_vario_apply_tx_power(tx_power)", BLE_SOURCE[connect:disconnect]
+        )
+
     def test_lk8ex1_percent_uses_protocol_offset(self) -> None:
         self.assertIn(
             "#define LK8EX1_BATTERY_PERCENT_OFFSET UINT16_C(1000)",

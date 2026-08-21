@@ -26,6 +26,8 @@ _Static_assert(sizeof(app_filter_mode_t) == sizeof(int32_t),
                "filter mode enum must be 32-bit");
 _Static_assert(sizeof(app_bluetooth_battery_mode_t) == sizeof(int32_t),
                "LK8EX1 battery mode enum must be 32-bit");
+_Static_assert(sizeof(app_bluetooth_tx_power_t) == sizeof(int32_t),
+               "Bluetooth TX power enum must be 32-bit");
 
 #define PARAM_BOOL(member, default_value_, scope_)                                              \
     {                                                                                            \
@@ -60,6 +62,10 @@ static const app_parameter_descriptor_t parameter_table[] = {
     PARAM_ENUM(bluetooth_battery_mode, APP_BLUETOOTH_BATTERY_MODE_VOLTAGE,
                APP_BLUETOOTH_BATTERY_MODE_VOLTAGE,
                APP_BLUETOOTH_BATTERY_MODE_PERCENT,
+               APP_PARAMETER_SCOPE_SHARED),
+    PARAM_ENUM(bluetooth_tx_power, APP_BLUETOOTH_TX_POWER_LOW,
+               APP_BLUETOOTH_TX_POWER_MIN,
+               APP_BLUETOOTH_TX_POWER_HIGH,
                APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(bluetooth_notify_rate_hz, 10, 1.0, 50.0,
                APP_PARAMETER_SCOPE_SHARED),
@@ -507,6 +513,26 @@ static bool parse_bluetooth_battery_mode(const char *text, int32_t *mode) {
     return false;
 }
 
+static bool parse_bluetooth_tx_power(const char *text, int32_t *power) {
+    if (strcasecmp(text, "MIN") == 0) {
+        *power = APP_BLUETOOTH_TX_POWER_MIN;
+        return true;
+    }
+    if (strcasecmp(text, "LOW") == 0) {
+        *power = APP_BLUETOOTH_TX_POWER_LOW;
+        return true;
+    }
+    if (strcasecmp(text, "NORMAL") == 0) {
+        *power = APP_BLUETOOTH_TX_POWER_NORMAL;
+        return true;
+    }
+    if (strcasecmp(text, "HIGH") == 0) {
+        *power = APP_BLUETOOTH_TX_POWER_HIGH;
+        return true;
+    }
+    return false;
+}
+
 bool app_config_parse_enum_value(const char *parameter_name,
                                  const char *text, int32_t *value) {
     if (parameter_name == NULL || text == NULL || value == NULL) {
@@ -517,6 +543,9 @@ bool app_config_parse_enum_value(const char *parameter_name,
     }
     if (strcasecmp(parameter_name, "bluetooth_battery_mode") == 0) {
         return parse_bluetooth_battery_mode(text, value);
+    }
+    if (strcasecmp(parameter_name, "bluetooth_tx_power") == 0) {
+        return parse_bluetooth_tx_power(text, value);
     }
     return false;
 }
@@ -623,6 +652,38 @@ const char *app_config_bluetooth_battery_mode_name(
     return "INVALID";
 }
 
+const char *app_config_bluetooth_tx_power_name(
+    app_bluetooth_tx_power_t power) {
+    switch (power) {
+    case APP_BLUETOOTH_TX_POWER_MIN:
+        return "MIN";
+    case APP_BLUETOOTH_TX_POWER_LOW:
+        return "LOW";
+    case APP_BLUETOOTH_TX_POWER_NORMAL:
+        return "NORMAL";
+    case APP_BLUETOOTH_TX_POWER_HIGH:
+        return "HIGH";
+    default:
+        return "INVALID";
+    }
+}
+
+int32_t app_config_bluetooth_tx_power_dbm(
+    app_bluetooth_tx_power_t power) {
+    switch (power) {
+    case APP_BLUETOOTH_TX_POWER_MIN:
+        return INT32_C(-24);
+    case APP_BLUETOOTH_TX_POWER_LOW:
+        return INT32_C(-12);
+    case APP_BLUETOOTH_TX_POWER_NORMAL:
+        return INT32_C(0);
+    case APP_BLUETOOTH_TX_POWER_HIGH:
+        return INT32_C(9);
+    default:
+        return INT32_MIN;
+    }
+}
+
 const char *app_config_enum_value_name(const char *parameter_name,
                                        int32_t value) {
     if (parameter_name == NULL) {
@@ -634,6 +695,10 @@ const char *app_config_enum_value_name(const char *parameter_name,
     if (strcmp(parameter_name, "bluetooth_battery_mode") == 0) {
         return app_config_bluetooth_battery_mode_name(
             (app_bluetooth_battery_mode_t) value);
+    }
+    if (strcmp(parameter_name, "bluetooth_tx_power") == 0) {
+        return app_config_bluetooth_tx_power_name(
+            (app_bluetooth_tx_power_t) value);
     }
     return "INVALID";
 }

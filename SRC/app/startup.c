@@ -390,6 +390,7 @@ void app_startup_run(void) {
     esp_err_t nvs_result = ESP_OK;
     esp_err_t system_io_result = ESP_ERR_INVALID_STATE;
     firmware_update_diagnostics_t update_diagnostics = {0};
+    app_config_t ble_config = {0};
     imu_accel_calibration_t imu_accel_calibration = {0};
     imu_calibration_storage_diagnostics_t imu_calibration_diagnostics = {
         .result = IMU_CALIBRATION_STORAGE_MISSING,
@@ -722,7 +723,10 @@ void app_startup_run(void) {
     }
 
     if (nvs_ready) {
-        ret = ble_vario_init();
+        if (!app_resources_copy_config(&ble_config)) {
+            app_config_set_defaults(&ble_config);
+        }
+        ret = ble_vario_init(ble_config.bluetooth_tx_power);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "NimBLE initialization failed: %s", esp_err_to_name(ret));
             post_peripheral_failure(ret);

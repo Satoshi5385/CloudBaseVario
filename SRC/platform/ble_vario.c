@@ -99,6 +99,8 @@ static uint8_t battery_level_status[BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE] = {
 static bool notification_subscribed = false;
 static bool nimble_initialized = false;
 static bool stop_requested = false;
+static app_bluetooth_tx_power_t configured_tx_power =
+    APP_BLUETOOTH_TX_POWER_LOW;
 static uint32_t sentence_count = 0U;
 static uint32_t dropped_sentence_count = 0U;
 static int32_t last_notify_error = 0;
@@ -107,6 +109,82 @@ static TaskHandle_t tx_wakeup_task;
 
 static int ble_gap_event_handler(struct ble_gap_event *event, void *context);
 static int ble_start_advertising(void);
+
+static bool ble_tx_power_level(app_bluetooth_tx_power_t tx_power,
+                               esp_power_level_t *level) {
+    switch (tx_power) {
+    case APP_BLUETOOTH_TX_POWER_MIN:
+        if (level != NULL) {
+            *level = ESP_PWR_LVL_N24;
+        }
+        return true;
+    case APP_BLUETOOTH_TX_POWER_LOW:
+        if (level != NULL) {
+            *level = ESP_PWR_LVL_N12;
+        }
+        return true;
+    case APP_BLUETOOTH_TX_POWER_NORMAL:
+        if (level != NULL) {
+            *level = ESP_PWR_LVL_N0;
+        }
+        return true;
+    case APP_BLUETOOTH_TX_POWER_HIGH:
+        if (level != NULL) {
+            *level = ESP_PWR_LVL_P9;
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+static esp_err_t ble_apply_base_tx_power(
+    app_bluetooth_tx_power_t tx_power) {
+    esp_power_level_t level = ESP_PWR_LVL_INVALID;
+    esp_err_t first_error = ESP_OK;
+    esp_err_t ret = ESP_OK;
+    int32_t dbm = app_config_bluetooth_tx_power_dbm(tx_power);
+
+    if (!ble_tx_power_level(tx_power, &level)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, level);
+    if (ret != ESP_OK) {
+        first_error = ret;
+        ESP_LOGW(TAG, "failed to set default BLE TX power to %ld dBm: %s",
+                 (long) dbm, esp_err_to_name(ret));
+    }
+    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, level);
+    if (ret != ESP_OK) {
+        if (first_error == ESP_OK) {
+            first_error = ret;
+        }
+        ESP_LOGW(TAG,
+                 "failed to set advertising BLE TX power to %ld dBm: %s",
+                 (long) dbm, esp_err_to_name(ret));
+    }
+    return first_error;
+}
+
+static esp_err_t ble_apply_connection_tx_power(
+    uint16_t handle, app_bluetooth_tx_power_t tx_power) {
+    esp_power_level_t level = ESP_PWR_LVL_INVALID;
+    esp_err_t ret = ESP_OK;
+
+    if (handle == BLE_HS_CONN_HANDLE_NONE ||
+        !ble_tx_power_level(tx_power, &level)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ret = esp_ble_tx_power_set_enhanced(
+        ESP_BLE_ENHANCED_PWR_TYPE_CONN, handle, level);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "failed to set connection BLE TX power to %ld dBm: %s",
+                 (long) app_config_bluetooth_tx_power_dbm(tx_power),
+                 esp_err_to_name(ret));
+    }
+    return ret;
+}
 
 static void ble_notify_tx_worker(void) {
     portENTER_CRITICAL(&ble_state_lock);
@@ -332,7 +410,13 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *context) {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            app_bluetooth_tx_power_t tx_power = APP_BLUETOOTH_TX_POWER_LOW;
+
             ble_set_connection_state(event->connect.conn_handle, false);
+            portENTER_CRITICAL(&ble_state_lock);
+            tx_power = configured_tx_power;
+            portEXIT_CRITICAL(&ble_state_lock);
+            (void) ble_vario_apply_tx_power(tx_power);
             ble_request_connection_parameters(event->connect.conn_handle);
             ESP_LOGI(TAG, "peer connected");
         } else if (!ble_is_stopping()) {
@@ -418,7 +502,7 @@ static void ble_host_task(void *context) {
     nimble_port_freertos_deinit();
 }
 
-esp_err_t ble_vario_init(void) {
+esp_err_t ble_vario_init(app_bluetooth_tx_power_t tx_power) {
     esp_err_t ret = ESP_OK;
     int rc = 0;
 
@@ -431,14 +515,14 @@ esp_err_t ble_vario_init(void) {
         return ret;
     }
 
-    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_N0);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "failed to set default BLE TX power to 0 dBm: %s", esp_err_to_name(ret));
+    if (!ble_tx_power_level(tx_power, NULL)) {
+        (void) nimble_port_deinit();
+        return ESP_ERR_INVALID_ARG;
     }
-    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_N0);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "failed to set advertising TX power to 0 dBm: %s", esp_err_to_name(ret));
-    }
+    portENTER_CRITICAL(&ble_state_lock);
+    configured_tx_power = tx_power;
+    portEXIT_CRITICAL(&ble_state_lock);
+    (void) ble_apply_base_tx_power(tx_power);
 
     ble_hs_cfg.reset_cb = ble_host_reset;
     ble_hs_cfg.sync_cb = ble_host_sync;
@@ -474,6 +558,34 @@ esp_err_t ble_vario_init(void) {
 
     nimble_port_freertos_init(ble_host_task);
     return ESP_OK;
+}
+
+esp_err_t ble_vario_apply_tx_power(app_bluetooth_tx_power_t tx_power) {
+    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
+    bool initialized = false;
+    esp_err_t first_error = ESP_OK;
+    esp_err_t ret = ESP_OK;
+
+    if (!ble_tx_power_level(tx_power, NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&ble_state_lock);
+    configured_tx_power = tx_power;
+    initialized = nimble_initialized;
+    handle = connection_handle;
+    portEXIT_CRITICAL(&ble_state_lock);
+    if (!initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    first_error = ble_apply_base_tx_power(tx_power);
+    if (handle != BLE_HS_CONN_HANDLE_NONE) {
+        ret = ble_apply_connection_tx_power(handle, tx_power);
+        if (first_error == ESP_OK) {
+            first_error = ret;
+        }
+    }
+    return first_error;
 }
 
 void ble_vario_begin_shutdown(void) {

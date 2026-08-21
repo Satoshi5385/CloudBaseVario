@@ -819,6 +819,8 @@ class CloudBaseVarioApp:
             suggestions = ("AUTO", "BARO_ONLY")
         elif name == "bluetooth_battery_mode":
             suggestions = ("VOLTAGE", "PERCENT")
+        elif name == "bluetooth_tx_power":
+            suggestions = ("MIN", "LOW", "NORMAL", "HIGH")
         elif name.endswith("_sign"):
             suggestions = ("-1", "1")
         self.parameter_value_combo.configure(values=suggestions)

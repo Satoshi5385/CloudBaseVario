@@ -274,7 +274,7 @@ TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Sele
 
 - NimBLEを使用し、BLE Peripheralとして動作すること。
 - device nameを `CloudBaseVario` とし、connectable undirected advertisingを行うこと。NUS Service UUIDとBattery Service UUIDをadvertisingまたはscan responseへ含めること。
-- advertising intervalの初期値を250 ms、送信出力を0 dBmとする。接続後は30～50 msのconnection interval、slave latency 1、supervision timeout 4秒を要求するが、peerが別の有効値を選んでも切断理由にせず実際の値を診断表示すること。
+- advertising intervalの初期値を250 msとする。送信出力は共有設定`bluetooth_tx_power`に従い、`MIN`を-24 dBm、`LOW`を-12 dBm、`NORMAL`を0 dBm、`HIGH`を+9 dBmとして、既定値を`LOW`とする。`MAX`および+20 dBmは受理しない。起動時はDefaultとAdvertisingへ設定し、接続成立時は接続handleへも設定する。`PARAM SET`による変更は広告と現在の接続へ即時反映する。接続後は30～50 msのconnection interval、slave latency 1、supervision timeout 4秒を要求するが、peerが別の有効値を選んでも切断理由にせず実際の値を診断表示すること。
 - ペアリング、ボンディング、暗号化を必須としないこと。NUS互換のためRX characteristicを公開するが、RXへ書き込まれたbyte列にはアプリケーション上の意味を持たせず、解釈せずに破棄すること。
 - Nordic UART Service互換のService、TX Notify、RX Write characteristicを公開すること。
 - Bluetooth SIG Battery Service `0x180F`をPrimary Serviceとして公開し、Battery Level `0x2A19`とBattery Level Status `0x2BED`をReadおよびNotifyとすること。ESP-IDF内蔵Battery Serviceとの重複登録を行わないこと。
@@ -450,6 +450,7 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
     "auto_power_off_minutes": 60,
     "filter_mode": "AUTO",
     "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,
@@ -469,7 +470,7 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
 ```
 
 - 出力はUTF-8、BOMなし、2 space indent、LF改行、末尾改行ありの整形済みJSONとする。読込みではUTF-8 BOM、LFおよびCRLFを許容するが、JSON commentは許容しない。
-- top-levelには整数の `format_version`、共通9項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
+- top-levelには整数の `format_version`、共通10項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
 - version 1の規定構造だけを受理する。未知のparameter、誤った階層、項目不足、重複key、型違いまたは値域違反を含むファイルは全体を無効とし、自動変換しないこと。
 - `mc_parameters`および各セットの`parameters`には値だけを格納する。パラメータ名、型、単位、値域、既定値および相互関係は、本書の単一パラメータ表と対応する実装テーブルを正本とすること。
 - boolはJSON boolean、uint32は0以上の整数、floatは有限のJSON number、enumは定義済み名称のJSON stringとして表すこと。NaNおよび無限大を受理しないこと。
@@ -760,7 +761,7 @@ typedef struct {
 - 既定値は単一のテーブルで定義し、起動時とRESET時で共用する。
 - 型、最小値、最大値、相互関係を検証してから変更を反映する。
 - センサー・音声タスクは周期の先頭で必要な設定をローカルへコピーし、処理途中で設定が変化しないようにする。
-- 起動時に有効なversion 1の`setting.json`がある場合は、共通9項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
+- 起動時に有効なversion 1の`setting.json`がある場合は、共通10項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
 - consoleによる変更は `PARAM SAVE`が成功するまでRAMだけに保持し、再起動時は最後に正常保存されたファイルから再構成する。
 - 公開パラメータは本節の表に定義した項目だけとする。SW1音量、SW2シンク状態、SW3選択番号は専用NVSを正本とし、`PARAM LIST/GET/SET/RESET/SAVE`の対象外とする。
 
