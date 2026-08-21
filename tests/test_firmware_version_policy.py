@@ -22,7 +22,9 @@ class FirmwareVersionPolicyTests(unittest.TestCase):
         self.assertIsNotNone(match)
 
     def test_build_embeds_release_version_and_seven_digit_git_hash(self) -> None:
-        self.assertIn('git rev-parse --short=7 HEAD', ROOT_CMAKE)
+        self.assertIn('git rev-parse HEAD', ROOT_CMAKE)
+        self.assertIn('string(LENGTH "${CBV_GIT_FULL_HASH}" CBV_GIT_FULL_HASH_LENGTH)', ROOT_CMAKE)
+        self.assertIn('string(SUBSTRING "${CBV_GIT_FULL_HASH}" 0 7 CBV_GIT_HASH)', ROOT_CMAKE)
         self.assertIn(
             'set(PROJECT_VER "${CBV_RELEASE_VERSION}+${CBV_GIT_HASH}")',
             ROOT_CMAKE,

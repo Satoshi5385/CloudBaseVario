@@ -25,16 +25,19 @@ string(REGEX REPLACE
     CBV_RELEASE_VERSION "${CBV_VERSION_DEFINE}")
 
 execute_process(
-    COMMAND git rev-parse --short=7 HEAD
+    COMMAND git rev-parse HEAD
     WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
     RESULT_VARIABLE CBV_GIT_RESULT
-    OUTPUT_VARIABLE CBV_GIT_HASH
+    OUTPUT_VARIABLE CBV_GIT_FULL_HASH
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET)
+string(LENGTH "${CBV_GIT_FULL_HASH}" CBV_GIT_FULL_HASH_LENGTH)
 if(NOT CBV_GIT_RESULT EQUAL 0 OR
-   NOT CBV_GIT_HASH MATCHES "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$")
-    message(FATAL_ERROR "A seven-character lowercase Git HEAD hash is required")
+   NOT CBV_GIT_FULL_HASH MATCHES "^[0-9a-f]+$" OR
+   NOT CBV_GIT_FULL_HASH_LENGTH EQUAL 40)
+    message(FATAL_ERROR "A lowercase Git HEAD hash is required")
 endif()
+string(SUBSTRING "${CBV_GIT_FULL_HASH}" 0 7 CBV_GIT_HASH)
 
 execute_process(
     COMMAND git rev-parse --git-path HEAD
