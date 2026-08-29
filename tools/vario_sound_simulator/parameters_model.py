@@ -64,17 +64,14 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
         "enum", "AUTO", choices=("AUTO", "BARO_ONLY")
     ),
     "bluetooth_battery_mode": ParameterSpec(
-        "enum", "VOLTAGE", choices=("VOLTAGE", "PERCENT")
+        "enum", "PERCENT", choices=("VOLTAGE", "PERCENT")
     ),
     "bluetooth_tx_power": ParameterSpec(
         "enum", "LOW", choices=("MIN", "LOW", "NORMAL", "HIGH")
     ),
     "bluetooth_notify_rate_hz": ParameterSpec("uint", 10, 1.0, 50.0),
     "gps_send_interval_ms": ParameterSpec("uint", 1000, 200.0, 10000.0),
-    "i2c_reinit_error_count": ParameterSpec("uint", 10, 1.0, 100.0),
     "imu_gyro_calibration_samples": ParameterSpec("uint", 200, 50.0, 2000.0),
-    "imu_mahony_kp": ParameterSpec("float", 5.0, 0.0, 20.0),
-    "imu_mahony_ki": ParameterSpec("float", 0.05, 0.0, 5.0),
     "predictive_buzzer_enabled": ParameterSpec("bool", False, audio=True),
     "audio_climb_rate_average_s": ParameterSpec("float", 1.0, 0.0, 10.0, True),
     "lift_start_mps": ParameterSpec("float", 0.10, -1.0, 5.0, True),

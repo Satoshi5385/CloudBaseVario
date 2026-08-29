@@ -2,7 +2,7 @@
 
 ## 1. 概要
 
-`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ11項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、製造時に固定されるGPS搭載有無、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
+`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ8項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、製造時に固定されるGPS搭載有無、ファームウェア固定のI2C再初期化閾値・Mahony gain、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -79,14 +79,11 @@ PARAM SAVE
     "sea_level_pressure_pa": 101325.0,
     "auto_power_off_minutes": 60,
     "filter_mode": "AUTO",
-    "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_battery_mode": "PERCENT",
     "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
     "gps_send_interval_ms": 1000,
-    "i2c_reinit_error_count": 10,
-    "imu_gyro_calibration_samples": 200,
-    "imu_mahony_kp": 5.0,
-    "imu_mahony_ki": 0.05
+    "imu_gyro_calibration_samples": 200
   },
   "vario_parameter_sets": [
     {
@@ -178,7 +175,7 @@ PARAM SAVE
 
 - top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` だけが使用できます。
 - `format_version` は整数で、現行形式では `1` です。それ以外のversionは読み込みません。
-- top-level `mc_parameters` は共通11項目すべてを持つobjectです。
+- top-level `mc_parameters` は共通8項目すべてを持つobjectです。
 - `vario_parameter_sets` は1～5件の配列です。各要素は `parameter_number` と `parameters` だけを持ちます。
 - `parameter_number` は1～5の整数で重複できません。配列順は任意ですが、保存時は番号順に整列します。
 - `mc_parameters` と各セットの `parameters` は JSON object です。1セットでも不正ならファイル全体を無効とします。
@@ -194,30 +191,26 @@ PARAM SAVE
 ## 4. パラメータ詳細
 
 範囲の両端は、特記がない限り使用できます。
-4.1と4.2の11項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
+4.1と4.2の8項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
 
-### 4.1 電源・気圧・推定・I2C
+### 4.1 電源・気圧・推定・Bluetooth・GPS
 
 | パラメータ | 型 | 既定値 | 設定範囲 | 詳細 |
 | --- | --- | ---: | --- | --- |
 | `sea_level_pressure_pa` | float | 101325 | 80000～110000 Pa | 気圧から高度を求めるときの海面更正気圧です。値を大きくすると算出高度は高くなります。動作中に値が変わると高度・昇降率推定器をリセットします。 |
 | `auto_power_off_minutes` | uint32 | 60 | 0～1440 min | 外部給電がなく、有効な実センサー高度の期間内変動幅が10 m以下の状態が継続したときに自動電源OFFする時間です。`0`で無効にします。変動幅が10 mを超えた場合は現在高度から計時をやり直します。外部給電中、高度が無効・stale・非有限の場合、および設定変更時は計時状態をリセットします。デバッグ高度は判定に使用しません。 |
 | `filter_mode` | enum | `AUTO` | `AUTO`, `BARO_ONLY` | `AUTO` は、有効な姿勢補正済み IMU 鉛直加速度がある間、気圧と IMU を融合します。IMU が無効・停止・stale の場合は自動的に気圧単独へ戻ります。`BARO_ONLY` は常に気圧単独で昇降率を推定します。IMU の取得や診断そのものを無効にする設定ではありません。 |
-| `bluetooth_battery_mode` | enum | `VOLTAGE` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
+| `bluetooth_battery_mode` | enum | `PERCENT` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
 | `bluetooth_tx_power` | enum | `LOW` | `MIN`, `LOW`, `NORMAL`, `HIGH` | BLE送信電力です。`MIN`は-24 dBm、`LOW`は-12 dBm、`NORMAL`は0 dBm、`HIGH`は+9 dBmです。起動時および設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。 |
 | `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz | LK8EX1センテンスのNotify試行頻度です。BLEがbusyの場合はその周期のセンテンスを破棄して再送しないため、成功Notify数は設定値を下回ることがあります。Battery Serviceの更新周期には影響しません。 |
 | `gps_send_interval_ms` | uint32 | 1000 | 200～10000 ms | GPS搭載モデルの測位データ更新・XCTrack送信周期です。変更はGPSモジュールへ再設定されます。GPS搭載有無は製造時に固定され、このファイルや`PARAM`操作では変更できません。 |
-| `i2c_reinit_error_count` | uint32 | 10 | 1～100 回 | BMP581 または ICM-42688P-HXY の連続 I2C エラーがこの回数に達したとき、センサを offline として共有 I2C bus の復旧・再初期化を試みます。小さすぎる値は一過性エラーで復旧処理を頻発させ、大きすぎる値は故障検出を遅らせます。 |
 
 ### 4.2 IMU 姿勢推定
 
 | パラメータ | 型 | 既定値 | 設定範囲 | 詳細 |
 | --- | --- | ---: | --- | --- |
 | `imu_gyro_calibration_samples` | uint32 | 200 | 50～2000 samples | 起動後のジャイロ bias と初期姿勢を求める連続静止サンプル数です。公称 400 Hz では既定値 200 が約 0.5 秒に相当します。加速度 norm が 0.9～1.1 g 外、またはいずれかのジャイロ軸が ±3 dps を超えると蓄積をやり直します。 |
-| `imu_mahony_kp` | float | 5.0 | 0～20 | Mahony 姿勢フィルタの比例 gain です。実効値は IMU confidence を掛けた `imu_kp_effective` です。大きくすると加速度方向への追従が速くなりますが、振動・並進加速度の影響を受けやすくなります。0 は比例補正を無効にします。 |
-| `imu_mahony_ki` | float | 0.05 | 0～5 | Mahony 姿勢フィルタの積分 gain です。静止に近い状態が 0.5 秒継続した場合だけ有効になり、実効値には IMU confidence が掛かります。条件を外れた場合や gain 変更時は積分値をクリアします。0 は積分補正を無効にします。 |
-
-`imu_mahony_kp` と `imu_mahony_ki` の実効状態は、`DIAG STATUS` の `confidence`、`kp_effective`、`ki_effective`、`ki_active`、または `BARO` 行の対応フィールドで確認できます。
+Mahony 姿勢フィルタの gain はファームウェア固定で、Kpは5.0、Kiは0.05です。実効値は IMU confidence を掛けた値となり、`DIAG STATUS` の `confidence`、`kp_effective`、`ki_effective`、`ki_active`、または `BARO` 行の対応フィールドで確認できます。Kiは静止に近い状態が0.5秒継続した場合だけ有効です。
 
 ### 4.3 ボード固定の IMU 軸変換
 
@@ -329,7 +322,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 | 状態 | 動作 |
 | --- | --- |
-| 正常な version 1 | 共通11項目と音関連22項目を持つ全セットを読込み |
+| 正常な version 1 | 共通8項目と音関連22項目を持つ全セットを読込み |
 | version 1以外 | 非対応versionとしてファイル全体を無効化 |
 | ファイルなし | 全項目を組込み既定値とし、既定ファイルを自動生成 |
 | JSON 構文、型、範囲、関係が不正 | ファイルの値を一切適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
@@ -355,7 +348,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 ## 8. versionの扱い
 
-ファームウェアはversion 1の構造だけを読み込みます。top-level、共通11項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。`gps_module_installed`などの搭載有無キーも未知のkeyとして拒否します。
+ファームウェアはversion 1の構造だけを読み込みます。top-level、共通8項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`や、`gps_module_installed`などの搭載有無キーも未知のkeyとして拒否します。
 
 ## 9. 実装上の正本
 

@@ -63,10 +63,10 @@ static void test_parameter_contract(void) {
     size_t profile_count = 0U;
 
     app_config_set_defaults(&config);
-    assert(app_config_parameter_count() == 33U);
+    assert(app_config_parameter_count() == 30U);
     assert(config.auto_power_off_minutes == 60U);
     assert(config.bluetooth_battery_mode ==
-           APP_BLUETOOTH_BATTERY_MODE_VOLTAGE);
+           APP_BLUETOOTH_BATTERY_MODE_PERCENT);
     assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_LOW);
     assert(config.bluetooth_notify_rate_hz == 10U);
     assert(config.gps_send_interval_ms == 1000U);
@@ -81,6 +81,9 @@ static void test_parameter_contract(void) {
     assert(has_parameter("bluetooth_tx_power"));
     assert(has_parameter("bluetooth_notify_rate_hz"));
     assert(has_parameter("gps_send_interval_ms"));
+    assert(!has_parameter("i2c_reinit_error_count"));
+    assert(!has_parameter("imu_mahony_kp"));
+    assert(!has_parameter("imu_mahony_ki"));
     assert(!has_parameter("lift_confirm_distance_m"));
     assert(!has_parameter("sink_confirm_distance_m"));
     assert(!has_parameter("predictive_freq_hz"));
@@ -95,7 +98,7 @@ static void test_parameter_contract(void) {
             profile_count++;
         }
     }
-    assert(shared_count == 11U);
+    assert(shared_count == 8U);
     assert(profile_count == 22U);
     assert(app_config_validate(&config));
     assert(app_config_set_text(&config, "bluetooth_battery_mode", "PERCENT"));

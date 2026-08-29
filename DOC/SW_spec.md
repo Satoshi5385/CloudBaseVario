@@ -428,6 +428,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 
 - 内蔵Flashに4 MiBの設定・更新共有FAT partitionを設け、512 byte sectorのwear levelling Safety modeを介して使用すること。Bluetooth Controller用NVSとは分離すること。
 - FATをmountできない場合も自動formatしないこと。SW2とSW3を押したまま電源ONする明示操作または `idf.py config-flash`によってだけ初期化すること。
+- `config-flash`用FAT imageは`wl_fatfsgen.py`へ`--sector_size 512 --wl_mode safe`を指定して生成すること。build時にimageのWL設定、BPB sector sizeおよびBPB総sector数を検証し、BPB総sector数がSafety WL実行時の`wl_size() / wl_sector_size()`相当と一致しない場合はbuildを失敗させること。4 MiB partitionの実行時容量は8080 sectorとする。
 - ESP32-S3のUSB OTG peripheralと内蔵PHYをTinyUSBで使用し、CDCとMSCを同時に公開する複合デバイスとすること。USB OTGが内蔵PHYを使用している間はUSB Serial/JTAGを同時に使用しないこと。
 - CDCは既存のコンソール入出力を提供し、MSCは設定保存用FAT partitionをリムーバブルストレージとして公開すること。
 - FAT mount失敗時はMSC classをLUN数0の「メディアなし」として維持し、同じ複合デバイスのCDCとUSB以外の主要機能を継続すること。MSC class driver自体を生成できない場合はTinyUSB複合デバイスを開始せず、USB以外の主要機能を継続すること。
@@ -438,7 +439,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 - FAT領域はESP32アプリケーションとUSB hostが同時にアクセスしてはならない。USB hostへMSCとして公開している間はhostだけが所有し、ESP32側からmount、読込みまたは書込みを行わないこと。
 - USB hostが安全な取り外しを完了し、FAT領域の所有権がESP32側へ戻ったことを確認した後にだけ、ESP32側からファイル操作を再開すること。hostの未flushデータを破壊する可能性があるため、保存目的でMSCを強制切断しないこと。
 - MSCのWRITE(10)はwear levelling領域への実書込みが完了するまでcommandを完了扱いにせず、その後にだけhostへ成功応答すること。SCSI SYNCHRONIZE CACHE(10/16)は受理済みWRITEが0で実媒体mutexを取得できた場合だけ成功応答すること。ejectまたはdetach開始時は新規host I/Oを閉じ、受理済みWRITEが残る場合はAPP側mountを遅延し、実書込みとTinyUSBの非同期完了処理が終わった後にだけ所有権をAPP側へ戻すこと。安全な取り外し完了時にdevice側の遅延書込みを残さないこと。
-- 最初のWRITE(10)ではFlash消去前にsensor taskとaudio taskへ休止要求を出して最大100 ms待つ。休止timeout時もWRITEを失敗させず診断を加算する。pending writeが0になってから1秒間新しいWRITEがなければ自動復帰し、安全な取り外しまたはdetach時はpending writeが0なら直ちに復帰する。復帰時はI2C、BMP581、IMUおよび推定器を再初期化し、新しい有効推定値が得られるまで音とBLE LK8EX1 Notifyを再開しない。
+- 最初のWRITE(10)では、TinyUSB event taskとは別の専用storage workerからFlash消去前にsensor taskとaudio taskへ休止要求を出して最大100 ms待つ。休止timeout時もWRITEを失敗させず診断を加算する。Wear Levelling実書込みと`tud_msc_async_io_done()`も同workerで実行し、TinyUSB event taskを休止待ちまたはFlash I/Oでblockしない。pending writeが0になってから1秒間新しいWRITEがなければ自動復帰し、安全な取り外しまたはdetach時はpending writeが0なら直ちに復帰する。復帰時はI2C、BMP581、IMUおよび推定器を再初期化し、新しい有効推定値が得られるまで音とBLE LK8EX1 Notifyを再開しない。
 - ストレージ作業モード中にSW1電源OFF要求が成立した場合は要求を保持し、pending writeが0となって作業モードを終了した時点から通常の15秒終了期限を開始する。作業モード中の時間は終了期限へ算入しない。高度停滞による自動電源OFFの計時は作業中に進めず、復帰時に観測windowをresetする。
 
 #### MSCファイルによるファームウェア更新
@@ -467,14 +468,11 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
     "sea_level_pressure_pa": 101325.0,
     "auto_power_off_minutes": 60,
     "filter_mode": "AUTO",
-    "bluetooth_battery_mode": "VOLTAGE",
+    "bluetooth_battery_mode": "PERCENT",
     "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
     "gps_send_interval_ms": 1000,
-    "i2c_reinit_error_count": 10,
-    "imu_gyro_calibration_samples": 200,
-    "imu_mahony_kp": 5.0,
-    "imu_mahony_ki": 0.05
+    "imu_gyro_calibration_samples": 200
   },
   "vario_parameter_sets": [
     {
@@ -489,7 +487,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 ```
 
 - 出力はUTF-8、BOMなし、2 space indent、LF改行、末尾改行ありの整形済みJSONとする。読込みではUTF-8 BOM、LFおよびCRLFを許容するが、JSON commentは許容しない。
-- top-levelには整数の `format_version`、共通11項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
+- top-levelには整数の `format_version`、共通8項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
 - version 1の規定構造だけを受理する。未知のparameter、誤った階層、項目不足、重複key、型違いまたは値域違反を含むファイルは全体を無効とし、自動変換しないこと。
 - `mc_parameters`および各セットの`parameters`には値だけを格納する。パラメータ名、型、単位、値域、既定値および相互関係は、本書の単一パラメータ表と対応する実装テーブルを正本とすること。
 - boolはJSON boolean、uint32は0以上の整数、floatは有限のJSON number、enumは定義済み名称のJSON stringとして表すこと。NaNおよび無限大を受理しないこと。
@@ -780,9 +778,10 @@ typedef struct {
 - 既定値は単一のテーブルで定義し、起動時とRESET時で共用する。
 - 型、最小値、最大値、相互関係を検証してから変更を反映する。
 - センサー・音声タスクは周期の先頭で必要な設定をローカルへコピーし、処理途中で設定が変化しないようにする。
-- 起動時に有効なversion 1の`setting.json`がある場合は、共通11項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
+- 起動時に有効なversion 1の`setting.json`がある場合は、共通8項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
 - consoleによる変更は `PARAM SAVE`が成功するまでRAMだけに保持し、再起動時は最後に正常保存されたファイルから再構成する。
 - 公開パラメータは本節の表に定義した項目だけとする。SW1音量、SW2シンク状態、SW3選択番号は専用NVSを正本とし、`PARAM LIST/GET/SET/RESET/SAVE`の対象外とする。
+- I2C連続エラーによるセンサ再初期化閾値は10回、Mahony姿勢フィルタのKpは5.0、Kiは0.05にファームウェアで固定し、`setting.json`および`PARAM`操作へ公開しない。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`を含むversion 1ファイルも未知のparameterとして全体を無効とする。
 
 公開するパラメータを次に示す。
 
@@ -791,10 +790,11 @@ typedef struct {
 | `sea_level_pressure_pa` | float | 101325 | 80000～110000 Pa |
 | `auto_power_off_minutes` | uint32 | 60 | 0～1440 min。`0`は無効 |
 | `filter_mode` | enum | `AUTO` | `AUTO` / `BARO_ONLY`。`AUTO`は有効なIMUを融合し、利用不可時は自動縮退 |
-| `i2c_reinit_error_count` | uint32 | 10 | 1～100 |
+| `bluetooth_battery_mode` | enum | `PERCENT` | `VOLTAGE` / `PERCENT` |
+| `bluetooth_tx_power` | enum | `LOW` | `MIN` / `LOW` / `NORMAL` / `HIGH` |
+| `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz |
+| `gps_send_interval_ms` | uint32 | 1000 | 200～10000 ms |
 | `imu_gyro_calibration_samples` | uint32 | 200 | 50～2000 samples |
-| `imu_mahony_kp` | float | 5.0 | 0～20 |
-| `imu_mahony_ki` | float | 0.05 | 0～5 |
 | `predictive_buzzer_enabled` | bool | 組込み定義 | 予測ブザーの有効／無効 |
 | `audio_climb_rate_average_s` | float | 1.0 | 0～10 s。`0`は平均化無効 |
 | `lift_start_mps` | float | 組込み定義 | `lift_end_mps <= lift_start_mps` |

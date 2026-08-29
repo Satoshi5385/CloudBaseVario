@@ -11,6 +11,8 @@
 #include "esp_vfs_fat.h"
 #include "esp_partition.h"
 #include "esp_memory_utils.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "soc/soc_caps.h"
 #include "sdkconfig.h"
 #include "vfs_fat_internal.h"
@@ -31,6 +33,9 @@ static const char *TAG = "tinyusb_msc_storage";
 
 #define MSC_STORAGE_MEM_ALIGN 4
 #define MSC_STORAGE_BUFFER_SIZE CONFIG_TINYUSB_MSC_BUFSIZE /*!< Size of the buffer, configured via menuconfig (MSC FIFO size) */
+#define MSC_STORAGE_WORKER_STACK_SIZE UINT32_C(4096)
+#define MSC_STORAGE_WORKER_PRIORITY (tskIDLE_PRIORITY + 5U)
+#define MSC_STORAGE_WORKER_NAME "tinyusb_msc_io"
 #define SCSI_CMD_SYNCHRONIZE_CACHE_10 0x35
 #define SCSI_CMD_SYNCHRONIZE_CACHE_16 0x91
 
@@ -78,6 +83,9 @@ typedef struct {
     tinyusb_msc_mount_point_t requested_mount_point; /*!< Latest ownership requested by attach/eject/detach. */
     bool mount_transition_pending;              /*!< Apply requested ownership after accepted writes drain. */
     bool host_io_enabled;                       /*!< Host read/write gate used during shutdown. */
+    TaskHandle_t write_worker_handle;            /*!< Worker that performs blocking medium writes. */
+    SemaphoreHandle_t write_worker_stopped;      /*!< Worker shutdown acknowledgement. */
+    bool write_worker_stop_requested;            /*!< Request an idle write worker to exit. */
     SemaphoreHandle_t mux_lock;                 /**< Mutex for storage operations */
 } tinyusb_msc_storage_s;
 
@@ -315,12 +323,11 @@ static inline esp_err_t msc_storage_write_sector(uint8_t lun, uint32_t lba, uint
  * write operations to the underlying storage. It writes data from the
  * `storage_buffer` stored within the `s_storage_handle`.
  *
- * @param param Pointer to the storage object containing the write parameters.
+ * @param storage Pointer to the storage object containing the write parameters.
  */
-static void tusb_write_func(void *param)
+static void msc_storage_process_write(msc_storage_obj_t *storage)
 {
-    assert(param); // Ensure storage is not NULL
-    msc_storage_obj_t *storage = (msc_storage_obj_t *)param;
+    assert(storage); // Ensure storage is not NULL
     const uint32_t completed_size = storage->storage_buffer.bufsize;
     tusb_msc_write_callback_t write_cb = NULL;
     void *write_arg = NULL;
@@ -402,6 +409,63 @@ static void tusb_write_func(void *param)
 }
 
 /**
+ * @brief Run blocking storage-mode preparation and medium writes outside the
+ * TinyUSB event task.
+ */
+static void msc_storage_write_worker_task(void *param)
+{
+    msc_storage_obj_t *storage = (msc_storage_obj_t *)param;
+
+    assert(storage != NULL);
+    for (;;) {
+        (void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (;;) {
+            bool stop_requested;
+            uint32_t pending_writes;
+
+            MSC_ENTER_CRITICAL();
+            stop_requested = storage->write_worker_stop_requested;
+            pending_writes = storage->deffered_writes;
+            MSC_EXIT_CRITICAL();
+
+            if (pending_writes != 0U) {
+                msc_storage_process_write(storage);
+                continue;
+            }
+            if (stop_requested) {
+                goto exit;
+            }
+            break;
+        }
+    }
+
+exit:
+    MSC_ENTER_CRITICAL();
+    storage->write_worker_handle = NULL;
+    MSC_EXIT_CRITICAL();
+    (void) xSemaphoreGive(storage->write_worker_stopped);
+    vTaskDelete(NULL);
+}
+
+static void msc_storage_stop_write_worker(msc_storage_obj_t *storage)
+{
+    TaskHandle_t worker_handle;
+
+    if (storage == NULL || storage->write_worker_stopped == NULL) {
+        return;
+    }
+    MSC_ENTER_CRITICAL();
+    worker_handle = storage->write_worker_handle;
+    storage->write_worker_stop_requested = true;
+    MSC_EXIT_CRITICAL();
+    if (worker_handle == NULL) {
+        return;
+    }
+    xTaskNotifyGive(worker_handle);
+    (void) xSemaphoreTake(storage->write_worker_stopped, portMAX_DELAY);
+}
+
+/**
  * @brief Write a sector to the storage medium using deferred execution.
  *
  * This function copies the data to be written into an internal buffer and
@@ -421,6 +485,7 @@ static void tusb_write_func(void *param)
 static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t lba, uint32_t offset, size_t size, const void *src)
 {
     msc_storage_obj_t *storage = NULL;
+    TaskHandle_t worker_handle = NULL;
 
     MSC_ENTER_CRITICAL();
     bool found = _msc_storage_get_by_lun(lun, &storage);
@@ -454,15 +519,18 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
 
     // Increment the deferred writes counter
     MSC_ENTER_CRITICAL();
-    if (!storage->host_io_enabled) {
+    if (!storage->host_io_enabled || storage->deffered_writes != 0U ||
+        storage->write_worker_stop_requested ||
+        storage->write_worker_handle == NULL) {
         MSC_EXIT_CRITICAL();
         return ESP_ERR_INVALID_STATE;
     }
     storage->deffered_writes++;
+    worker_handle = storage->write_worker_handle;
     MSC_EXIT_CRITICAL();
 
-    // Defer execution of the write to the TinyUSB task
-    usbd_defer_func(tusb_write_func, (void *)storage, false);
+    // Wake the dedicated worker; never block the TinyUSB event task on flash.
+    xTaskNotifyGive(worker_handle);
 
     return ESP_OK;
 }
@@ -808,6 +876,7 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
                                  msc_storage_obj_t **storage_hdl)
 {
     esp_err_t ret;
+    BaseType_t task_created;
 
     // Create mutex for storage operations
     SemaphoreHandle_t mux_lock = xSemaphoreCreateMutex();
@@ -829,6 +898,12 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
     storage_obj->mount_transition_pending = false;
     storage_obj->host_io_enabled =
         config->mount_point == TINYUSB_MSC_STORAGE_MOUNT_USB;
+    storage_obj->write_worker_stopped = xSemaphoreCreateBinary();
+    if (storage_obj->write_worker_stopped == NULL) {
+        ESP_LOGE(TAG, "Failed to create MSC write worker acknowledgement");
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
     // In case the user does not set mount_config.max_files
     // and for backward compatibility with versions <1.4.2
     // max_files is set to 2
@@ -859,6 +934,16 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
     storage_obj->sector_count = storage_info.total_sectors;
     storage_obj->sector_size = storage_info.sector_size;
 
+    task_created = xTaskCreate(
+        msc_storage_write_worker_task, MSC_STORAGE_WORKER_NAME,
+        MSC_STORAGE_WORKER_STACK_SIZE, storage_obj,
+        MSC_STORAGE_WORKER_PRIORITY, &storage_obj->write_worker_handle);
+    if (task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create MSC write worker");
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
+
     ESP_LOGD(TAG, "Storage type: , sectors count: %"PRIu32", sector size: %"PRIu32"",
              storage_obj->sector_count,
              storage_obj->sector_size);
@@ -867,6 +952,10 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
     return ESP_OK;
 fail:
     if (storage_obj) {
+        msc_storage_stop_write_worker(storage_obj);
+        if (storage_obj->write_worker_stopped != NULL) {
+            vSemaphoreDelete(storage_obj->write_worker_stopped);
+        }
         heap_caps_free(storage_obj);
     }
     if (mux_lock) {
@@ -884,8 +973,12 @@ fail:
  */
 static void msc_storage_delete(msc_storage_obj_t *storage)
 {
+    msc_storage_stop_write_worker(storage);
     storage->medium = NULL;
 
+    if (storage->write_worker_stopped) {
+        vSemaphoreDelete(storage->write_worker_stopped);
+    }
     if (storage->mux_lock) {
         vSemaphoreDelete(storage->mux_lock);
     }
@@ -1195,6 +1288,8 @@ esp_err_t tinyusb_msc_delete_storage(tinyusb_msc_storage_handle_t handle)
     MSC_CHECK_ON_CRITICAL(storage->deffered_writes == 0, ESP_ERR_INVALID_STATE);
     MSC_EXIT_CRITICAL();
 
+    msc_storage_stop_write_worker(storage);
+
     if (storage->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
         // Unmount the storage if it is mounted to application
         ESP_ERROR_CHECK(msc_storage_unmount(storage));
@@ -1499,7 +1594,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     /*
      * The deferred flash write owns the single storage buffer. TinyUSB must
      * not accept another transfer or report command completion until
-     * tusb_write_func() calls tud_msc_async_io_done().
+     * The dedicated storage worker calls tud_msc_async_io_done().
      */
     return TUD_MSC_RET_ASYNC;
 

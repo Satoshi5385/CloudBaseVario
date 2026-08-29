@@ -27,6 +27,8 @@
 #define IMU_KI_VIBRATION_MAX_G 0.01f
 #define IMU_KI_STATIONARY_TIME_US INT64_C(500000)
 #define IMU_INTEGRAL_FEEDBACK_MAX_RADPS (5.0f * IMU_DEGREES_TO_RADIANS)
+#define IMU_MAHONY_KP 5.0f
+#define IMU_MAHONY_KI 0.05f
 
 static bool vector_is_finite(const float vector[IMU_AXIS_COUNT]) {
     if (vector == NULL) {
@@ -360,7 +362,7 @@ static bool normalize_quaternion(imu_fusion_t *fusion) {
 }
 
 static bool update_attitude(imu_fusion_t *fusion, const imu_sample_t *sample,
-                            const app_config_t *config, float accel_norm_g) {
+                            float accel_norm_g) {
     float gyro[IMU_AXIS_COUNT] = {0};
     float accel[IMU_AXIS_COUNT] = {0};
     float half_gravity[IMU_AXIS_COUNT] = {0};
@@ -405,9 +407,9 @@ static bool update_attitude(imu_fusion_t *fusion, const imu_sample_t *sample,
     fusion->confidence =
         fminf(accel_confidence,
               fminf(gyro_confidence, vibration_confidence));
-    fusion->kp_effective = config->imu_mahony_kp * fusion->confidence;
+    fusion->kp_effective = IMU_MAHONY_KP * fusion->confidence;
 
-    if (config->imu_mahony_ki > 0.0f &&
+    if (IMU_MAHONY_KI > 0.0f &&
         fabsf(accel_norm_g - 1.0f) <= IMU_KI_ACCEL_ERROR_MAX_G &&
         gyro_norm_radps <= IMU_KI_GYRO_MAX_RADPS &&
         fusion->vibration_rms_g <= IMU_KI_VIBRATION_MAX_G) {
@@ -423,7 +425,7 @@ static bool update_attitude(imu_fusion_t *fusion, const imu_sample_t *sample,
     }
     fusion->ki_effective = 0.0f;
     if (fusion->ki_active) {
-        fusion->ki_effective = config->imu_mahony_ki * fusion->confidence;
+        fusion->ki_effective = IMU_MAHONY_KI * fusion->confidence;
     }
 
     if (accel_norm_g <= 0.0f || !isfinite(accel_norm_g)) {
@@ -661,7 +663,7 @@ bool imu_fusion_update(imu_fusion_t *fusion, const imu_sample_t *sample,
         return true;
     }
 
-    if (!update_attitude(fusion, sample, config, output->accel_norm_g)) {
+    if (!update_attitude(fusion, sample, output->accel_norm_g)) {
         imu_fusion_reset(fusion);
         return false;
     }

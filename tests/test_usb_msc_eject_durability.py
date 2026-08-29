@@ -22,11 +22,11 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 
 
 class UsbMscEjectDurabilityTests(unittest.TestCase):
-    def test_write_completion_queues_deferred_ownership_transition(self) -> None:
+    def test_write_runs_on_worker_and_queues_ownership_transition(self) -> None:
         write = function_body(
             MSC,
-            "static void tusb_write_func(void *param)",
-            "static inline esp_err_t msc_storage_write_sector_deferred",
+            "static void msc_storage_process_write(",
+            "static void msc_storage_write_worker_task",
         )
         self.assertIn("storage->deffered_writes--;", write)
         self.assertIn("tud_msc_async_io_done", write)
@@ -35,6 +35,40 @@ class UsbMscEjectDurabilityTests(unittest.TestCase):
             write.index("tud_msc_async_io_done"),
             write.index("usbd_defer_func(tusb_apply_requested_mount"),
         )
+
+        worker = function_body(
+            MSC,
+            "static void msc_storage_write_worker_task",
+            "static void msc_storage_stop_write_worker",
+        )
+        self.assertIn("ulTaskNotifyTake", worker)
+        self.assertIn("msc_storage_process_write(storage);", worker)
+
+        submit = function_body(
+            MSC,
+            "static inline esp_err_t msc_storage_write_sector_deferred",
+            "static esp_err_t vfs_fat_format",
+        )
+        self.assertIn("xTaskNotifyGive(worker_handle);", submit)
+        self.assertNotIn("usbd_defer_func", submit)
+        self.assertIn("storage->deffered_writes != 0U", submit)
+
+    def test_write_worker_lifecycle_is_owned_by_storage(self) -> None:
+        create = function_body(
+            MSC,
+            "static esp_err_t msc_storage_new(",
+            "/**\n * @brief Delete an MSC storage object",
+        )
+        delete = function_body(
+            MSC,
+            "static void msc_storage_delete",
+            "/**\n * @brief Install the MSC driver",
+        )
+        self.assertIn("xTaskCreate(", create)
+        self.assertIn("msc_storage_write_worker_task", create)
+        self.assertIn("msc_storage_stop_write_worker(storage_obj);", create)
+        self.assertIn("msc_storage_stop_write_worker(storage);", delete)
+        self.assertIn("vSemaphoreDelete(storage->write_worker_stopped)", delete)
 
     def test_mount_request_freezes_host_io_and_defers_while_pending(self) -> None:
         request = function_body(
@@ -86,7 +120,8 @@ class UsbMscEjectDurabilityTests(unittest.TestCase):
     def test_spec_requires_drain_before_app_mount(self) -> None:
         self.assertIn("受理済みWRITEが残る場合はAPP側mountを遅延", SPEC)
         self.assertIn("非同期完了処理が終わった後にだけ所有権をAPP側へ戻す", SPEC)
-        self.assertIn("defer application mounting", LOCAL_PATCH)
+        self.assertIn("TinyUSB event taskとは別の専用storage worker", SPEC)
+        self.assertIn("defer application\nmounting", LOCAL_PATCH)
 
 
 if __name__ == "__main__":

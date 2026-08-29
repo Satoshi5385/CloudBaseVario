@@ -77,6 +77,7 @@
 #define IMU_STALE_TIMEOUT_US INT64_C(100000)
 #define SENSOR_IDLE_WAKE_US INT64_C(100000)
 #define SENSOR_RETRY_INTERVAL_US ((int64_t) CONFIG_CBV_SENSOR_RETRY_INTERVAL_MS * INT64_C(1000))
+#define SENSOR_CONSECUTIVE_ERROR_LIMIT UINT32_C(10)
 #define IMU_CALIBRATION_SAVE_RETRY_US INT64_C(2000000)
 
 typedef system_policy_button_t button_debounce_t;
@@ -865,9 +866,7 @@ static bool imu_configs_match(const app_config_t *left,
         return false;
     }
     return left->imu_gyro_calibration_samples ==
-               right->imu_gyro_calibration_samples &&
-           left->imu_mahony_kp == right->imu_mahony_kp &&
-           left->imu_mahony_ki == right->imu_mahony_ki;
+           right->imu_gyro_calibration_samples;
 }
 
 static void sensor_restart_imu_fusion(sensor_task_state_t *state,
@@ -1072,7 +1071,7 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     imu_sample_t board_sample = {0};
     imu_fusion_output_t fusion_output = {0};
     app_config_t config = {0};
-    uint32_t error_limit = CONFIG_CBV_SENSOR_CONSECUTIVE_ERROR_LIMIT;
+    uint32_t error_limit = SENSOR_CONSECUTIVE_ERROR_LIMIT;
     const imu_accel_calibration_t *accel_calibration = NULL;
     esp_err_t ret = ESP_OK;
 
@@ -1087,9 +1086,6 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     }
     if (ret != ESP_OK) {
         sensor_record_imu_error(state, ret);
-        if (app_resources_copy_config(&config)) {
-            error_limit = config.i2c_reinit_error_count;
-        }
         if (state->imu_consecutive_errors >= error_limit) {
             ESP_LOGW(TAG,
                      "HXY IMU offline after %" PRIu32
@@ -1229,7 +1225,7 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
     app_config_t config = {0};
     vario_estimate_t estimate = {0};
     int64_t periods_elapsed = 0;
-    uint32_t error_limit = CONFIG_CBV_SENSOR_CONSECUTIVE_ERROR_LIMIT;
+    uint32_t error_limit = SENSOR_CONSECUTIVE_ERROR_LIMIT;
     esp_err_t ret = ESP_OK;
 
     if (state == NULL || !state->bmp_ready || now_us < state->next_bmp_deadline_us) {
@@ -1251,9 +1247,6 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
     ret = bmp581_read_sample(&sample);
     if (ret != ESP_OK) {
         sensor_record_bmp_error(state, ret, true);
-        if (app_resources_copy_config(&config)) {
-            error_limit = config.i2c_reinit_error_count;
-        }
         if (state->bmp_consecutive_errors >= error_limit) {
             ESP_LOGW(TAG, "BMP581 offline after %" PRIu32 " consecutive errors",
                      state->bmp_consecutive_errors);

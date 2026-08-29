@@ -6,6 +6,7 @@
 - `vario_sound_simulator/`: standalone sound simulator
 - `firmware_signing/`: owner-signing helpers; keep generated private keys outside the repository
 - `firmware_update/`: CMake helper for unsigned OTA payload validation
+- `verify_config_fat.py`: build helper that verifies config FAT BPB and Safety WL capacity
 
 ## CloudBaseVario Monitor
 
@@ -93,11 +94,11 @@ python -m venv .venv
 
 ## JSONの読込みと保存
 
-- `New`は共通11項目と番号1の音関連22項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
+- `New`は共通8項目と番号1の音関連22項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
 - `Open...`はfirmwareと同じversion 1の共通／セット分離構造、全項目、型、範囲および項目間関係を検証します。`Parameter set`から編集対象番号を選択できます。旧ファイル名、旧version、旧キーおよび全項目を各セットへ格納する旧ドラフトは読み込みません。
 - `Save`は確認後に現在のファイルを上書きし、`Save As...`は任意のJSONファイルへ保存します。
-- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通11項目と未選択セットを維持し、選択セットの音関連22項目だけをGUIの値で置き換えます。
-- version 1～6、旧ボード軸項目、および旧 `audio_enabled`／`audio_amp_mode`／`sink_enabled` を含むファイルは現行firmwareと同様に拒否し、自動移行しません。
+- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通8項目と未選択セットを維持し、選択セットの音関連22項目だけをGUIの値で置き換えます。
+- version 1～6、旧ボード軸項目、旧 `i2c_reinit_error_count`／`imu_mahony_kp`／`imu_mahony_ki`、および旧 `audio_enabled`／`audio_amp_mode`／`sink_enabled` を含むファイルは現行firmwareと同様に拒否し、自動移行しません。
 - 一時ファイルを書いて再読込み検証してから置換するため、書込みまたは検証に失敗した場合は既存ファイルを変更しません。
 
 ## 音の再現範囲

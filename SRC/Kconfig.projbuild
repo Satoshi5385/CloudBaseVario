@@ -8,13 +8,4 @@ menu "CloudBaseVario application"
             Retry an unavailable BMP581 or HXY IMU without
             blocking the sensor task between attempts.
 
-    config CBV_SENSOR_CONSECUTIVE_ERROR_LIMIT
-        int "Consecutive sensor I2C error limit"
-        range 1 100
-        default 10
-        help
-            Reinitialize the affected BMP581 or HXY IMU after this many
-            consecutive read failures. A timeout can also recreate the
-            shared I2C bus.
-
 endmenu

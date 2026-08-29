@@ -81,4 +81,59 @@ target_compile_definitions(
 # subsequent application-only flashes then preserve setting.json.
 set(config_fat_seed_dir "${CMAKE_CURRENT_BINARY_DIR}/config_fat_seed")
 file(MAKE_DIRECTORY "${config_fat_seed_dir}")
-fatfs_create_spiflash_image(config "${config_fat_seed_dir}")
+
+if(NOT CONFIG_FATFS_SECTOR_512 OR
+   NOT CONFIG_WL_SECTOR_SIZE_512 OR
+   NOT CONFIG_WL_SECTOR_MODE_SAFE)
+    message(FATAL_ERROR
+        "config FAT generation requires 512-byte FAT/WL sectors and Safety mode")
+endif()
+
+idf_build_get_property(config_fat_idf_path IDF_PATH)
+idf_build_get_property(config_fat_python PYTHON)
+partition_table_get_partition_info(
+    config_fat_partition_size "--partition-name config" "size")
+partition_table_get_partition_info(
+    config_fat_partition_offset "--partition-name config" "offset")
+if(NOT config_fat_partition_size OR NOT config_fat_partition_offset)
+    message(FATAL_ERROR "config FAT partition size and offset are required")
+endif()
+
+set(config_fat_image "${CMAKE_BINARY_DIR}/config.bin")
+set(config_fat_generator
+    "${config_fat_idf_path}/components/fatfs/wl_fatfsgen.py")
+set(config_fat_validator
+    "${CMAKE_SOURCE_DIR}/tools/verify_config_fat.py")
+set(config_fat_long_names_option)
+if(CONFIG_FATFS_LFN_HEAP OR CONFIG_FATFS_LFN_STACK)
+    list(APPEND config_fat_long_names_option --long_name_support)
+endif()
+
+add_custom_target(
+    fatfs_config_bin ALL
+    COMMAND "${config_fat_python}" "${config_fat_generator}"
+        "${config_fat_seed_dir}"
+        ${config_fat_long_names_option}
+        --use_default_datetime
+        --partition_size "${config_fat_partition_size}"
+        --output_file "${config_fat_image}"
+        --sector_size 512
+        --wl_mode safe
+    COMMAND "${config_fat_python}" "${config_fat_validator}"
+        --image "${config_fat_image}"
+        --partition-size "${config_fat_partition_size}"
+    COMMENT
+        "Generating and verifying Safety WL config FAT at ${config_fat_partition_offset}"
+    VERBATIM
+)
+set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY
+    ADDITIONAL_CLEAN_FILES "${config_fat_image}")
+
+idf_component_get_property(config_fat_flash_args esptool_py FLASH_ARGS)
+idf_component_get_property(config_fat_flash_sub_args esptool_py FLASH_SUB_ARGS)
+esptool_py_flash_target(
+    config-flash "${config_fat_flash_args}"
+    "${config_fat_flash_sub_args}" ALWAYS_PLAINTEXT)
+esptool_py_flash_to_partition(
+    config-flash config "${config_fat_image}")
+add_dependencies(config-flash fatfs_config_bin)

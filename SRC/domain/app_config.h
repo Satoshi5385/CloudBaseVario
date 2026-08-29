@@ -29,10 +29,7 @@ typedef struct {
     app_bluetooth_tx_power_t bluetooth_tx_power;
     uint32_t bluetooth_notify_rate_hz;
     uint32_t gps_send_interval_ms;
-    uint32_t i2c_reinit_error_count;
     uint32_t imu_gyro_calibration_samples;
-    float imu_mahony_kp;
-    float imu_mahony_ki;
     bool audio_enabled;
     bool sink_enabled;
     bool predictive_buzzer_enabled;

@@ -211,7 +211,7 @@ IMU 行の主な確認項目は次のとおりです。
 | ボード固定のIMU軸マップ | 水平校正時の基板姿勢判定と、期待する +1 g のセンサ軸を決めます。offset 自体はセンサ座標で保存されます。 |
 | `imu_gyro_*_source`, `imu_gyro_*_sign` | 水平校正中の静止判定に使う基板座標ジャイロを決めます。 |
 | `imu_gyro_calibration_samples` | `mc_data.json` 保存後の、起動ごとのジャイロ bias・初期姿勢校正時間を決めます。model 固定の加速度校正サンプル数 800 には影響しません。 |
-| `imu_mahony_kp`, `imu_mahony_ki` | 保存済み offset の内容には影響せず、その後の姿勢フィルタ gain を決めます。 |
+| ファームウェア固定のMahony gain | Kp=5.0、Ki=0.05で、保存済み offset の内容には影響しません。 |
 | `filter_mode` | 保存済み offset の内容には影響せず、校正後の気圧・IMU 融合を使うかを決めます。 |
 
 ## 11. 実装上の正本
