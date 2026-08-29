@@ -70,6 +70,7 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
         "enum", "LOW", choices=("MIN", "LOW", "NORMAL", "HIGH")
     ),
     "bluetooth_notify_rate_hz": ParameterSpec("uint", 10, 1.0, 50.0),
+    "gps_send_interval_ms": ParameterSpec("uint", 1000, 200.0, 10000.0),
     "i2c_reinit_error_count": ParameterSpec("uint", 10, 1.0, 100.0),
     "imu_gyro_calibration_samples": ParameterSpec("uint", 200, 50.0, 2000.0),
     "imu_mahony_kp": ParameterSpec("float", 5.0, 0.0, 20.0),

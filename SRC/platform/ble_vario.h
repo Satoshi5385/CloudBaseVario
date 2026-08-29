@@ -1,9 +1,11 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "domain/app_types.h"
+#include "domain/ble_nus_tx.h"
 #include "domain/lk8ex1.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -14,11 +16,32 @@
 typedef struct {
     uint32_t sentence_count;
     uint32_t dropped_sentence_count;
+    uint32_t gps_pair_count;
+    uint32_t gps_dropped_pair_count;
+    uint32_t fragment_attempt_count;
+    uint32_t fragment_accepted_count;
+    uint32_t fragment_error_count;
+    uint32_t lk8ex1_coalesced_count;
+    uint32_t gps_coalesced_count;
+    uint32_t partial_abort_count;
+    uint32_t stream_resync_count;
+    uint32_t link_generation;
+    uint32_t connection_interval_us;
+    uint16_t att_mtu;
     int32_t last_notify_error;
     int64_t last_notify_success_us;
     bool connected;
     bool subscribed;
 } ble_vario_diagnostics_t;
+
+typedef struct {
+    uint32_t generation;
+    uint32_t connection_interval_us;
+    uint16_t att_mtu;
+    uint16_t payload_capacity;
+    bool connected;
+    bool subscribed;
+} ble_vario_nus_link_t;
 
 typedef lk8ex1_fields_t ble_vario_lk8ex1_fields_t;
 
@@ -83,15 +106,29 @@ bool ble_vario_format_lk8ex1_fields(
     app_bluetooth_battery_mode_t battery_mode,
     ble_vario_lk8ex1_fields_t *fields);
 
+/** Copy the current generation-checked NUS link parameters. */
+void ble_vario_get_nus_link(ble_vario_nus_link_t *link);
+
 /**
- * @brief Format and send one LK8EX1 sentence, fragmented at ATT_MTU-3.
- * @return ESP_OK when sent; ESP_ERR_INVALID_STATE when not connected/subscribed;
- *         ESP_ERR_NOT_FOUND when both measurement fields are invalid; otherwise
- *         ESP_FAIL for a dropped NimBLE notification.
+ * @brief Submit one NUS fragment for the specified link generation.
+ * @param[in] generation Link generation returned by ble_vario_get_nus_link.
+ * @param[in] data Fragment bytes whose length is at most ATT_MTU-3.
+ * @param[in] length Number of fragment bytes.
+ * @param[out] nimble_error Raw NimBLE result, or zero when accepted.
+ * @return ESP_OK when accepted, ESP_ERR_NO_MEM for congestion,
+ *         ESP_ERR_INVALID_STATE for a stale/unusable link, otherwise ESP_FAIL.
  */
-esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
-                                  const system_snapshot_t *system,
-                                  app_bluetooth_battery_mode_t battery_mode);
+esp_err_t ble_vario_notify_nus_fragment(uint32_t generation,
+                                        const uint8_t *data, size_t length,
+                                        int32_t *nimble_error);
+
+/** Request termination of the still-current NUS connection. */
+esp_err_t ble_vario_reset_nus_connection(uint32_t generation);
+
+/** Publish scheduler counters and the last complete-transaction timestamp. */
+void ble_vario_publish_nus_tx_diagnostics(
+    const ble_nus_tx_statistics_t *statistics,
+    int64_t last_notify_success_us);
 
 /** Copy notification counters without blocking the NimBLE host. */
 void ble_vario_get_diagnostics(ble_vario_diagnostics_t *diagnostics);

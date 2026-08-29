@@ -7,6 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 STARTUP = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
 PARTITIONS = ROOT / "partitions.csv"
 USB = (ROOT / "SRC/platform/usb_device_service.c").read_text(encoding="utf-8")
+IDENTITY_STORAGE = (ROOT / "SRC/platform/board_identity_storage.c").read_text(
+    encoding="utf-8"
+)
 
 
 class BoardIdentityPolicyTests(unittest.TestCase):
@@ -33,7 +36,18 @@ class BoardIdentityPolicyTests(unittest.TestCase):
         self.assertIn("board_identity_validate(identity)", USB)
         self.assertNotIn("ESP_MAC_WIFI_STA", USB)
 
+    def test_schema_one_requires_the_fourth_gps_key(self) -> None:
+        self.assertIn('#define BOARD_DATA_KEY_GPS_INSTALLED "gps_inst"', IDENTITY_STORAGE)
+        self.assertIn("#define BOARD_DATA_EXPECTED_KEY_COUNT 4U", IDENTITY_STORAGE)
+        missing_key = IDENTITY_STORAGE.index(
+            "if (result == ESP_ERR_NVS_NOT_FOUND)",
+            IDENTITY_STORAGE.index("nvs_close(handle);"),
+        )
+        invalid_return = IDENTITY_STORAGE.index(
+            "return BOARD_IDENTITY_LOAD_INVALID;", missing_key
+        )
+        self.assertLess(missing_key, invalid_return)
+
 
 if __name__ == "__main__":
     unittest.main()
-

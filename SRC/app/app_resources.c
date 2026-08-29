@@ -17,6 +17,7 @@ static QueueHandle_t audio_queue = NULL;
 static QueueHandle_t button_sound_queue = NULL;
 static QueueHandle_t diagnostic_queue = NULL;
 static SemaphoreHandle_t vario_mutex = NULL;
+static SemaphoreHandle_t gps_mutex = NULL;
 static SemaphoreHandle_t system_mutex = NULL;
 static SemaphoreHandle_t config_mutex = NULL;
 static SemaphoreHandle_t debug_mutex = NULL;
@@ -24,6 +25,7 @@ static EventGroupHandle_t app_event_group = NULL;
 
 /* Complete latest-value snapshots protected by their respective mutexes. */
 static vario_result_t latest_vario;
+static gps_snapshot_t latest_gps;
 static imu_diagnostics_t latest_imu_diagnostics;
 static system_snapshot_t latest_system;
 static app_config_profiles_t latest_profiles;
@@ -56,6 +58,10 @@ static void app_resources_release_partial(void) {
         vSemaphoreDelete(vario_mutex);
         vario_mutex = NULL;
     }
+    if (gps_mutex != NULL) {
+        vSemaphoreDelete(gps_mutex);
+        gps_mutex = NULL;
+    }
     if (system_mutex != NULL) {
         vSemaphoreDelete(system_mutex);
         system_mutex = NULL;
@@ -76,6 +82,7 @@ static void app_resources_release_partial(void) {
 
 esp_err_t app_resources_init(void) {
     memset(&latest_vario, 0, sizeof(latest_vario));
+    memset(&latest_gps, 0, sizeof(latest_gps));
     memset(&latest_imu_diagnostics, 0, sizeof(latest_imu_diagnostics));
     memset(&latest_system, 0, sizeof(latest_system));
     app_config_profiles_set_defaults(&latest_profiles);
@@ -88,13 +95,14 @@ esp_err_t app_resources_init(void) {
                                       sizeof(audio_notification_request_t));
     diagnostic_queue = xQueueCreate(DIAGNOSTIC_QUEUE_LENGTH, sizeof(diagnostic_event_t));
     vario_mutex = xSemaphoreCreateMutex();
+    gps_mutex = xSemaphoreCreateMutex();
     system_mutex = xSemaphoreCreateMutex();
     config_mutex = xSemaphoreCreateMutex();
     debug_mutex = xSemaphoreCreateMutex();
     app_event_group = xEventGroupCreate();
 
     if (audio_queue == NULL || button_sound_queue == NULL || diagnostic_queue == NULL ||
-        vario_mutex == NULL || system_mutex == NULL || config_mutex == NULL ||
+        vario_mutex == NULL || gps_mutex == NULL || system_mutex == NULL ||
         debug_mutex == NULL || app_event_group == NULL) {
         app_resources_release_partial();
         return ESP_ERR_NO_MEM;
@@ -150,6 +158,28 @@ bool app_resources_copy_vario(vario_result_t *result) {
     }
     *result = latest_vario;
     (void) xSemaphoreGive(vario_mutex);
+    return true;
+}
+
+bool app_resources_publish_gps(const gps_snapshot_t *snapshot) {
+    if (snapshot == NULL || gps_mutex == NULL ||
+        xSemaphoreTake(gps_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    latest_gps = *snapshot;
+    (void) xSemaphoreGive(gps_mutex);
+    return true;
+}
+
+bool app_resources_copy_gps(gps_snapshot_t *snapshot) {
+    if (snapshot == NULL || gps_mutex == NULL ||
+        xSemaphoreTake(gps_mutex,
+                       pdMS_TO_TICKS(SNAPSHOT_MUTEX_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+    *snapshot = latest_gps;
+    (void) xSemaphoreGive(gps_mutex);
     return true;
 }
 

@@ -48,6 +48,7 @@
 #define AUDIO_EVALUATION_PERIOD_MS UINT32_C(10)
 #define SYSTEM_SAMPLE_PERIOD_MS SYSTEM_POLICY_SAMPLE_PERIOD_MS
 #define SERIAL_MONITOR_PERIOD_US INT64_C(100000)
+#define GPS_MONITOR_HEARTBEAT_US INT64_C(1000000)
 #define BATTERY_SAMPLE_PERIOD_MS UINT32_C(100)
 #define POWER_OFF_HOLD_MS SYSTEM_POLICY_POWER_OFF_HOLD_MS
 #define IMU_CALIBRATION_SKIP_HOLD_MS SYSTEM_POLICY_IMU_SKIP_HOLD_MS
@@ -2564,6 +2565,60 @@ static bool console_write_monitor_line(void) {
         serial_monitor_drop_count);
 }
 
+static bool console_write_gps_monitor_line(
+    const gps_snapshot_t *gps, const app_config_t *config,
+    const ble_vario_diagnostics_t *ble, int64_t now_us) {
+    int64_t age_ms = -1;
+    const char *utc = "-";
+
+    if (gps->last_receive_us > 0 && now_us >= gps->last_receive_us) {
+        age_ms = (now_us - gps->last_receive_us) / 1000;
+    }
+    if (gps->utc_valid) {
+        utc = gps->utc;
+    }
+    return console_writef(
+        "GPS installed=%d identified=%d communicating=%d fix=%d"
+        " utc_valid=%d position_valid=%d altitude_valid=%d"
+        " satellites_valid=%d hdop_valid=%d speed_valid=%d"
+        " course_valid=%d baud=%" PRIu32 " interval_ms=%" PRIu32
+        " sequence=%" PRIu32 " utc=%s latitude_deg=%.7f"
+        " longitude_deg=%.7f altitude_m=%.2f satellites=%u"
+        " hdop=%.2f speed_kmh=%.2f course_deg=%.2f"
+        " received=%" PRIu32 " invalid=%" PRIu32
+        " updates=%" PRIu32 " retries=%" PRIu32
+        " sent=%" PRIu32 " dropped=%" PRIu32
+        " age_ms=%" PRId64 " last_error=%s"
+        " last_error_code=%" PRId32 "\r\n",
+        gps->installed, gps->identified, gps->communicating,
+        gps->fix_valid, gps->utc_valid, gps->position_valid,
+        gps->altitude_valid, gps->satellites_valid, gps->hdop_valid,
+        gps->speed_valid, gps->course_valid, gps->baud_rate,
+        config->gps_send_interval_ms, gps->sequence, utc,
+        gps->latitude_deg, gps->longitude_deg, gps->altitude_m,
+        (unsigned int) gps->satellites, gps->hdop, gps->speed_kmh,
+        gps->course_deg, gps->received_sentence_count,
+        gps->invalid_sentence_count, gps->paired_update_count,
+        gps->retry_count, ble->gps_pair_count,
+        ble->gps_dropped_pair_count, age_ms,
+        esp_err_to_name((esp_err_t) gps->last_error), gps->last_error);
+}
+
+static bool gps_monitor_changed(
+    const gps_snapshot_t *gps, const gps_snapshot_t *previous_gps,
+    const app_config_t *config, uint32_t previous_interval_ms,
+    const ble_vario_diagnostics_t *ble, uint32_t previous_sent,
+    uint32_t previous_dropped, bool previous_valid) {
+    if (!previous_valid ||
+        memcmp(gps, previous_gps, sizeof(*gps)) != 0 ||
+        config->gps_send_interval_ms != previous_interval_ms ||
+        ble->gps_pair_count != previous_sent ||
+        ble->gps_dropped_pair_count != previous_dropped) {
+        return true;
+    }
+    return false;
+}
+
 static void console_print_board_info(void) {
     const board_identity_t *identity = board_active_identity();
     const board_descriptor_t *descriptor = board_active_descriptor();
@@ -2577,6 +2632,7 @@ static void console_print_board_info(void) {
     firmware_metadata_t firmware = {0};
     uint8_t schema = 0U;
     uint16_t board_id = 0U;
+    uint8_t gps_installed = 0U;
 
     if (identity != NULL && descriptor != NULL &&
         board_identity_validate(identity)) {
@@ -2586,6 +2642,7 @@ static void console_print_board_info(void) {
         code = descriptor->code;
         model = descriptor->model;
         serial = identity->serial;
+        gps_installed = identity->gps_installed;
     }
     if (app != NULL) {
         project = app->project_name;
@@ -2597,10 +2654,11 @@ static void console_print_board_info(void) {
     (void) esp_read_mac(mac, ESP_MAC_WIFI_STA);
     console_writef(
         "BOARD status=%s schema=%u id=0x%04x code=%s model=%s "
-        "serial=%s mac=%02X%02X%02X%02X%02X%02X "
+        "serial=%s gps_installed=%u mac=%02X%02X%02X%02X%02X%02X "
         "firmware_project=%s firmware_version=%s firmware_hash=%s\r\n",
         status, (unsigned int) schema, (unsigned int) board_id,
-        code, model, serial, mac[0], mac[1], mac[2], mac[3], mac[4],
+        code, model, serial, (unsigned int) gps_installed,
+        mac[0], mac[1], mac[2], mac[3], mac[4],
         mac[5], project, firmware.version, firmware.git_hash);
 }
 
@@ -2611,6 +2669,7 @@ static void console_diag_status(void) {
     usb_device_diagnostics_t usb = {0};
     firmware_update_diagnostics_t update = {0};
     ble_vario_diagnostics_t ble = {0};
+    gps_snapshot_t gps = {0};
     app_power_diagnostics_t power = {0};
     switch_preferences_diagnostics_t switch_diagnostics = {0};
     watchdog_diagnostics_t watchdog = {0};
@@ -2630,6 +2689,7 @@ static void console_diag_status(void) {
     usb_device_get_diagnostics(&usb);
     firmware_update_get_diagnostics(&update);
     ble_vario_get_diagnostics(&ble);
+    (void) app_resources_copy_gps(&gps);
     app_power_get_diagnostics(&power);
     switch_preferences_get_diagnostics(&switch_diagnostics);
     watchdog_service_get_diagnostics(&watchdog);
@@ -2825,12 +2885,40 @@ static void console_diag_status(void) {
         watchdog.registration_failure_count,
         watchdog.feed_failure_count, watchdog.recovery_record_valid);
     console_writef(
+        "GPS installed=%d identified=%d communicating=%d fix=%d"
+        " baud=%" PRIu32 " sequence=%" PRIu32
+        " received=%" PRIu32 " invalid=%" PRIu32
+        " updates=%" PRIu32 " retries=%" PRIu32
+        " sent=%" PRIu32 " dropped=%" PRIu32
+        " last_receive_us=%" PRId64 " last_error=%s(%" PRId32 ")\r\n",
+        gps.installed, gps.identified, gps.communicating, gps.fix_valid,
+        gps.baud_rate, gps.sequence, gps.received_sentence_count,
+        gps.invalid_sentence_count, gps.paired_update_count, gps.retry_count,
+        ble.gps_pair_count, ble.gps_dropped_pair_count, gps.last_receive_us,
+        esp_err_to_name((esp_err_t) gps.last_error), gps.last_error);
+    console_writef(
         "BLE connected=%d subscribed=%d notify=%d active=%d"
         " sent=%" PRIu32 " dropped=%" PRIu32
+        " gps_sent=%" PRIu32 " gps_dropped=%" PRIu32
+        " mtu=%u connection_interval_us=%" PRIu32
+        " generation=%" PRIu32
+        " fragment_attempts=%" PRIu32
+        " fragment_accepted=%" PRIu32
+        " fragment_errors=%" PRIu32
+        " lk8_coalesced=%" PRIu32
+        " gps_coalesced=%" PRIu32
+        " partial_aborts=%" PRIu32
+        " stream_resyncs=%" PRIu32
         " last_success_us=%" PRId64 " last_error=%" PRId32 "\r\n",
         ble.connected, ble.subscribed, ble_vario_can_notify(),
         ble_vario_notify_active(), ble.sentence_count,
-        ble.dropped_sentence_count, ble.last_notify_success_us,
+        ble.dropped_sentence_count, ble.gps_pair_count,
+        ble.gps_dropped_pair_count, (unsigned int) ble.att_mtu,
+        ble.connection_interval_us, ble.link_generation,
+        ble.fragment_attempt_count, ble.fragment_accepted_count,
+        ble.fragment_error_count, ble.lk8ex1_coalesced_count,
+        ble.gps_coalesced_count, ble.partial_abort_count,
+        ble.stream_resync_count, ble.last_notify_success_us,
         ble.last_notify_error);
     console_writef(
         "POWER cpu=%" PRIu32 "MHz sensor_lock=%d sleep_lock=%d "
@@ -2840,7 +2928,7 @@ static void console_diag_status(void) {
         power.light_sleep_lock_held, power.light_sleep_entry_count,
         power.observed_frequency_switch_count, power.lock_error_count);
     console_writef(
-        "STACK words sensor=%u audio=%u system=%u console=%u ble=%u\r\n",
+        "STACK words sensor=%u audio=%u system=%u console=%u ble=%u gps=%u\r\n",
         (unsigned int) uxTaskGetStackHighWaterMark(
             app_tasks_worker_handle(APP_TASK_WORKER_SENSOR)),
         (unsigned int) uxTaskGetStackHighWaterMark(
@@ -2850,7 +2938,9 @@ static void console_diag_status(void) {
         (unsigned int) uxTaskGetStackHighWaterMark(
             app_tasks_worker_handle(APP_TASK_WORKER_CONSOLE)),
         (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_BLE_TX)));
+            app_tasks_worker_handle(APP_TASK_WORKER_BLE_TX)),
+        (unsigned int) uxTaskGetStackHighWaterMark(
+            app_tasks_worker_handle(APP_TASK_WORKER_GPS)));
     console_writef("OK\r\n");
 }
 
@@ -3003,7 +3093,13 @@ void app_console_worker_task(void *context) {
     bool line_overflow = false;
     bool previous_was_cr = false;
     bool previously_connected = false;
+    bool previous_gps_valid = false;
+    gps_snapshot_t previous_gps = {0};
+    uint32_t previous_gps_interval_ms = 0U;
+    uint32_t previous_gps_sent = 0U;
+    uint32_t previous_gps_dropped = 0U;
     int64_t next_monitor_us = 0;
+    int64_t next_gps_heartbeat_us = 0;
 
     (void) context;
     ESP_LOGI(TAG, "console_task started on core %d", xPortGetCoreID());
@@ -3045,8 +3141,12 @@ void app_console_worker_task(void *context) {
 
         if (connected && !previously_connected) {
             next_monitor_us = now_us + SERIAL_MONITOR_PERIOD_US;
+            next_gps_heartbeat_us = now_us;
+            previous_gps_valid = false;
         } else if (!connected) {
             next_monitor_us = now_us + SERIAL_MONITOR_PERIOD_US;
+            next_gps_heartbeat_us = now_us;
+            previous_gps_valid = false;
         }
         if (connected && now_us >= next_monitor_us) {
             int64_t periods_elapsed =
@@ -3062,11 +3162,44 @@ void app_console_worker_task(void *context) {
             }
             next_monitor_us +=
                 (periods_elapsed + 1) * SERIAL_MONITOR_PERIOD_US;
-            if ((event_group == NULL ||
-                 (xEventGroupGetBits(event_group) &
-                  APP_EVENT_STORAGE_MODE_REQUEST) == 0U) &&
-                !console_write_monitor_line()) {
-                add_saturating_u32(&serial_monitor_drop_count, 1U);
+            if (event_group == NULL ||
+                (xEventGroupGetBits(event_group) &
+                 APP_EVENT_STORAGE_MODE_REQUEST) == 0U) {
+                gps_snapshot_t gps = {0};
+                app_config_t config = {0};
+                ble_vario_diagnostics_t ble = {0};
+
+                if (!console_write_monitor_line()) {
+                    add_saturating_u32(&serial_monitor_drop_count, 1U);
+                }
+                if (app_resources_copy_gps(&gps) &&
+                    app_resources_copy_config(&config)) {
+                    bool changed = false;
+
+                    ble_vario_get_diagnostics(&ble);
+                    changed = gps_monitor_changed(
+                        &gps, &previous_gps, &config,
+                        previous_gps_interval_ms, &ble,
+                        previous_gps_sent, previous_gps_dropped,
+                        previous_gps_valid);
+                    if (changed || now_us >= next_gps_heartbeat_us) {
+                        if (console_write_gps_monitor_line(
+                                &gps, &config, &ble, now_us)) {
+                            previous_gps = gps;
+                            previous_gps_interval_ms =
+                                config.gps_send_interval_ms;
+                            previous_gps_sent = ble.gps_pair_count;
+                            previous_gps_dropped =
+                                ble.gps_dropped_pair_count;
+                            previous_gps_valid = true;
+                            next_gps_heartbeat_us =
+                                now_us + GPS_MONITOR_HEARTBEAT_US;
+                        } else {
+                            add_saturating_u32(
+                                &serial_monitor_drop_count, 1U);
+                        }
+                    }
+                }
             }
         }
 

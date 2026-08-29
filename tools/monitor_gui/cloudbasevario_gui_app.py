@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import math
 import queue
 import time
@@ -10,7 +11,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 try:
-    from .cloudbasevario_serial import SerialWorker, list_ports
+    from .cloudbasevario_serial import SerialWorker, list_ports, serial
     from .cloudbasevario_theme import (
         COLOR_ACCENT,
         COLOR_BACKGROUND,
@@ -33,15 +34,19 @@ try:
     )
     from .cloudbasevario_protocol import (
         DisplayItem,
+        GpsSample,
         TelemetrySample,
         TelemetryGroup,
+        build_gps_view,
         build_telemetry_view,
         format_command,
+        gps_stale_timeout_seconds,
+        parse_gps_line,
         parse_parameter_line,
         parse_telemetry_line,
     )
 except ImportError:
-    from cloudbasevario_serial import SerialWorker, list_ports
+    from cloudbasevario_serial import SerialWorker, list_ports, serial
     from cloudbasevario_theme import (
         COLOR_ACCENT,
         COLOR_BACKGROUND,
@@ -64,10 +69,14 @@ except ImportError:
     )
     from cloudbasevario_protocol import (
         DisplayItem,
+        GpsSample,
         TelemetrySample,
         TelemetryGroup,
+        build_gps_view,
         build_telemetry_view,
         format_command,
+        gps_stale_timeout_seconds,
+        parse_gps_line,
         parse_parameter_line,
         parse_telemetry_line,
     )
@@ -98,6 +107,9 @@ class CloudBaseVarioApp:
         self.detail_items: dict[str, str] = {}
         self.telemetry_arrivals: deque[float] = deque(maxlen=50)
         self.last_telemetry_time = 0.0
+        self.last_gps_time = 0.0
+        self.last_gps_sample: GpsSample | None = None
+        self.gps_stale = False
         self.auto_list_after_connect: str | None = None
 
         self.port_var = tk.StringVar()
@@ -327,6 +339,7 @@ class CloudBaseVarioApp:
             ("attitude", "ATT"),
             ("fusion", "FUSION"),
             ("ble", "BLE"),
+            ("gps", "GPS"),
             ("stream", "STREAM"),
         ):
             badge = StatusBadge(badges, title)
@@ -401,6 +414,7 @@ class CloudBaseVarioApp:
             "quality": DiagnosticTable(container, "Sensor / estimator quality"),
             "imu": DiagnosticTable(container, "IMU / calibration"),
             "ble": DiagnosticTable(container, "BLE / stream health"),
+            "gps": DiagnosticTable(container, "GPS / positioning"),
         }
         self.diagnostic_tables["quality"].grid(
             row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 5)
@@ -409,7 +423,10 @@ class CloudBaseVarioApp:
             row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 5)
         )
         self.diagnostic_tables["ble"].grid(
-            row=1, column=0, columnspan=2, sticky="nsew", pady=(5, 0)
+            row=1, column=0, sticky="nsew", padx=(0, 5), pady=(5, 0)
+        )
+        self.diagnostic_tables["gps"].grid(
+            row=1, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0)
         )
 
     def _build_detail_tab(self, parent: ttk.Frame) -> None:
@@ -576,7 +593,7 @@ class CloudBaseVarioApp:
         ).pack(side="left")
         ttk.Checkbutton(
             toolbar,
-            text="Include 10 Hz BARO telemetry",
+            text="Include BARO / GPS telemetry",
             variable=self.telemetry_log_var,
         ).pack(side="left", padx=(12, 0))
         self.log_text = tk.Text(
@@ -678,6 +695,9 @@ class CloudBaseVarioApp:
         )
         self._update_command_controls()
         if not connected:
+            self.last_gps_time = 0.0
+            self.last_gps_sample = None
+            self.gps_stale = False
             for badge in self.status_badges.values():
                 badge.unknown()
 
@@ -882,12 +902,25 @@ class CloudBaseVarioApp:
         ):
             self.connection_var.set("Connected — telemetry stale")
             self.status_badges["baro"].set(False, "STALE")
+        if self.serial_worker.connected and self.last_gps_sample is not None:
+            interval_s = gps_stale_timeout_seconds(self.last_gps_sample)
+            stale = time.monotonic() - self.last_gps_time > interval_s
+            if stale != self.gps_stale:
+                self.gps_stale = stale
+                self._update_gps_view(self.last_gps_sample)
         self.root.after(GUI_POLL_MS, self._poll_events)
 
     def _process_serial_line(self, line: str) -> None:
         telemetry = parse_telemetry_line(line)
         if telemetry is not None:
             self._handle_telemetry(telemetry)
+            if self.telemetry_log_var.get():
+                self._append_log(line)
+            return
+
+        gps = parse_gps_line(line)
+        if gps is not None:
+            self._handle_gps(gps)
             if self.telemetry_log_var.get():
                 self._append_log(line)
             return
@@ -976,17 +1009,34 @@ class CloudBaseVarioApp:
         )
         self._update_detail_fields(sample)
 
-    def _update_detail_fields(self, sample: TelemetrySample) -> None:
+    def _handle_gps(self, sample: GpsSample) -> None:
+        self.last_gps_time = time.monotonic()
+        self.last_gps_sample = sample
+        self.gps_stale = False
+        self._update_gps_view(sample)
+        self._update_detail_fields(sample, prefix="gps.")
+
+    def _update_gps_view(self, sample: GpsSample) -> None:
+        view = build_gps_view(sample, stale=self.gps_stale)
+        self.status_badges["gps"].set_item(view.status)
+        self.diagnostic_tables["gps"].update_group(view.diagnostics)
+
+    def _update_detail_fields(
+        self, sample: TelemetrySample, *, prefix: str = ""
+    ) -> None:
         for name in sorted(sample.fields):
             value = sample.fields[name]
-            item = self.detail_items.get(name)
+            display_name = prefix + name
+            item = self.detail_items.get(display_name)
             if item is None:
                 item = self.detail_tree.insert(
-                    "", "end", values=(name, str(value))
+                    "", "end", values=(display_name, str(value))
                 )
-                self.detail_items[name] = item
+                self.detail_items[display_name] = item
             else:
-                self.detail_tree.item(item, values=(name, str(value)))
+                self.detail_tree.item(
+                    item, values=(display_name, str(value))
+                )
 
     def _append_log(self, line: str) -> None:
         self.log_text.configure(state="normal")

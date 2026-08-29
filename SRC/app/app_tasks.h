@@ -22,6 +22,7 @@ typedef enum {
     APP_TASK_WORKER_SYSTEM,
     APP_TASK_WORKER_CONSOLE,
     APP_TASK_WORKER_BLE_TX,
+    APP_TASK_WORKER_GPS,
     APP_TASK_WORKER_COUNT,
 } app_task_worker_t;
 
@@ -60,7 +61,7 @@ EventBits_t app_tasks_active_ack_mask(void);
  */
 bool app_tasks_system_started(void);
 
-/** Report whether all five required long-lived software workers exist. */
+/** Report whether all required long-lived software workers exist. */
 bool app_tasks_required_workers_started(void);
 
 /** Return a worker handle for diagnostics; NULL when it was not created. */

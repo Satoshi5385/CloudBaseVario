@@ -2,7 +2,7 @@
 
 ## 1. 概要
 
-`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ10項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
+`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ11項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、製造時に固定されるGPS搭載有無、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -82,6 +82,7 @@ PARAM SAVE
     "bluetooth_battery_mode": "VOLTAGE",
     "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
+    "gps_send_interval_ms": 1000,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,
     "imu_mahony_kp": 5.0,
@@ -177,7 +178,7 @@ PARAM SAVE
 
 - top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` だけが使用できます。
 - `format_version` は整数で、現行形式では `1` です。それ以外のversionは読み込みません。
-- top-level `mc_parameters` は共通10項目すべてを持つobjectです。
+- top-level `mc_parameters` は共通11項目すべてを持つobjectです。
 - `vario_parameter_sets` は1～5件の配列です。各要素は `parameter_number` と `parameters` だけを持ちます。
 - `parameter_number` は1～5の整数で重複できません。配列順は任意ですが、保存時は番号順に整列します。
 - `mc_parameters` と各セットの `parameters` は JSON object です。1セットでも不正ならファイル全体を無効とします。
@@ -193,7 +194,7 @@ PARAM SAVE
 ## 4. パラメータ詳細
 
 範囲の両端は、特記がない限り使用できます。
-4.1と4.2の10項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
+4.1と4.2の11項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
 
 ### 4.1 電源・気圧・推定・I2C
 
@@ -205,6 +206,7 @@ PARAM SAVE
 | `bluetooth_battery_mode` | enum | `VOLTAGE` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
 | `bluetooth_tx_power` | enum | `LOW` | `MIN`, `LOW`, `NORMAL`, `HIGH` | BLE送信電力です。`MIN`は-24 dBm、`LOW`は-12 dBm、`NORMAL`は0 dBm、`HIGH`は+9 dBmです。起動時および設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。 |
 | `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz | LK8EX1センテンスのNotify試行頻度です。BLEがbusyの場合はその周期のセンテンスを破棄して再送しないため、成功Notify数は設定値を下回ることがあります。Battery Serviceの更新周期には影響しません。 |
+| `gps_send_interval_ms` | uint32 | 1000 | 200～10000 ms | GPS搭載モデルの測位データ更新・XCTrack送信周期です。変更はGPSモジュールへ再設定されます。GPS搭載有無は製造時に固定され、このファイルや`PARAM`操作では変更できません。 |
 | `i2c_reinit_error_count` | uint32 | 10 | 1～100 回 | BMP581 または ICM-42688P-HXY の連続 I2C エラーがこの回数に達したとき、センサを offline として共有 I2C bus の復旧・再初期化を試みます。小さすぎる値は一過性エラーで復旧処理を頻発させ、大きすぎる値は故障検出を遅らせます。 |
 
 ### 4.2 IMU 姿勢推定
@@ -327,7 +329,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 | 状態 | 動作 |
 | --- | --- |
-| 正常な version 1 | 共通10項目と音関連22項目を持つ全セットを読込み |
+| 正常な version 1 | 共通11項目と音関連22項目を持つ全セットを読込み |
 | version 1以外 | 非対応versionとしてファイル全体を無効化 |
 | ファイルなし | 全項目を組込み既定値とし、既定ファイルを自動生成 |
 | JSON 構文、型、範囲、関係が不正 | ファイルの値を一切適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
@@ -353,7 +355,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 ## 8. versionの扱い
 
-ファームウェアはversion 1の構造だけを読み込みます。top-level、共通10項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。
+ファームウェアはversion 1の構造だけを読み込みます。top-level、共通11項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。`gps_module_installed`などの搭載有無キーも未知のkeyとして拒否します。
 
 ## 9. 実装上の正本
 

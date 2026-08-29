@@ -11,6 +11,11 @@ int main(void) {
     };
 
     assert(board_identity_validate(&identity));
+    identity.gps_installed = 1U;
+    assert(board_identity_validate(&identity));
+    identity.gps_installed = 2U;
+    assert(!board_identity_validate(&identity));
+    identity.gps_installed = 0U;
     assert(board_serial_validate(identity.serial, "A0"));
     assert(!board_serial_validate("CBV_A0_73I0j_0000", "A0"));
     assert(!board_serial_validate("CBV_A1_73I0j_0009", "A0"));

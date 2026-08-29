@@ -6,14 +6,17 @@ idf_component_register(
         "app/app_tasks.c"
         "app/app_workers.c"
         "app/ble_tx_worker.c"
+        "app/gps_worker.c"
         "domain/app_config.c"
         "domain/battery_level.c"
+        "domain/ble_nus_tx.c"
         "domain/board_info.c"
         "domain/board_identity.c"
         "domain/auto_power_off.c"
         "domain/firmware_update_policy.c"
         "domain/firmware_authentication.c"
         "domain/firmware_metadata.c"
+        "domain/gps_nmea.c"
         "domain/imu_calibration_controller.c"
         "domain/imu_fusion.c"
         "domain/lk8ex1.c"
@@ -32,6 +35,7 @@ idf_component_register(
         "platform/config_json.c"
         "platform/firmware_update.c"
         "platform/firmware_auth.c"
+        "platform/gps_l96.c"
         "platform/icm42688_hxy.c"
         "platform/imu_calibration_storage.c"
         "platform/sensor_bus.c"
@@ -50,6 +54,7 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_ledc
+        esp_driver_uart
         esp_hw_support
         esp_pm
         esp_psram

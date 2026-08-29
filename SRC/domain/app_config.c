@@ -69,6 +69,8 @@ static const app_parameter_descriptor_t parameter_table[] = {
                APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(bluetooth_notify_rate_hz, 10, 1.0, 50.0,
                APP_PARAMETER_SCOPE_SHARED),
+    PARAM_UINT(gps_send_interval_ms, 1000, 200.0, 10000.0,
+               APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(i2c_reinit_error_count, 10, 1.0, 100.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(imu_gyro_calibration_samples, 200, 50.0, 2000.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_FLOAT(imu_mahony_kp, 5.0f, 0.0, 20.0, APP_PARAMETER_SCOPE_SHARED),

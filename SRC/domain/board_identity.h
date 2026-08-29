@@ -30,6 +30,7 @@ typedef struct {
 typedef struct {
     uint8_t schema_version;
     uint16_t board_id;
+    uint8_t gps_installed;
     char serial[BOARD_SERIAL_BUFFER_SIZE];
 } board_identity_t;
 
@@ -41,4 +42,3 @@ bool board_identity_validate(const board_identity_t *identity);
 
 /** Validate and split a serial into its fixed board, lot and sequence fields. */
 bool board_serial_validate(const char *serial, const char *board_code);
-

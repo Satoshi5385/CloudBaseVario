@@ -63,12 +63,13 @@ static void test_parameter_contract(void) {
     size_t profile_count = 0U;
 
     app_config_set_defaults(&config);
-    assert(app_config_parameter_count() == 32U);
+    assert(app_config_parameter_count() == 33U);
     assert(config.auto_power_off_minutes == 60U);
     assert(config.bluetooth_battery_mode ==
            APP_BLUETOOTH_BATTERY_MODE_VOLTAGE);
     assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_LOW);
     assert(config.bluetooth_notify_rate_hz == 10U);
+    assert(config.gps_send_interval_ms == 1000U);
     assert(config.audio_climb_rate_average_s == 1.0f);
     assert(config.predictive_interval_ms == 1000U);
     assert(config.predictive_duration_ms == 150U);
@@ -79,6 +80,7 @@ static void test_parameter_contract(void) {
     assert(has_parameter("bluetooth_battery_mode"));
     assert(has_parameter("bluetooth_tx_power"));
     assert(has_parameter("bluetooth_notify_rate_hz"));
+    assert(has_parameter("gps_send_interval_ms"));
     assert(!has_parameter("lift_confirm_distance_m"));
     assert(!has_parameter("sink_confirm_distance_m"));
     assert(!has_parameter("predictive_freq_hz"));
@@ -93,7 +95,7 @@ static void test_parameter_contract(void) {
             profile_count++;
         }
     }
-    assert(shared_count == 10U);
+    assert(shared_count == 11U);
     assert(profile_count == 22U);
     assert(app_config_validate(&config));
     assert(app_config_set_text(&config, "bluetooth_battery_mode", "PERCENT"));
@@ -122,6 +124,11 @@ static void test_parameter_contract(void) {
     assert(config.bluetooth_notify_rate_hz == 50U);
     assert(!app_config_set_text(&config, "bluetooth_notify_rate_hz", "0"));
     assert(!app_config_set_text(&config, "bluetooth_notify_rate_hz", "51"));
+    assert(app_config_set_text(&config, "gps_send_interval_ms", "200"));
+    assert(app_config_set_text(&config, "gps_send_interval_ms", "10000"));
+    assert(!app_config_set_text(&config, "gps_send_interval_ms", "199"));
+    assert(!app_config_set_text(&config, "gps_send_interval_ms", "10001"));
+    assert(!app_config_set_text(&config, "gps_module_installed", "1"));
 
     config.predictive_duration_ms = config.predictive_interval_ms + 1U;
     assert(!app_config_validate(&config));

@@ -163,10 +163,10 @@ class BleBatteryServicePolicyTests(unittest.TestCase):
         )
 
     def test_battery_updates_do_not_require_nus_subscription(self) -> None:
-        update = TASK_SOURCE.index("ble_vario_update_battery(&system);")
-        can_notify = TASK_SOURCE.index("ble_vario_can_notify()", update)
-        self.assertLess(update, can_notify)
-        self.assertIn("if (app_resources_copy_system(&system))", TASK_SOURCE)
+        update = BLE_WORKER_SOURCE.index("ble_vario_update_battery(&system);")
+        link = BLE_WORKER_SOURCE.index("ble_vario_get_nus_link(&link);", update)
+        self.assertLess(update, link)
+        self.assertIn("app_resources_copy_system(&system)", BLE_WORKER_SOURCE)
         self.assertIn("ble_gatts_chr_updated(status_handle);", BLE_SOURCE)
         self.assertIn("notify_status = status_changed && nimble_initialized", BLE_SOURCE)
         self.assertIn("notify_level = level_changed && nimble_initialized", BLE_SOURCE)
@@ -194,7 +194,8 @@ class BleBatteryServicePolicyTests(unittest.TestCase):
             BLE_WORKER_SOURCE,
         )
         self.assertIn("ulTaskNotifyTake(", BLE_WORKER_SOURCE)
-        self.assertIn("can_notify));", BLE_WORKER_SOURCE)
+        self.assertIn("if (link_usable)", BLE_WORKER_SOURCE)
+        self.assertIn("ble_nus_tx_next_refill_us", BLE_WORKER_SOURCE)
         self.assertNotIn("vTaskDelay(", BLE_WORKER_SOURCE)
 
     def test_gap_state_changes_wake_the_ble_tx_worker(self) -> None:
@@ -207,12 +208,9 @@ class BleBatteryServicePolicyTests(unittest.TestCase):
         self.assertIn(
             "ble_vario_set_tx_wakeup_task(NULL);", BLE_WORKER_SOURCE
         )
-        self.assertIn(
-            "config.bluetooth_notify_rate_hz != previous_notify_rate_hz",
-            BLE_WORKER_SOURCE,
-        )
+        self.assertIn("previous_notify_rate_hz", BLE_WORKER_SOURCE)
         battery_update = BLE_WORKER_SOURCE.index("ble_vario_update_battery(&system);")
-        lk8ex1_notify = BLE_WORKER_SOURCE.index("ble_vario_notify_lk8ex1(")
+        lk8ex1_notify = BLE_WORKER_SOURCE.index("offer_lk8ex1(&tx_state")
         self.assertLess(battery_update, lk8ex1_notify)
 
     def test_tx_power_presets_cover_advertising_and_connections(self) -> None:

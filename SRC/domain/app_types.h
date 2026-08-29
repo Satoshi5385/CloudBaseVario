@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define GPS_NMEA_SENTENCE_CAPACITY 96U
+
 typedef struct {
     uint32_t sequence;
     int64_t timestamp_us;
@@ -87,6 +89,41 @@ typedef struct {
     bool switch_preferences_dirty;
     bool power_off_requested;
 } system_snapshot_t;
+
+typedef struct {
+    int64_t timestamp_us;
+    int64_t last_receive_us;
+    uint32_t sequence;
+    uint32_t received_sentence_count;
+    uint32_t invalid_sentence_count;
+    uint32_t paired_update_count;
+    uint32_t retry_count;
+    uint32_t baud_rate;
+    int32_t last_error;
+    uint16_t rmc_length;
+    uint16_t gga_length;
+    uint8_t satellites;
+    bool installed;
+    bool identified;
+    bool communicating;
+    bool fix_valid;
+    bool utc_valid;
+    bool position_valid;
+    bool altitude_valid;
+    bool satellites_valid;
+    bool hdop_valid;
+    bool speed_valid;
+    bool course_valid;
+    double latitude_deg;
+    double longitude_deg;
+    double altitude_m;
+    double hdop;
+    double speed_kmh;
+    double course_deg;
+    char utc[16];
+    char rmc[GPS_NMEA_SENTENCE_CAPACITY];
+    char gga[GPS_NMEA_SENTENCE_CAPACITY];
+} gps_snapshot_t;
 
 typedef struct {
     bool enabled;

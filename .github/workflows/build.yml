@@ -17,6 +17,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Trust checked-out repository
+        shell: bash
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Run Python tests
         run: python -m unittest discover -s tests -p "test_*.py"
 
@@ -35,6 +39,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_system_policy.c SRC/domain/system_policy.c -o /tmp/test_system_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_imu_calibration_controller.c SRC/domain/imu_calibration_controller.c SRC/domain/imu_fusion.c SRC/domain/app_config.c -lm -o /tmp/test_imu_calibration_controller
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_lk8ex1.c SRC/domain/lk8ex1.c SRC/domain/battery_level.c -lm -o /tmp/test_lk8ex1
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_ble_nus_tx.c SRC/domain/ble_nus_tx.c -o /tmp/test_ble_nus_tx
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_usb_storage_policy.c SRC/domain/usb_storage_policy.c -o /tmp/test_usb_storage_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_watchdog_recovery_policy.c SRC/domain/watchdog_recovery_policy.c -o /tmp/test_watchdog_recovery_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_identity.c SRC/domain/board_identity.c -o /tmp/test_board_identity
@@ -46,6 +51,7 @@ jobs:
           /tmp/test_system_policy
           /tmp/test_imu_calibration_controller
           /tmp/test_lk8ex1
+          /tmp/test_ble_nus_tx
           /tmp/test_usb_storage_policy
           /tmp/test_watchdog_recovery_policy
           /tmp/test_board_identity
@@ -67,3 +73,6 @@ jobs:
           grep -Fx '#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 1' build/config/sdkconfig.h
           grep -Fx '#define CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT 1' build/config/sdkconfig.h
           grep -Fx '#define CONFIG_ESP_COREDUMP_ENABLE_TO_NONE 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CCCDS 3' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 23' build/config/sdkconfig.h

@@ -6,6 +6,7 @@
 #include "app/app_resources.h"
 #include "app/app_workers.h"
 #include "app/ble_tx_worker.h"
+#include "app/gps_worker.h"
 #include "esp_log.h"
 #include "platform/board.h"
 #include "platform/firmware_update.h"
@@ -16,12 +17,14 @@
 #define SYSTEM_TASK_PRIORITY ((UBaseType_t) 12U)
 #define BLE_TX_TASK_PRIORITY ((UBaseType_t) 8U)
 #define CONSOLE_TASK_PRIORITY ((UBaseType_t) 5U)
+#define GPS_TASK_PRIORITY ((UBaseType_t) 7U)
 
 #define SENSOR_TASK_STACK_BYTES UINT32_C(8192)
 #define AUDIO_TASK_STACK_BYTES UINT32_C(4096)
 #define SYSTEM_TASK_STACK_BYTES UINT32_C(4096)
 #define BLE_TX_TASK_STACK_BYTES UINT32_C(6144)
 #define CONSOLE_TASK_STACK_BYTES UINT32_C(6144)
+#define GPS_TASK_STACK_BYTES UINT32_C(6144)
 
 #define HIGH_RATE_TASK_CORE ((BaseType_t) 1)
 #define COMMUNICATION_TASK_CORE ((BaseType_t) 0)
@@ -53,6 +56,9 @@ static const app_task_descriptor_t task_descriptors[] = {
     {APP_TASK_WORKER_BLE_TX, ble_tx_worker_task, "ble_tx_task",
      BLE_TX_TASK_STACK_BYTES, BLE_TX_TASK_PRIORITY,
      COMMUNICATION_TASK_CORE, APP_EVENT_BLE_TX_ACK},
+    {APP_TASK_WORKER_GPS, gps_worker_task, "gps_task",
+     GPS_TASK_STACK_BYTES, GPS_TASK_PRIORITY,
+     COMMUNICATION_TASK_CORE, APP_EVENT_GPS_ACK},
 };
 
 static const char *TAG = "app_tasks";

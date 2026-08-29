@@ -22,7 +22,7 @@ class BluetoothTxPowerConfigTests(unittest.TestCase):
     def test_default_is_low_and_all_presets_round_trip(self) -> None:
         document = parse_config_document_text(self.document_text)
         self.assertEqual(document.mc_parameters["bluetooth_tx_power"], "LOW")
-        self.assertEqual(len(document.mc_parameters), 10)
+        self.assertEqual(len(document.mc_parameters), 11)
 
         for preset in ("MIN", "LOW", "NORMAL", "HIGH"):
             candidate = copy.deepcopy(self.raw_document)

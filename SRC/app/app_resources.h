@@ -52,6 +52,12 @@ bool app_resources_publish_vario(const vario_result_t *result);
  */
 bool app_resources_copy_vario(vario_result_t *result);
 
+/** Replace the complete latest GPS diagnostic and NMEA snapshot. */
+bool app_resources_publish_gps(const gps_snapshot_t *snapshot);
+
+/** Copy the latest complete GPS diagnostic and NMEA snapshot. */
+bool app_resources_copy_gps(gps_snapshot_t *snapshot);
+
 /**
  * @brief Replace the complete HXY IMU diagnostic snapshot.
  * @param[in] diagnostics Complete diagnostic state to publish.

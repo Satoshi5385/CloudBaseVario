@@ -36,6 +36,7 @@ int main(void) {
                   "Board name: Aohazuku-Rev0\r\n"
                   "Board ID: 0x0100\r\n"
                   "Serial number: CBV_A0_73I0j_0009\r\n"
+                  "GPS installed: no\r\n"
                   "Firmware version: 0.1.0\r\n"
                   "Firmware git hash: 48a4472\r\n"
                   "Firmware authenticity: OFFICIAL\r\n"

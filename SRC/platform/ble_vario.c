@@ -49,6 +49,9 @@
 #define BLE_CONNECTION_INTERVAL_MAX_MS UINT32_C(50)
 #define BLE_CONNECTION_LATENCY UINT16_C(1)
 #define BLE_SUPERVISION_TIMEOUT_MS UINT32_C(4000)
+#define BLE_DEFAULT_ATT_MTU UINT16_C(23)
+#define BLE_ATT_NOTIFICATION_OVERHEAD UINT16_C(3)
+#define BLE_CONNECTION_INTERVAL_UNIT_US UINT32_C(1250)
 
 #define BATTERY_SERVICE_UUID UINT16_C(0x180F)
 #define BATTERY_LEVEL_UUID UINT16_C(0x2A19)
@@ -101,9 +104,11 @@ static bool nimble_initialized = false;
 static bool stop_requested = false;
 static app_bluetooth_tx_power_t configured_tx_power =
     APP_BLUETOOTH_TX_POWER_LOW;
-static uint32_t sentence_count = 0U;
-static uint32_t dropped_sentence_count = 0U;
-static int32_t last_notify_error = 0;
+static ble_nus_tx_statistics_t nus_tx_statistics;
+static uint32_t nus_link_generation = 1U;
+static uint32_t connection_interval_us =
+    BLE_CONNECTION_INTERVAL_MAX_MS * UINT32_C(1000);
+static uint16_t negotiated_att_mtu = BLE_DEFAULT_ATT_MTU;
 static int64_t last_notify_success_us = 0;
 static TaskHandle_t tx_wakeup_task;
 
@@ -194,10 +199,24 @@ static void ble_notify_tx_worker(void) {
     portEXIT_CRITICAL(&ble_state_lock);
 }
 
+static void advance_link_generation(void) {
+    if (nus_link_generation < UINT32_MAX) {
+        nus_link_generation++;
+    } else {
+        nus_link_generation = 1U;
+    }
+}
+
 static void ble_set_connection_state(uint16_t handle, bool subscribed) {
     portENTER_CRITICAL(&ble_state_lock);
+    if (handle != connection_handle) {
+        negotiated_att_mtu = BLE_DEFAULT_ATT_MTU;
+        connection_interval_us =
+            BLE_CONNECTION_INTERVAL_MAX_MS * UINT32_C(1000);
+    }
     connection_handle = handle;
     notification_subscribed = subscribed;
+    advance_link_generation();
     if (handle == BLE_HS_CONN_HANDLE_NONE || !subscribed) {
         last_notify_success_us = 0;
     }
@@ -390,11 +409,23 @@ static void ble_request_connection_parameters(uint16_t handle) {
     }
 }
 
-static void ble_log_connection_parameters(uint16_t handle) {
+static void ble_update_connection_parameters(uint16_t handle) {
     struct ble_gap_conn_desc description = {0};
     int rc = ble_gap_conn_find(handle, &description);
 
     if (rc == 0) {
+        uint32_t interval_us =
+            (uint32_t) description.conn_itvl *
+            BLE_CONNECTION_INTERVAL_UNIT_US;
+
+        portENTER_CRITICAL(&ble_state_lock);
+        if (connection_handle == handle && interval_us > 0U) {
+            connection_interval_us = interval_us;
+            if (tx_wakeup_task != NULL) {
+                xTaskNotifyGive(tx_wakeup_task);
+            }
+        }
+        portEXIT_CRITICAL(&ble_state_lock);
         ESP_LOGI(TAG, "connection interval=%u latency=%u timeout=%u", description.conn_itvl,
                  description.conn_latency, description.supervision_timeout);
     }
@@ -413,6 +444,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *context) {
             app_bluetooth_tx_power_t tx_power = APP_BLUETOOTH_TX_POWER_LOW;
 
             ble_set_connection_state(event->connect.conn_handle, false);
+            ble_update_connection_parameters(event->connect.conn_handle);
             portENTER_CRITICAL(&ble_state_lock);
             tx_power = configured_tx_power;
             portEXIT_CRITICAL(&ble_state_lock);
@@ -453,11 +485,20 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *context) {
         break;
 
     case BLE_GAP_EVENT_MTU:
+        portENTER_CRITICAL(&ble_state_lock);
+        if (connection_handle == event->mtu.conn_handle &&
+            event->mtu.value >= BLE_DEFAULT_ATT_MTU) {
+            negotiated_att_mtu = event->mtu.value;
+            if (tx_wakeup_task != NULL) {
+                xTaskNotifyGive(tx_wakeup_task);
+            }
+        }
+        portEXIT_CRITICAL(&ble_state_lock);
         ESP_LOGI(TAG, "ATT MTU=%u", event->mtu.value);
         break;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
-        ble_log_connection_parameters(event->conn_update.conn_handle);
+        ble_update_connection_parameters(event->conn_update.conn_handle);
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -554,6 +595,14 @@ esp_err_t ble_vario_init(app_bluetooth_tx_power_t tx_power) {
     portENTER_CRITICAL(&ble_state_lock);
     stop_requested = false;
     nimble_initialized = true;
+    connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    notification_subscribed = false;
+    negotiated_att_mtu = BLE_DEFAULT_ATT_MTU;
+    connection_interval_us =
+        BLE_CONNECTION_INTERVAL_MAX_MS * UINT32_C(1000);
+    memset(&nus_tx_statistics, 0, sizeof(nus_tx_statistics));
+    last_notify_success_us = 0;
+    advance_link_generation();
     portEXIT_CRITICAL(&ble_state_lock);
 
     nimble_port_freertos_init(ble_host_task);
@@ -600,6 +649,8 @@ void ble_vario_begin_shutdown(void) {
     stop_requested = true;
     handle = connection_handle;
     notification_subscribed = false;
+    advance_link_generation();
+    last_notify_success_us = 0;
     if (tx_wakeup_task != NULL) {
         xTaskNotifyGive(tx_wakeup_task);
     }
@@ -675,7 +726,7 @@ bool ble_vario_notify_active(void) {
     active = nimble_initialized && !stop_requested &&
              notification_subscribed &&
              connection_handle != BLE_HS_CONN_HANDLE_NONE &&
-             last_notify_error == 0 && success_us > 0;
+             nus_tx_statistics.last_notify_error == 0 && success_us > 0;
     portEXIT_CRITICAL(&ble_state_lock);
     return active && now_us >= success_us &&
            now_us - success_us <= INT64_C(500000);
@@ -760,23 +811,6 @@ void ble_vario_update_battery(const system_snapshot_t *system) {
     }
 }
 
-static void record_notify_result(bool success, int error) {
-    portENTER_CRITICAL(&ble_state_lock);
-    if (success) {
-        if (sentence_count < UINT32_MAX) {
-            sentence_count++;
-        }
-        last_notify_error = 0;
-        last_notify_success_us = esp_timer_get_time();
-    } else {
-        if (dropped_sentence_count < UINT32_MAX) {
-            dropped_sentence_count++;
-        }
-        last_notify_error = error;
-    }
-    portEXIT_CRITICAL(&ble_state_lock);
-}
-
 bool ble_vario_format_lk8ex1_fields(
     const vario_result_t *vario, const system_snapshot_t *system,
     app_bluetooth_battery_mode_t battery_mode,
@@ -784,68 +818,127 @@ bool ble_vario_format_lk8ex1_fields(
     return lk8ex1_format_fields(vario, system, battery_mode, fields);
 }
 
-esp_err_t ble_vario_notify_lk8ex1(const vario_result_t *vario,
-                                  const system_snapshot_t *system,
-                                  app_bluetooth_battery_mode_t battery_mode) {
-    char sentence[LK8EX1_SENTENCE_MAX_LENGTH] = {0};
-    ble_vario_lk8ex1_fields_t fields = {0};
-    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
-    uint16_t mtu = 23U;
-    size_t chunk_size = 20U;
-    size_t sentence_length = 0U;
+void ble_vario_get_nus_link(ble_vario_nus_link_t *link) {
+    uint16_t mtu = BLE_DEFAULT_ATT_MTU;
 
-    if (!ble_vario_format_lk8ex1_fields(vario, system, battery_mode,
-                                        &fields)) {
+    if (link == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&ble_state_lock);
+    link->generation = nus_link_generation;
+    link->connection_interval_us = connection_interval_us;
+    link->att_mtu = negotiated_att_mtu;
+    link->connected = connection_handle != BLE_HS_CONN_HANDLE_NONE;
+    link->subscribed = notification_subscribed;
+    mtu = negotiated_att_mtu;
+    portEXIT_CRITICAL(&ble_state_lock);
+    link->payload_capacity = BLE_DEFAULT_ATT_MTU -
+                             BLE_ATT_NOTIFICATION_OVERHEAD;
+    if (mtu > BLE_ATT_NOTIFICATION_OVERHEAD) {
+        link->payload_capacity = mtu - BLE_ATT_NOTIFICATION_OVERHEAD;
+    }
+}
+
+esp_err_t ble_vario_notify_nus_fragment(uint32_t generation,
+                                        const uint8_t *data, size_t length,
+                                        int32_t *nimble_error) {
+    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
+    uint16_t payload_capacity = 0U;
+    struct os_mbuf *packet = NULL;
+    int rc = 0;
+
+    if (nimble_error != NULL) {
+        *nimble_error = 0;
+    }
+    if (data == NULL || length == 0U || length > UINT16_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!fields.sentence_available) {
-        return ESP_ERR_NOT_FOUND;
+    portENTER_CRITICAL(&ble_state_lock);
+    if (nimble_initialized && !stop_requested && notification_subscribed &&
+        connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+        generation == nus_link_generation) {
+        handle = connection_handle;
+        payload_capacity = BLE_DEFAULT_ATT_MTU -
+                           BLE_ATT_NOTIFICATION_OVERHEAD;
+        if (negotiated_att_mtu > BLE_ATT_NOTIFICATION_OVERHEAD) {
+            payload_capacity = negotiated_att_mtu -
+                               BLE_ATT_NOTIFICATION_OVERHEAD;
+        }
     }
+    portEXIT_CRITICAL(&ble_state_lock);
+    if (handle == BLE_HS_CONN_HANDLE_NONE) {
+        if (nimble_error != NULL) {
+            *nimble_error = BLE_HS_ENOTCONN;
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (length > payload_capacity) {
+        if (nimble_error != NULL) {
+            *nimble_error = BLE_HS_EMSGSIZE;
+        }
+        return ESP_FAIL;
+    }
+    packet = ble_hs_mbuf_from_flat(data, (uint16_t) length);
+    if (packet == NULL) {
+        if (nimble_error != NULL) {
+            *nimble_error = BLE_HS_ENOMEM;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    rc = ble_gatts_notify_custom(handle, nus_tx_value_handle, packet);
+    if (nimble_error != NULL) {
+        *nimble_error = rc;
+    }
+    if (rc == 0) {
+        return ESP_OK;
+    }
+    if (rc == BLE_HS_ENOMEM || rc == BLE_HS_ENOMEM_EVT ||
+        rc == BLE_HS_EBUSY || rc == BLE_HS_EAGAIN) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (rc == BLE_HS_ENOTCONN) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_FAIL;
+}
 
-    if (!lk8ex1_format_sentence(vario, system, battery_mode, sentence,
-                                sizeof(sentence), &sentence_length)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
+esp_err_t ble_vario_reset_nus_connection(uint32_t generation) {
+    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
+    int rc = 0;
 
     portENTER_CRITICAL(&ble_state_lock);
-    if (nimble_initialized && !stop_requested && notification_subscribed) {
+    if (nimble_initialized && !stop_requested &&
+        connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+        generation == nus_link_generation) {
         handle = connection_handle;
+        notification_subscribed = false;
+        last_notify_success_us = 0;
+        advance_link_generation();
+        if (tx_wakeup_task != NULL) {
+            xTaskNotifyGive(tx_wakeup_task);
+        }
     }
     portEXIT_CRITICAL(&ble_state_lock);
     if (handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
-
-    mtu = ble_att_mtu(handle);
-    if (mtu > 3U) {
-        chunk_size = (size_t) mtu - 3U;
+    rc = ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc == 0 || rc == BLE_HS_EALREADY) {
+        return ESP_OK;
     }
-    for (size_t offset = 0U; offset < sentence_length; offset += chunk_size) {
-        size_t remaining = sentence_length - offset;
-        size_t chunk_length = chunk_size;
-        struct os_mbuf *packet =
-            NULL;
-        int rc = 0;
+    return ESP_FAIL;
+}
 
-        if (remaining < chunk_length) {
-            chunk_length = remaining;
-        }
-        packet = ble_hs_mbuf_from_flat(&sentence[offset],
-                                       (uint16_t) chunk_length);
-
-        if (packet == NULL) {
-            record_notify_result(false, BLE_HS_ENOMEM);
-            return ESP_ERR_NO_MEM;
-        }
-        rc = ble_gatts_notify_custom(handle, nus_tx_value_handle, packet);
-        if (rc != 0) {
-            record_notify_result(false, rc);
-            return ESP_FAIL;
-        }
+void ble_vario_publish_nus_tx_diagnostics(
+    const ble_nus_tx_statistics_t *statistics,
+    int64_t success_us) {
+    if (statistics == NULL) {
+        return;
     }
-
-    record_notify_result(true, 0);
-    return ESP_OK;
+    portENTER_CRITICAL(&ble_state_lock);
+    nus_tx_statistics = *statistics;
+    last_notify_success_us = success_us;
+    portEXIT_CRITICAL(&ble_state_lock);
 }
 
 void ble_vario_get_diagnostics(ble_vario_diagnostics_t *diagnostics) {
@@ -854,9 +947,31 @@ void ble_vario_get_diagnostics(ble_vario_diagnostics_t *diagnostics) {
     }
 
     portENTER_CRITICAL(&ble_state_lock);
-    diagnostics->sentence_count = sentence_count;
-    diagnostics->dropped_sentence_count = dropped_sentence_count;
-    diagnostics->last_notify_error = last_notify_error;
+    diagnostics->sentence_count = nus_tx_statistics.sentence_count;
+    diagnostics->dropped_sentence_count =
+        nus_tx_statistics.dropped_sentence_count;
+    diagnostics->gps_pair_count = nus_tx_statistics.gps_pair_count;
+    diagnostics->gps_dropped_pair_count =
+        nus_tx_statistics.gps_dropped_pair_count;
+    diagnostics->fragment_attempt_count =
+        nus_tx_statistics.fragment_attempt_count;
+    diagnostics->fragment_accepted_count =
+        nus_tx_statistics.fragment_accepted_count;
+    diagnostics->fragment_error_count =
+        nus_tx_statistics.fragment_error_count;
+    diagnostics->lk8ex1_coalesced_count =
+        nus_tx_statistics.lk8ex1_coalesced_count;
+    diagnostics->gps_coalesced_count =
+        nus_tx_statistics.gps_coalesced_count;
+    diagnostics->partial_abort_count =
+        nus_tx_statistics.partial_abort_count;
+    diagnostics->stream_resync_count =
+        nus_tx_statistics.stream_resync_count;
+    diagnostics->link_generation = nus_link_generation;
+    diagnostics->connection_interval_us = connection_interval_us;
+    diagnostics->att_mtu = negotiated_att_mtu;
+    diagnostics->last_notify_error =
+        nus_tx_statistics.last_notify_error;
     diagnostics->last_notify_success_us = last_notify_success_us;
     diagnostics->connected =
         connection_handle != BLE_HS_CONN_HANDLE_NONE;

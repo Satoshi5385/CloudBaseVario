@@ -15,6 +15,7 @@ DISPLAY_ERROR = "error"
 DISPLAY_UNAVAILABLE = "unavailable"
 
 TELEMETRY_PREFIX = "BARO"
+GPS_PREFIX = "GPS"
 MAX_COMMAND_BYTES = 128
 
 _INTEGER_PATTERN = re.compile(r"^[+-]?\d+$")
@@ -59,6 +60,11 @@ class TelemetrySample:
 
 
 @dataclass(frozen=True)
+class GpsSample(TelemetrySample):
+    """One decoded GPS telemetry line."""
+
+
+@dataclass(frozen=True)
 class TelemetryFieldSpec:
     """Presentation metadata for one known BARO telemetry field."""
 
@@ -94,6 +100,14 @@ class TelemetryViewModel:
     flight: tuple[DisplayItem, ...]
     statuses: tuple[DisplayItem, ...]
     diagnostics: tuple[TelemetryGroup, ...]
+
+
+@dataclass(frozen=True)
+class GpsViewModel:
+    """GPS status badge and diagnostic table derived from one GPS record."""
+
+    status: DisplayItem
+    diagnostics: TelemetryGroup
 
 
 FLIGHT_FIELD_SPECS = (
@@ -145,6 +159,26 @@ BLE_FIELD_SPECS = (
     TelemetryFieldSpec("timestamp_us", "Source timestamp", "µs", 0),
     TelemetryFieldSpec("stream_drops", "Serial stream drops", "", 0),
 )
+
+
+GPS_FIELD_SPECS = {
+    "latitude_deg": TelemetryFieldSpec("latitude_deg", "Latitude", "°", 7),
+    "longitude_deg": TelemetryFieldSpec("longitude_deg", "Longitude", "°", 7),
+    "altitude_m": TelemetryFieldSpec("altitude_m", "GPS altitude", "m", 2),
+    "satellites": TelemetryFieldSpec("satellites", "Satellites", "", 0),
+    "hdop": TelemetryFieldSpec("hdop", "HDOP", "", 2),
+    "speed_kmh": TelemetryFieldSpec("speed_kmh", "Ground speed", "km/h", 2),
+    "course_deg": TelemetryFieldSpec("course_deg", "Course", "°", 2),
+    "baud": TelemetryFieldSpec("baud", "UART baud rate", "bps", 0),
+    "interval_ms": TelemetryFieldSpec("interval_ms", "Update interval", "ms", 0),
+    "age_ms": TelemetryFieldSpec("age_ms", "Last pair age", "ms", 0),
+    "received": TelemetryFieldSpec("received", "Received sentences", "", 0),
+    "invalid": TelemetryFieldSpec("invalid", "Invalid sentences", "", 0),
+    "updates": TelemetryFieldSpec("updates", "Paired updates", "", 0),
+    "retries": TelemetryFieldSpec("retries", "Connection retries", "", 0),
+    "sent": TelemetryFieldSpec("sent", "BLE GPS pairs sent", "", 0),
+    "dropped": TelemetryFieldSpec("dropped", "BLE GPS pairs dropped", "", 0),
+}
 
 
 _BLE_SENTINELS = {
@@ -399,6 +433,125 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
     )
 
 
+def build_gps_view(sample: GpsSample, *, stale: bool = False) -> GpsViewModel:
+    """Interpret one GPS record without treating zero as unavailable."""
+
+    installed = _optional_flag(sample, "installed")
+    identified = _optional_flag(sample, "identified")
+    communicating = _optional_flag(sample, "communicating")
+    fix_valid = _optional_flag(sample, "fix")
+
+    if stale:
+        status = _status_item("gps", "GPS", "STALE", DISPLAY_WARNING)
+    elif installed is None:
+        status = _status_item("gps", "GPS", "--", DISPLAY_UNAVAILABLE)
+    elif not installed:
+        status = _status_item(
+            "gps", "GPS", "NOT INSTALLED", DISPLAY_INACTIVE
+        )
+    elif not communicating:
+        status = _status_item("gps", "GPS", "ERROR", DISPLAY_ERROR)
+    elif fix_valid:
+        status = _status_item("gps", "GPS", "FIX", DISPLAY_NORMAL)
+    else:
+        status = _status_item("gps", "GPS", "SEARCHING", DISPLAY_WARNING)
+
+    utc_valid = _optional_flag(sample, "utc_valid")
+    position_valid = (
+        _optional_flag(sample, "position_valid") is True and fix_valid is True
+    )
+    altitude_valid = (
+        _optional_flag(sample, "altitude_valid") is True and fix_valid is True
+    )
+    satellites_valid = _optional_flag(sample, "satellites_valid")
+    hdop_valid = _optional_flag(sample, "hdop_valid")
+    speed_valid = (
+        _optional_flag(sample, "speed_valid") is True and fix_valid is True
+    )
+    course_valid = (
+        _optional_flag(sample, "course_valid") is True and fix_valid is True
+    )
+    utc = DisplayItem("utc", "UTC", "--", DISPLAY_UNAVAILABLE)
+
+    if utc_valid and "utc" in sample.fields:
+        utc = DisplayItem("utc", "UTC", sample.text("utc"))
+
+    error_code = sample.integer("last_error_code")
+    error_state = DISPLAY_NORMAL
+    if error_code != 0:
+        error_state = DISPLAY_ERROR
+    last_error = DisplayItem(
+        "last_error",
+        "Last error",
+        sample.text("last_error", "--"),
+        error_state,
+    )
+
+    items = (
+        _flag_item(sample, "installed", "GPS installed"),
+        _flag_item(sample, "identified", "L96 identified"),
+        _flag_item(sample, "communicating", "GPS communication"),
+        _flag_item(
+            sample,
+            "fix",
+            "Position fix",
+            true_text="FIX",
+            false_text="NO FIX",
+            false_state=DISPLAY_WARNING,
+        ),
+        utc,
+        _number_item(
+            sample, GPS_FIELD_SPECS["latitude_deg"], valid=position_valid
+        ),
+        _number_item(
+            sample, GPS_FIELD_SPECS["longitude_deg"], valid=position_valid
+        ),
+        _number_item(
+            sample, GPS_FIELD_SPECS["altitude_m"], valid=altitude_valid
+        ),
+        _number_item(
+            sample, GPS_FIELD_SPECS["satellites"], valid=satellites_valid
+        ),
+        _number_item(sample, GPS_FIELD_SPECS["hdop"], valid=hdop_valid),
+        _number_item(
+            sample, GPS_FIELD_SPECS["speed_kmh"], valid=speed_valid
+        ),
+        _number_item(
+            sample, GPS_FIELD_SPECS["course_deg"], valid=course_valid
+        ),
+        _number_item(sample, GPS_FIELD_SPECS["baud"], valid=identified),
+        _number_item(sample, GPS_FIELD_SPECS["interval_ms"]),
+        _number_item(
+            sample,
+            GPS_FIELD_SPECS["age_ms"],
+            valid=sample.integer("age_ms", -1) >= 0,
+        ),
+        _number_item(sample, GPS_FIELD_SPECS["received"]),
+        _number_item(
+            sample, GPS_FIELD_SPECS["invalid"], warning_if_nonzero=True
+        ),
+        _number_item(sample, GPS_FIELD_SPECS["updates"]),
+        _number_item(
+            sample, GPS_FIELD_SPECS["retries"], warning_if_nonzero=True
+        ),
+        _number_item(sample, GPS_FIELD_SPECS["sent"]),
+        _number_item(
+            sample, GPS_FIELD_SPECS["dropped"], warning_if_nonzero=True
+        ),
+        last_error,
+    )
+    return GpsViewModel(
+        status=status,
+        diagnostics=TelemetryGroup("gps", "GPS / positioning", items),
+    )
+
+
+def gps_stale_timeout_seconds(sample: GpsSample) -> float:
+    """Return the GPS-only stale threshold from the advertised interval."""
+
+    return max(3.0, 3.0 * sample.integer("interval_ms", 1000) / 1000.0)
+
+
 def _parse_scalar(text: str) -> Scalar:
     if _INTEGER_PATTERN.fullmatch(text):
         return int(text, 10)
@@ -407,16 +560,12 @@ def _parse_scalar(text: str) -> Scalar:
     return text
 
 
-def parse_telemetry_line(line: str) -> TelemetrySample | None:
-    """Parse a complete fixed-line BARO record.
-
-    Malformed or duplicate fields are rejected so the GUI never presents an
-    ambiguous value as current telemetry.
-    """
-
+def _parse_fields(
+    line: str, prefix: str, *, text_fields: frozenset[str] = frozenset()
+) -> tuple[dict[str, Scalar], str] | None:
     stripped = line.strip()
     parts = stripped.split()
-    if not parts or parts[0] != TELEMETRY_PREFIX:
+    if not parts or parts[0] != prefix:
         return None
 
     fields: dict[str, Scalar] = {}
@@ -430,11 +579,80 @@ def parse_telemetry_line(line: str) -> TelemetrySample | None:
             or not _PARAMETER_NAME_PATTERN.fullmatch(name)
         ):
             return None
-        fields[name] = _parse_scalar(value)
+        if name in text_fields:
+            fields[name] = value
+        else:
+            fields[name] = _parse_scalar(value)
 
     if not fields:
         return None
+    return fields, stripped
+
+
+def parse_telemetry_line(line: str) -> TelemetrySample | None:
+    """Parse a complete fixed-line BARO record."""
+
+    parsed = _parse_fields(line, TELEMETRY_PREFIX)
+    if parsed is None:
+        return None
+    fields, stripped = parsed
     return TelemetrySample(fields=fields, raw_line=stripped)
+
+
+def parse_gps_line(line: str) -> GpsSample | None:
+    """Parse a strict GPS record while retaining unknown fields."""
+
+    parsed = _parse_fields(
+        line, GPS_PREFIX, text_fields=frozenset({"utc", "last_error"})
+    )
+    if parsed is None:
+        return None
+    fields, stripped = parsed
+    flag_fields = {
+        "installed",
+        "identified",
+        "communicating",
+        "fix",
+        "utc_valid",
+        "position_valid",
+        "altitude_valid",
+        "satellites_valid",
+        "hdop_valid",
+        "speed_valid",
+        "course_valid",
+    }
+    integer_fields = {
+        "baud",
+        "interval_ms",
+        "sequence",
+        "satellites",
+        "received",
+        "invalid",
+        "updates",
+        "retries",
+        "sent",
+        "dropped",
+        "age_ms",
+        "last_error_code",
+    }
+    number_fields = {
+        "latitude_deg",
+        "longitude_deg",
+        "altitude_m",
+        "hdop",
+        "speed_kmh",
+        "course_deg",
+    }
+    for name in flag_fields:
+        if name in fields and fields[name] not in (0, 1):
+            return None
+    for name in integer_fields:
+        if name in fields and not isinstance(fields[name], int):
+            return None
+    for name in number_fields:
+        if name in fields and not isinstance(fields[name], (int, float)):
+            return None
+    return GpsSample(fields=fields, raw_line=stripped)
 
 
 def parse_parameter_line(line: str) -> tuple[str, str] | None:

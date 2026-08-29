@@ -108,10 +108,10 @@ stateDiagram-v2
 
 #### LED表示
 
-緑LEDは主に電源状態とセンサー状態、GPS状態(T.B.D)を表す。
+緑LEDは主に電源状態とセンサー状態を表す。GPS状態はLED表示へ接続しない。
 黄LEDは主に異常状態とBLE状態、SDカード状態(T.B.D)を表す。
 
-電源ライフサイクルに対応するLED表示は次の表の通りとする。`ACTIVE`中のLED表示は、センサー、GPS、BLEおよびSDカードの状態を含めて別途定め、本表では規定しない。
+電源ライフサイクルに対応するLED表示は次の表の通りとする。`ACTIVE`中のLED表示は、センサー、BLEおよびSDカードの状態を含めて別途定め、本表では規定しない。GPS状態によって緑・黄LEDを変更しない。
 
 | 電源状態 | 緑LED | 黄LED | 表示要件 |
 | --- | --- | --- | --- |
@@ -286,6 +286,12 @@ TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Sele
 - 気圧はPa、昇降率はcm/sへ変換し、各フィールドの値が無効な場合は `ble.md` で定めたフィールド固有の無効値を使用すること。
 - XCTrackでは、`vario_cm_s`を昇降率表示に使用し、`pressure_pa`をバリオ音の生成に使用するものとする。両フィールドを同じセンテンスで送信し、どちらか一方から他方を代用生成しないこと。
 - センテンス末尾をCRLFとし、規定範囲のXORチェックサムを付加すること。
+- GPS搭載有無は製造時に固定し、`setting.json`および`PARAM`操作から変更できないこと。GPSなしの場合はUART1、GPS用GPIOおよびPMTK通信を初期化しないこと。
+- GPS搭載時だけL96-M33を対応baud rateで探索し、`PMTK605`／`PMTK705`の応答で機種を識別すること。115200 bpsへ正規化後、GPS+GLONASS、RMC/GGAだけ、共有設定`gps_send_interval_ms`（200～10000 ms、既定1000 ms）の周期へ設定し、設定commandの成功ACKを確認すること。
+- checksumが正常で同一UTC時刻の`GPRMC`／`GNRMC`と`GPGGA`／`GNGGA`を最新ペアとして保持し、NUS TXからRMC、GGAの順にXCTrackへ送信すること。各センテンスを`ATT_MTU - 3`で分割し、1センテンスのfragment間およびRMC/GGA間へLK8EX1を割り込ませないこと。
+- BLE混雑時は履歴を蓄積せず、LK8EX1とGPSそれぞれの最新未送信データ1件だけを保持すること。両方が待機している場合はトランザクション単位で交互に選択し、GPSはRMC、GGAを不可分の1トランザクションとして扱うこと。BLE切断・Notify失敗とGPS通信異常は別に診断すること。
+- 識別・設定失敗後は5秒間隔で再試行すること。通信確立後に`max(3000 ms, 3 × gps_send_interval_ms)`以内で正常なRMC/GGAペアを受信できない場合は通信異常へ戻すこと。GPS異常は非致命的とし、気圧、推定、音およびLK8EX1を継続すること。
+- `DIAG STATUS`にはGPSの搭載、識別、通信、fix、最終error、baud rate、受信・不正・更新・再試行・送信・drop counterを含めること。GPS状態を`system_policy`またはLED入力へ追加しないこと。
 - 接続していない場合、Notifyが許可されていない場合、または気圧と昇降率の両方が無効な場合は送信しないこと。
 - センテンスが `ATT_MTU - 3` を超える場合は、NUSのbyte streamとして必ず分割送信すること。MTU negotiationの成功を送信条件にしてはならない。
 - BLE処理の遅延や切断がセンサー取得と音声処理を停止させないこと。
@@ -310,8 +316,10 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 - LK8EX1には充電状態を示す標準フィールドがないため独自フィールドを追加せず、充電状態はBattery Level Statusだけで公開する。
 - チェックサムは、`$` の次の文字から `*` の直前までを対象に、カンマを含む各ASCII byteをXORして求め、大文字2桁の16進数で出力する。
 - 1センテンスが `ATT_MTU - 3` を超える場合、CRLFまでのbyte列を複数Notifyへ順序どおり分割する。受信側が1行へ復元できるよう、別センテンスを途中へ割り込ませない。
-- 切断、Notify無効化または送信エラーが発生した場合は残りのfragmentを破棄する。再接続後に途中から再開せず、新しい完全なセンテンスの先頭から送ること。
-- 同一接続で複数のNotifyを同時に積み上げず、NimBLEのmbuf不足やbusy時はその送信周期のセンテンスを破棄して診断カウンタを加算すること。センサーまたは音声タスクを待たせて再送せず、処理遅延後に過去周期分を追いつき連送しないこと。
+- 切断、Notify無効化、shutdownまたは接続generation変更では、送信中・待機中・再同期待ちのデータを破棄する。storage modeでは送信中・待機中のsource dataを破棄するが、同一接続へ1 byte以上送信済みのセンテンスがある場合はCRLF再同期要求だけを保持し、storage mode終了後に新しいデータより先に処理すること。再接続後または再同期後は完全なセンテンスの先頭から送ること。
+- NUS TXは交渉済みconnection intervalごとに2 tokenを補充し、保持上限も2 tokenとする。接続間隔が未取得の場合は50 msを使用し、長時間停止後も2を超えてtokenを蓄積しないこと。1 fragmentのNotify試行ごとに成功・失敗を問わず1 tokenを消費すること。Battery Service通知はこのNUS予算へ含めないこと。
+- `ble_gatts_notify_custom()`の成功をNimBLEへの受理として扱い、`BLE_GAP_EVENT_NOTIFY_TX`を無線送達ACKまたはfragment完了待ちに使用しないこと。mbuf不足またはbusy時は現在のトランザクションを破棄し、同じ帯域枠の残りtokenを使用しないこと。
+- 同一センテンスの1 byte以上が受理された後でfragment送信に失敗した場合は、新規トランザクションを止め、次の帯域枠でCRLFを送ってbyte streamを再同期すること。CRLFのmbuf不足またはbusyだけは次の帯域枠で再試行する。その他の致命的なNimBLE errorが部分送信後に発生した場合は接続を終了すること。センサーまたは音声タスクを待たせず、過去周期分を追いつき連送しないこと。
 
 ### ユーザーインターフェース
 
@@ -400,6 +408,16 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
 
 `ble_*`の5値は、同じsnapshotからLK8EX1へ実際に整形する値と一致させ、無効値`999999`／`99999`／`9999`／`99`／`999`もそのまま表示する。yawは磁気センサーを使わない相対角であり、絶対方位として扱わない。host未接続時は行を蓄積せず、出力失敗または周期超過時は古い行を再送せず`stream_drops`を増加させる。
 
+GPS状態またはGPS/BLE GPS counterの更新時は最大10 Hzで、無変化時も1秒ごとに次の独立した固定1行を出力する。GPSなしモデルでも状態通知のため本行は出力するが、GPS UART、GPIOおよびPMTK通信は開始しない。測位値はRMC/GGAのchecksumとUTCが一致する最新pairから生成し、緯度・経度は符号付き10進度、速度はkm/hとする。値が未取得または無効の場合は対応する`*_valid=0`とし、数値の0を未取得sentinelとして使用しない。
+
+```text
+GPS installed=... identified=... communicating=... fix=... utc_valid=... position_valid=... altitude_valid=... satellites_valid=... hdop_valid=... speed_valid=... course_valid=... baud=... interval_ms=... sequence=... utc=... latitude_deg=... longitude_deg=... altitude_m=... satellites=... hdop=... speed_kmh=... course_deg=... received=... invalid=... updates=... retries=... sent=... dropped=... age_ms=... last_error=... last_error_code=...
+```
+
+monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 × interval_ms)`を超えた場合だけGPSをstale表示とする。GPS行の欠落またはstaleはBAROテレメトリーの接続・stale判定へ影響させない。
+
+`DIAG STATUS`のBLE行には、接続・subscribe・Notify activity、LK8EX1/GPSの完了・drop数、ATT MTU、connection interval、link generation、fragment試行・受理・error数、LK8EX1/GPS coalesced数、部分中断数、stream再同期数、最終完了時刻および最後のNimBLE errorを含めること。完了数とNotify activityはセンテンスまたはGPSペアの全fragmentがNimBLEへ受理された時だけ更新すること。
+
 コマンドはASCII、行末CRまたはLF、最大128 byteとする。キーワードとパラメータ名は大文字・小文字を区別しない。空白だけの行は無視し、長すぎる行は行末まで破棄してエラーを返す。浮動小数点値はC localeの小数点 `.` だけを受理し、末尾に未解釈文字がある入力を拒否する。
 
 コンソール出力がホスト未接続などで遅延しても、高周期タスクへ直接ログを書かない。高周期タスクは固定長の診断イベントまたはカウンタだけを更新し、文字列整形とUSB出力は `console_task` が行う。
@@ -452,6 +470,7 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
     "bluetooth_battery_mode": "VOLTAGE",
     "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
+    "gps_send_interval_ms": 1000,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,
     "imu_mahony_kp": 5.0,
@@ -470,7 +489,7 @@ BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pre
 ```
 
 - 出力はUTF-8、BOMなし、2 space indent、LF改行、末尾改行ありの整形済みJSONとする。読込みではUTF-8 BOM、LFおよびCRLFを許容するが、JSON commentは許容しない。
-- top-levelには整数の `format_version`、共通10項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
+- top-levelには整数の `format_version`、共通11項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
 - version 1の規定構造だけを受理する。未知のparameter、誤った階層、項目不足、重複key、型違いまたは値域違反を含むファイルは全体を無効とし、自動変換しないこと。
 - `mc_parameters`および各セットの`parameters`には値だけを格納する。パラメータ名、型、単位、値域、既定値および相互関係は、本書の単一パラメータ表と対応する実装テーブルを正本とすること。
 - boolはJSON boolean、uint32は0以上の整数、floatは有限のJSON number、enumは定義済み名称のJSON stringとして表すこと。NaNおよび無限大を受理しないこと。
@@ -761,7 +780,7 @@ typedef struct {
 - 既定値は単一のテーブルで定義し、起動時とRESET時で共用する。
 - 型、最小値、最大値、相互関係を検証してから変更を反映する。
 - センサー・音声タスクは周期の先頭で必要な設定をローカルへコピーし、処理途中で設定が変化しないようにする。
-- 起動時に有効なversion 1の`setting.json`がある場合は、共通10項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
+- 起動時に有効なversion 1の`setting.json`がある場合は、共通11項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
 - consoleによる変更は `PARAM SAVE`が成功するまでRAMだけに保持し、再起動時は最後に正常保存されたファイルから再構成する。
 - 公開パラメータは本節の表に定義した項目だけとする。SW1音量、SW2シンク状態、SW3選択番号は専用NVSを正本とし、`PARAM LIST/GET/SET/RESET/SAVE`の対象外とする。
 

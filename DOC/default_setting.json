@@ -7,6 +7,7 @@
     "bluetooth_battery_mode": "VOLTAGE",
     "bluetooth_tx_power": "LOW",
     "bluetooth_notify_rate_hz": 10,
+    "gps_send_interval_ms": 1000,
     "i2c_reinit_error_count": 10,
     "imu_gyro_calibration_samples": 200,
     "imu_mahony_kp": 5.0,

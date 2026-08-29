@@ -13,12 +13,12 @@
 
 ## 機能
 
-- `BARO key=value ...`テレメトリーの10 Hz受信
+- `BARO key=value ...`と`GPS key=value ...`テレメトリーの受信
 - 気圧、高度、昇降率、鉛直加速度、温度の飛行値表示
 - 気圧、昇降率、鉛直加速度の直近60秒グラフ
 - IMUのroll／pitch人工水平儀、yaw、クォータニオン表示
-- BARO、推定、IMU、較正、姿勢、融合、BLE Notify、シリアルストリームの状態表示
-- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、LK8EX1/BLEとストリーム状態を表示
+- BARO、推定、IMU、較正、姿勢、融合、BLE Notify、GPS、シリアルストリームの状態表示
+- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、LK8EX1/BLE、GPS測位値と通信状態、ストリーム状態を表示
 - 全テレメトリーフィールドの一覧表示
 - `PARAM LIST`によるパラメーター一覧取得
 - `PARAM SET`、`PARAM RESET`、`PARAM SAVE`操作
@@ -59,6 +59,7 @@ GUI上部でCloudBaseVarioのTinyUSB CDC COMポートを選び、`Connect`を押
 - `Diagnostics`のKalman innovationは対応する`*_innovation_valid`が真のときだけ値を表示します。I²C error、overrun、missed IMU sample、stream dropは0以外を警告色で表示します。
 - IMU加速度校正は`READY`、`CALIBRATING`、`SAVING`、`SKIPPED`、`SAVE ERROR`として区別します。`SKIPPED`は圧力のみモードであり、校正済みを意味しません。
 - BLE欄は実際のLK8EX1送信と同じ整形済み値です。LK8EX1の無効sentinel（気圧`999999`、高度`99999`、vario`9999`、温度`99`、battery`999`）は`--`として表示します。`ble_notify=0`では接続先へ実際のNotifyは行われていません。
+- GPS欄は搭載、L96識別、通信、fix、UTC、緯度・経度、高度、衛星数、HDOP、速度、進行方向と診断counterを表示します。緯度・経度は10進度、速度はkm/hです。測位値は対応するvalidが偽の場合`--`となり、GPSレコードが`max(3秒, 3 × interval_ms)`を超えて更新されない場合は`STALE`となります。
 - `All fields`タブは、GUIが専用表示を持たない`key=value`フィールドもそのまま表示します。
 - `Serial log`タブは、既定では10 Hzテレメトリーを省略してコマンド応答を読みやすくしています。
 - `DIAG STATUS`の`WATCHDOG`行は軽量RTC診断です。完全な電源断後は前回障害情報が失われることがあり、Flash Core Dumpや永続ログではありません。
@@ -92,10 +93,10 @@ python -m venv .venv
 
 ## JSONの読込みと保存
 
-- `New`は共通10項目と番号1の音関連22項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
+- `New`は共通11項目と番号1の音関連22項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
 - `Open...`はfirmwareと同じversion 1の共通／セット分離構造、全項目、型、範囲および項目間関係を検証します。`Parameter set`から編集対象番号を選択できます。旧ファイル名、旧version、旧キーおよび全項目を各セットへ格納する旧ドラフトは読み込みません。
 - `Save`は確認後に現在のファイルを上書きし、`Save As...`は任意のJSONファイルへ保存します。
-- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通10項目と未選択セットを維持し、選択セットの音関連22項目だけをGUIの値で置き換えます。
+- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通11項目と未選択セットを維持し、選択セットの音関連22項目だけをGUIの値で置き換えます。
 - version 1～6、旧ボード軸項目、および旧 `audio_enabled`／`audio_amp_mode`／`sink_enabled` を含むファイルは現行firmwareと同様に拒否し、自動移行しません。
 - 一時ファイルを書いて再読込み検証してから置換するため、書込みまたは検証に失敗した場合は既存ファイルを変更しません。
 

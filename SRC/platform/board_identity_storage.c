@@ -11,8 +11,9 @@
 #define BOARD_DATA_NAMESPACE "identity"
 #define BOARD_DATA_KEY_SCHEMA "schema_ver"
 #define BOARD_DATA_KEY_BOARD_ID "board_id"
+#define BOARD_DATA_KEY_GPS_INSTALLED "gps_inst"
 #define BOARD_DATA_KEY_SERIAL "serial"
-#define BOARD_DATA_EXPECTED_KEY_COUNT 3U
+#define BOARD_DATA_EXPECTED_KEY_COUNT 4U
 
 static void set_diagnostics(board_identity_storage_diagnostics_t *diagnostics,
                             board_identity_load_result_t result,
@@ -31,6 +32,8 @@ static bool key_is_expected(const nvs_entry_info_t *info) {
             info->type == NVS_TYPE_U8) ||
            (strcmp(info->key, BOARD_DATA_KEY_BOARD_ID) == 0 &&
             info->type == NVS_TYPE_U16) ||
+           (strcmp(info->key, BOARD_DATA_KEY_GPS_INSTALLED) == 0 &&
+            info->type == NVS_TYPE_U8) ||
            (strcmp(info->key, BOARD_DATA_KEY_SERIAL) == 0 &&
             info->type == NVS_TYPE_STR);
 }
@@ -104,13 +107,17 @@ board_identity_load_result_t board_identity_storage_load(
                              &identity->board_id);
     }
     if (result == ESP_OK) {
+        result = nvs_get_u8(handle, BOARD_DATA_KEY_GPS_INSTALLED,
+                            &identity->gps_installed);
+    }
+    if (result == ESP_OK) {
         result = nvs_get_str(handle, BOARD_DATA_KEY_SERIAL,
                              identity->serial, &serial_size);
     }
     nvs_close(handle);
     if (result == ESP_ERR_NVS_NOT_FOUND) {
-        set_diagnostics(diagnostics, BOARD_IDENTITY_LOAD_MISSING, result);
-        return BOARD_IDENTITY_LOAD_MISSING;
+        set_diagnostics(diagnostics, BOARD_IDENTITY_LOAD_INVALID, result);
+        return BOARD_IDENTITY_LOAD_INVALID;
     }
     if (result != ESP_OK) {
         set_diagnostics(diagnostics, BOARD_IDENTITY_LOAD_INVALID, result);

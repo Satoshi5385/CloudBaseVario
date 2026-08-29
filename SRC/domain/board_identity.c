@@ -66,6 +66,6 @@ bool board_identity_validate(const board_identity_t *identity) {
         return false;
     }
     descriptor = board_identity_descriptor(identity->board_id);
-    return descriptor != NULL &&
+    return descriptor != NULL && identity->gps_installed <= UINT8_C(1) &&
            board_serial_validate(identity->serial, descriptor->code);
 }

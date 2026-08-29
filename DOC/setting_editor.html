@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CloudBaseVario setting.json エディター</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #15232a;
+      --muted: #5c6b72;
+      --line: #d7e0e3;
+      --panel: #ffffff;
+      --ground: #f3f7f7;
+      --primary: #087f72;
+      --primary-dark: #05645b;
+      --danger: #b42318;
+      --danger-bg: #fff1f0;
+      --ok: #067647;
+      --ok-bg: #ecfdf3;
+      --warn: #8a4b08;
+      --warn-bg: #fff7e6;
+      --shadow: 0 12px 36px rgba(20, 52, 58, 0.09);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: linear-gradient(145deg, #e6f4f1 0, var(--ground) 36rem);
+      font-family: "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+      line-height: 1.55;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .52; }
+
+    .page { max-width: 1180px; margin: 0 auto; padding: 28px 20px 72px; }
+    header { margin-bottom: 22px; }
+    h1 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.4rem); letter-spacing: .01em; }
+    .lead { max-width: 820px; margin: 8px 0 0; color: var(--muted); }
+    code { font-family: Consolas, monospace; }
+
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      padding: 14px;
+      margin-bottom: 16px;
+      border: 1px solid rgba(215, 224, 227, .9);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, .93);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+    .button {
+      min-height: 42px;
+      padding: 8px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--ink);
+      background: #fff;
+      font-weight: 700;
+    }
+    .button:hover:not(:disabled) { border-color: #9db2b7; background: #f8fbfb; }
+    .button.primary { border-color: var(--primary); color: white; background: var(--primary); }
+    .button.primary:hover:not(:disabled) { background: var(--primary-dark); }
+    .button.danger { color: var(--danger); }
+    .file-state { margin-left: auto; min-width: 220px; color: var(--muted); text-align: right; }
+    .file-state strong { display: block; color: var(--ink); }
+
+    .notice {
+      padding: 12px 15px;
+      margin: 0 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .notice.ok { color: var(--ok); border-color: #a6e6c2; background: var(--ok-bg); }
+    .notice.error { color: var(--danger); border-color: #f0b6b2; background: var(--danger-bg); }
+    .notice.warn { color: var(--warn); border-color: #f1d39d; background: var(--warn-bg); }
+    .notice[hidden] { display: none; }
+
+    .empty {
+      padding: 42px 22px;
+      border: 1px dashed #aac0c4;
+      border-radius: 16px;
+      color: var(--muted);
+      background: rgba(255,255,255,.72);
+      text-align: center;
+    }
+    .editor[hidden], .section[hidden] { display: none; }
+    .section {
+      margin-top: 18px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .section-heading { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+    h2 { margin: 0; font-size: 1.25rem; }
+    h3 { margin: 22px 0 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line); font-size: 1rem; }
+    .format { color: var(--muted); font-size: .9rem; }
+
+    .profile-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .tab {
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: #fff;
+      font-weight: 700;
+    }
+    .tab.active { color: #fff; border-color: var(--primary); background: var(--primary); }
+    .profile-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .profile-actions label { color: var(--muted); font-size: .9rem; }
+    .profile-actions select { margin-left: 5px; }
+
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field {
+      display: grid;
+      grid-template-columns: minmax(190px, 1fr) minmax(150px, .72fr);
+      gap: 16px;
+      align-items: center;
+      min-height: 104px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbfdfd;
+    }
+    .field.invalid { border-color: #e67b73; background: #fff8f7; }
+    .field.supplemented { border-color: #e5b85c; background: #fffaf0; }
+    .field-title { display: block; font-weight: 800; }
+    .field-key { display: block; margin-top: 1px; color: #708087; font: .76rem Consolas, monospace; overflow-wrap: anywhere; }
+    .field-description { margin-top: 5px; color: var(--muted); font-size: .84rem; }
+    .control { min-width: 0; }
+    .input-row { display: flex; align-items: center; gap: 7px; }
+    input[type="number"], select {
+      width: 100%; min-width: 0; min-height: 40px; padding: 7px 9px;
+      border: 1px solid #aebdc1; border-radius: 8px; color: var(--ink); background: white;
+    }
+    input:focus, select:focus { outline: 3px solid rgba(8,127,114,.16); border-color: var(--primary); }
+    .unit { flex: 0 0 auto; color: var(--muted); font-weight: 700; font-size: .86rem; }
+    .range { margin-top: 4px; color: var(--muted); font-size: .76rem; }
+    .field-error { min-height: 1.2em; margin-top: 4px; color: var(--danger); font-size: .78rem; }
+    .field-note { min-height: 1.2em; margin-top: 4px; color: var(--warn); font-size: .78rem; font-weight: 700; }
+    .toggle { display: flex; align-items: center; gap: 9px; min-height: 40px; font-weight: 700; }
+    .toggle input { width: 20px; height: 20px; accent-color: var(--primary); }
+    .validation-list { margin: 8px 0 0; padding-left: 22px; }
+    .migration-summary { margin: 8px 0; color: var(--muted); }
+    .migration-list { margin: 10px 0 14px; padding-left: 22px; }
+    .migration-list li { margin: 5px 0; overflow-wrap: anywhere; }
+    .migration-confirm {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid #e5c47d;
+      border-radius: 10px;
+      background: var(--warn-bg);
+      font-weight: 700;
+    }
+    .migration-confirm input { flex: 0 0 auto; width: 20px; height: 20px; margin-top: 2px; accent-color: var(--primary); }
+
+    @media (max-width: 850px) {
+      .fields { grid-template-columns: 1fr; }
+      .file-state { width: 100%; margin-left: 0; text-align: left; }
+    }
+    @media (max-width: 520px) {
+      .page { padding: 18px 12px 52px; }
+      .section { padding: 15px; }
+      .field { grid-template-columns: 1fr; gap: 9px; }
+      .toolbar .button { flex: 1 1 140px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>setting.json エディター</h1>
+      <p class="lead">CloudBaseVarioの設定を、項目の意味・範囲・単位を確認しながら編集します。外部通信は行いません。</p>
+    </header>
+
+    <div class="toolbar">
+      <button id="openButton" class="button primary" type="button">setting.jsonを開く</button>
+      <button id="saveButton" class="button primary" type="button" disabled>上書き保存</button>
+      <button id="reloadButton" class="button" type="button" disabled>再読込</button>
+      <div class="file-state"><strong id="fileName">ファイル未選択</strong><span id="dirtyState">先にsetting.jsonを開いてください</span></div>
+    </div>
+
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div id="unsupported" class="notice warn" hidden>このブラウザは元ファイルへの直接保存に対応していません。Windows版のMicrosoft EdgeまたはGoogle ChromeでこのHTMLを開いてください。</div>
+    <div id="empty" class="empty">「setting.jsonを開く」を押し、編集するファイルを選択してください。</div>
+
+    <div id="editor" class="editor" hidden>
+      <section class="section">
+        <div class="section-heading">
+          <h2>共通設定</h2>
+          <span class="format">format_version: 1</span>
+        </div>
+        <div id="sharedFields"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <h2>バリオ音パラメータセット</h2>
+          <div class="profile-actions">
+            <label>セット番号<select id="profileNumber" aria-label="選択中のセット番号"></select></label>
+            <button id="addProfileButton" class="button" type="button">選択中を複製</button>
+            <button id="deleteProfileButton" class="button danger" type="button">削除</button>
+          </div>
+        </div>
+        <div id="profileTabs" class="profile-tabs" role="tablist"></div>
+        <div id="profileFields"></div>
+      </section>
+
+      <section id="validationSection" class="section" hidden>
+        <h2>修正が必要な項目</h2>
+        <ul id="validationList" class="validation-list"></ul>
+      </section>
+
+      <section id="migrationSection" class="section" hidden>
+        <h2>最新形式への移行内容</h2>
+        <p id="migrationSummary" class="migration-summary"></p>
+        <ul id="migrationList" class="migration-list"></ul>
+        <label class="migration-confirm">
+          <input id="migrationConfirmed" type="checkbox">
+          <span>移行内容を確認しました。補完値と削除予定項目を反映して最新形式で保存します。</span>
+        </label>
+      </section>
+    </div>
+  </main>
+
+  <script>
+  "use strict";
+
+  const MAX_FILE_BYTES = 32 * 1024;
+  const GROUPS = {
+    shared: [
+      ["基本動作", ["sea_level_pressure_pa", "auto_power_off_minutes", "filter_mode"]],
+      ["Bluetooth", ["bluetooth_battery_mode", "bluetooth_tx_power", "bluetooth_notify_rate_hz"]],
+      ["GPS・センサー", ["gps_send_interval_ms", "i2c_reinit_error_count", "imu_gyro_calibration_samples", "imu_mahony_kp", "imu_mahony_ki"]]
+    ],
+    profile: [
+      ["音状態", ["predictive_buzzer_enabled", "audio_climb_rate_average_s", "audio_state_hold_ms", "audio_stale_ms"]],
+      ["リフト・シンク判定", ["lift_start_mps", "lift_end_mps", "sink_start_mps", "sink_end_mps", "predictive_min_mps"]],
+      ["リフト音", ["lift_freq_base_hz", "lift_freq_rate_hz_per_mps", "lift_freq_max_hz", "lift_time_ms_at_0p2", "lift_time_ms_at_1p0", "lift_time_ms_at_2p5", "lift_time_ms_at_5p0"]],
+      ["シンク音", ["sink_freq_start_hz", "sink_freq_rate_hz_per_mps", "sink_freq_min_hz"]],
+      ["出力・予測ブザー", ["audio_duty_percent", "predictive_interval_ms", "predictive_duration_ms"]]
+    ]
+  };
+
+  const SPECS = {
+    sea_level_pressure_pa: {scope:"shared", type:"float", min:80000, max:110000, unit:"Pa", label:"海面更正気圧", description:"気圧から高度を求める基準気圧です。"},
+    auto_power_off_minutes: {scope:"shared", type:"uint", min:0, max:1440, unit:"分", label:"自動電源OFF時間", description:"高度変化が小さい状態で自動的に電源を切るまでの時間です。0で無効です。"},
+    filter_mode: {scope:"shared", type:"enum", choices:["AUTO","BARO_ONLY"], label:"昇降率フィルター", description:"AUTOは気圧とIMUを融合し、BARO_ONLYは気圧だけを使用します。"},
+    bluetooth_battery_mode: {scope:"shared", type:"enum", choices:["VOLTAGE","PERCENT"], label:"Bluetooth電池表示", description:"LK8EX1で電圧または残量率のどちらを送るか選びます。"},
+    bluetooth_tx_power: {scope:"shared", type:"enum", choices:["MIN","LOW","NORMAL","HIGH"], choiceLabels:{MIN:"MIN (-24 dBm)",LOW:"LOW (-12 dBm)",NORMAL:"NORMAL (0 dBm)",HIGH:"HIGH (+9 dBm)"}, label:"Bluetooth送信電力", description:"通信距離と消費電力のバランスを選びます。"},
+    bluetooth_notify_rate_hz: {scope:"shared", type:"uint", min:1, max:50, unit:"Hz", label:"Bluetooth通知頻度", description:"LK8EX1データの送信試行頻度です。"},
+    gps_send_interval_ms: {scope:"shared", type:"uint", min:200, max:10000, unit:"ms", label:"GPS送信間隔", description:"GPS搭載モデルで測位データを更新・送信する間隔です。"},
+    i2c_reinit_error_count: {scope:"shared", type:"uint", min:1, max:100, unit:"回", label:"I2C再初期化エラー回数", description:"連続I2Cエラーがこの回数に達すると復旧を試みます。"},
+    imu_gyro_calibration_samples: {scope:"shared", type:"uint", min:50, max:2000, unit:"samples", label:"ジャイロ校正サンプル数", description:"起動時の静止校正に使う連続サンプル数です。"},
+    imu_mahony_kp: {scope:"shared", type:"float", min:0, max:20, unit:"", label:"Mahony比例ゲイン Kp", description:"姿勢推定が加速度方向へ追従する強さです。"},
+    imu_mahony_ki: {scope:"shared", type:"float", min:0, max:5, unit:"", label:"Mahony積分ゲイン Ki", description:"静止時のジャイロ誤差を積分補正する強さです。"},
+
+    predictive_buzzer_enabled: {scope:"profile", type:"bool", label:"予測ブザー", description:"ゼロ付近の指定範囲で補助音を鳴らします。"},
+    audio_climb_rate_average_s: {scope:"profile", type:"float", min:0, max:10, unit:"s", label:"音用上昇率平均時間", description:"音の判定・音程・テンポに使う移動平均時間です。0で平均しません。"},
+    audio_state_hold_ms: {scope:"profile", type:"uint", min:0, max:1000, unit:"ms", label:"音状態の最小保持時間", description:"しきい値付近で音状態が頻繁に変わるのを抑えます。"},
+    audio_stale_ms: {scope:"profile", type:"uint", min:100, max:500, unit:"ms", label:"音データ有効期限", description:"最新の昇降率が古くなったと判断して消音する時間です。"},
+    lift_start_mps: {scope:"profile", type:"float", min:-1, max:5, unit:"m/s", label:"リフト開始しきい値", description:"この上昇率を上回るとリフト音を開始します。"},
+    lift_end_mps: {scope:"profile", type:"float", min:-1, max:5, unit:"m/s", label:"リフト終了しきい値", description:"この上昇率を下回るとリフト音を終了します。"},
+    sink_start_mps: {scope:"profile", type:"float", min:-10, max:0, unit:"m/s", label:"シンク開始しきい値", description:"この上昇率を下回るとシンク音を開始します。"},
+    sink_end_mps: {scope:"profile", type:"float", min:-10, max:0, unit:"m/s", label:"シンク終了しきい値", description:"この上昇率を上回るとシンク音を終了します。"},
+    predictive_min_mps: {scope:"profile", type:"float", min:-2, max:1, unit:"m/s", label:"予測ブザー下限", description:"予測ブザーを鳴らす上昇率範囲の下限です。"},
+    lift_freq_base_hz: {scope:"profile", type:"uint", min:200, max:5000, unit:"Hz", label:"リフト基準周波数", description:"上昇率0 m/sでのリフト音周波数です。"},
+    lift_freq_rate_hz_per_mps: {scope:"profile", type:"float", min:0, max:1000, unit:"Hz/(m/s)", label:"リフト周波数変化率", description:"上昇率1 m/s増加あたりの周波数増加量です。"},
+    lift_freq_max_hz: {scope:"profile", type:"uint", min:200, max:5000, unit:"Hz", label:"リフト最高周波数", description:"リフト音周波数の上限です。"},
+    lift_time_ms_at_0p2: {scope:"profile", type:"uint", min:20, max:2000, unit:"ms", label:"0.2 m/s時の音時間", description:"上昇率0.2 m/s以下でのON時間とOFF時間です。"},
+    lift_time_ms_at_1p0: {scope:"profile", type:"uint", min:20, max:2000, unit:"ms", label:"1.0 m/s時の音時間", description:"上昇率1.0 m/sでのON時間とOFF時間です。"},
+    lift_time_ms_at_2p5: {scope:"profile", type:"uint", min:20, max:2000, unit:"ms", label:"2.5 m/s時の音時間", description:"上昇率2.5 m/sでのON時間とOFF時間です。"},
+    lift_time_ms_at_5p0: {scope:"profile", type:"uint", min:70, max:2000, unit:"ms", label:"5.0 m/s時の音時間", description:"上昇率5.0 m/s以上でのON時間とOFF時間です。"},
+    sink_freq_start_hz: {scope:"profile", type:"uint", min:130, max:2000, unit:"Hz", label:"シンク基準周波数", description:"シンク音の基準周波数です。"},
+    sink_freq_rate_hz_per_mps: {scope:"profile", type:"float", min:0, max:500, unit:"Hz/(m/s)", label:"シンク周波数変化率", description:"沈下が1 m/s強くなるごとの周波数低下量です。"},
+    sink_freq_min_hz: {scope:"profile", type:"uint", min:130, max:2000, unit:"Hz", label:"シンク最低周波数", description:"シンク音周波数の下限です。"},
+    audio_duty_percent: {scope:"profile", type:"uint", min:10, max:90, unit:"%", label:"音声PWM duty比", description:"ブザーへ出力するPWM波形のduty比です。"},
+    predictive_interval_ms: {scope:"profile", type:"uint", min:20, max:2000, unit:"ms", label:"予測ブザー周期", description:"予測ブザーの鳴り始めから次の鳴り始めまでの時間です。"},
+    predictive_duration_ms: {scope:"profile", type:"uint", min:10, max:1000, unit:"ms", label:"予測ブザー発音時間", description:"各周期で実際に音を出す時間です。"}
+  };
+
+  const SHARED_KEYS = Object.keys(SPECS).filter(key => SPECS[key].scope === "shared");
+  const PROFILE_KEYS = Object.keys(SPECS).filter(key => SPECS[key].scope === "profile");
+  const EXPECTED_TOP_KEYS = ["format_version", "mc_parameters", "vario_parameter_sets"];
+  const DEFAULT_SHARED = {
+    sea_level_pressure_pa:101325.0, auto_power_off_minutes:60, filter_mode:"AUTO",
+    bluetooth_battery_mode:"VOLTAGE", bluetooth_tx_power:"LOW",
+    bluetooth_notify_rate_hz:10, gps_send_interval_ms:1000,
+    i2c_reinit_error_count:10, imu_gyro_calibration_samples:200,
+    imu_mahony_kp:5.0, imu_mahony_ki:0.05
+  };
+  const DEFAULT_PROFILE = {
+    predictive_buzzer_enabled:false, audio_climb_rate_average_s:1.0,
+    lift_start_mps:0.1, lift_end_mps:0.08, sink_start_mps:-1.8, sink_end_mps:-1.7,
+    audio_state_hold_ms:200, audio_stale_ms:500, lift_freq_base_hz:1047,
+    lift_freq_rate_hz_per_mps:100.0, lift_freq_max_hz:2600,
+    lift_time_ms_at_0p2:400, lift_time_ms_at_1p0:300, lift_time_ms_at_2p5:200,
+    lift_time_ms_at_5p0:100, sink_freq_start_hz:523,
+    sink_freq_rate_hz_per_mps:40.0, sink_freq_min_hz:240, audio_duty_percent:50,
+    predictive_interval_ms:1000, predictive_duration_ms:150, predictive_min_mps:0.01
+  };
+
+  let fileHandle = null;
+  let originalFileState = null;
+  let documentModel = null;
+  let activeProfileNumber = null;
+  let dirty = false;
+  let migration = createMigrationState();
+  const invalidInputs = new Map();
+
+  const elements = Object.fromEntries([
+    "openButton","saveButton","reloadButton","fileName","dirtyState","notice","unsupported",
+    "empty","editor","sharedFields","profileTabs","profileFields","profileNumber",
+    "addProfileButton","deleteProfileButton","validationSection","validationList",
+    "migrationSection","migrationSummary","migrationList","migrationConfirmed"
+  ].map(id => [id, document.getElementById(id)]));
+
+  function sortedUniqueKeys(value) { return Object.keys(value).sort(); }
+  function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+  function sameKeys(value, expected) {
+    return isObject(value) &&
+      JSON.stringify(sortedUniqueKeys(value)) === JSON.stringify([...expected].sort());
+  }
+  function deepClone(value) { return JSON.parse(JSON.stringify(value)); }
+  function orderedProfiles() { return [...documentModel.vario_parameter_sets].sort((a,b) => a.parameter_number - b.parameter_number); }
+  function currentProfile() { return documentModel.vario_parameter_sets.find(p => p.parameter_number === activeProfileNumber); }
+  function sharedPath(key) { return `mc_parameters.${key}`; }
+  function profilePath(number, key) { return `vario_parameter_sets[${number}].parameters.${key}`; }
+  function displayValue(value) {
+    try {
+      const rendered = JSON.stringify(value);
+      return rendered === undefined ? String(value) : rendered;
+    } catch (_) { return String(value); }
+  }
+  function createMigrationState() {
+    return {added:new Set(), removed:[], invalid:new Map(), relationInvalid:[], required:false, confirmed:false};
+  }
+  function replaceProfilePath(path, oldNumber, newNumber) {
+    const oldPrefix = `vario_parameter_sets[${oldNumber}]`;
+    return path.startsWith(oldPrefix) ? `vario_parameter_sets[${newNumber}]${path.slice(oldPrefix.length)}` : path;
+  }
+  function renameMigrationProfile(oldNumber, newNumber) {
+    migration.added = new Set([...migration.added].map(path => replaceProfilePath(path, oldNumber, newNumber)));
+    migration.removed = migration.removed.map(path => replaceProfilePath(path, oldNumber, newNumber));
+    const renamedInvalid = new Map();
+    for (const [path, item] of migration.invalid) {
+      if (item.number === oldNumber) item.number = newNumber;
+      renamedInvalid.set(replaceProfilePath(path, oldNumber, newNumber), item);
+    }
+    migration.invalid = renamedInvalid;
+    for (const item of migration.relationInvalid) if (item.number === oldNumber) item.number = newNumber;
+  }
+  function removeMigrationProfile(number) {
+    const prefix = `vario_parameter_sets[${number}]`;
+    migration.added = new Set([...migration.added].filter(path => !path.startsWith(prefix)));
+    migration.removed = migration.removed.filter(path => !path.startsWith(prefix));
+    migration.invalid = new Map([...migration.invalid].filter(([path]) => !path.startsWith(prefix)));
+    migration.relationInvalid = migration.relationInvalid.filter(item => item.number !== number);
+  }
+
+  function scanJsonForDuplicateKeys(text) {
+    let index = 0;
+    const fail = message => { throw new Error(`JSON構文エラー (${index + 1}文字目): ${message}`); };
+    const skip = () => { while (/\s/.test(text[index] || "")) index++; };
+    function parseString() {
+      if (text[index] !== '"') fail("文字列が必要です");
+      const start = index++;
+      while (index < text.length) {
+        const ch = text[index++];
+        if (ch === '"') {
+          try { return JSON.parse(text.slice(start, index)); }
+          catch (_) { fail("文字列が不正です"); }
+        }
+        if (ch === "\\") {
+          if (index >= text.length) fail("escapeが途中で終了しています");
+          if (text[index] === "u") {
+            if (!/^[0-9a-fA-F]{4}$/.test(text.slice(index + 1, index + 5))) fail("Unicode escapeが不正です");
+            index += 5;
+          } else {
+            if (!/["\\/bfnrt]/.test(text[index])) fail("escapeが不正です");
+            index++;
+          }
+        } else if (ch.charCodeAt(0) < 0x20) fail("制御文字は使用できません");
+      }
+      fail("文字列が閉じられていません");
+    }
+    function parseValue() {
+      skip();
+      const ch = text[index];
+      if (ch === "{") return parseObject();
+      if (ch === "[") return parseArray();
+      if (ch === '"') { parseString(); return; }
+      const rest = text.slice(index);
+      const number = rest.match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+      if (number) { index += number[0].length; return; }
+      for (const literal of ["true","false","null"]) {
+        if (rest.startsWith(literal)) { index += literal.length; return; }
+      }
+      fail("値が不正です");
+    }
+    function parseObject() {
+      index++; skip();
+      const keys = new Set();
+      if (text[index] === "}") { index++; return; }
+      while (true) {
+        skip(); const key = parseString();
+        if (keys.has(key)) throw new Error(`重複したキーがあります: ${key}`);
+        keys.add(key); skip();
+        if (text[index++] !== ":") fail(": が必要です");
+        parseValue(); skip();
+        if (text[index] === "}") { index++; return; }
+        if (text[index++] !== ",") fail(", または } が必要です");
+      }
+    }
+    function parseArray() {
+      index++; skip();
+      if (text[index] === "]") { index++; return; }
+      while (true) {
+        parseValue(); skip();
+        if (text[index] === "]") { index++; return; }
+        if (text[index++] !== ",") fail(", または ] が必要です");
+      }
+    }
+    parseValue(); skip();
+    if (index !== text.length) fail("末尾に余分な内容があります");
+  }
+
+  function validateScalar(key, value) {
+    const spec = SPECS[key];
+    if (spec.type === "bool") {
+      if (typeof value !== "boolean") throw new Error(`${spec.label}はtrueまたはfalseで指定してください。`);
+      return;
+    }
+    if (spec.type === "enum") {
+      if (typeof value !== "string" || !spec.choices.includes(value)) throw new Error(`${spec.label}は ${spec.choices.join(" / ")} から選択してください。`);
+      return;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${spec.label}は有限の数値で指定してください。`);
+    if (spec.type === "uint" && (!Number.isInteger(value) || value < 0)) throw new Error(`${spec.label}は0以上の整数で指定してください。`);
+    if (value < spec.min || value > spec.max) throw new Error(`${spec.label}は${spec.min}～${spec.max}${spec.unit ? " " + spec.unit : ""}の範囲で指定してください。`);
+  }
+
+  function validateRelations(profile) {
+    const errors = [];
+    if (!(profile.sink_start_mps <= profile.sink_end_mps && profile.sink_end_mps < profile.lift_end_mps && profile.lift_end_mps <= profile.lift_start_mps))
+      errors.push("sink_start ≤ sink_end < lift_end ≤ lift_start の順序にしてください。");
+    if (profile.lift_freq_base_hz > profile.lift_freq_max_hz) errors.push("リフト基準周波数はリフト最高周波数以下にしてください。");
+    if (profile.sink_freq_min_hz > profile.sink_freq_start_hz) errors.push("シンク最低周波数はシンク基準周波数以下にしてください。");
+    if (!(profile.lift_time_ms_at_0p2 >= profile.lift_time_ms_at_1p0 && profile.lift_time_ms_at_1p0 >= profile.lift_time_ms_at_2p5 && profile.lift_time_ms_at_2p5 >= profile.lift_time_ms_at_5p0))
+      errors.push("リフト音時間は0.2 → 1.0 → 2.5 → 5.0 m/sの順に同じか短くしてください。");
+    if (profile.predictive_min_mps > profile.lift_start_mps) errors.push("予測ブザー下限はリフト開始しきい値以下にしてください。");
+    if (profile.predictive_duration_ms > profile.predictive_interval_ms) errors.push("予測ブザー発音時間は周期以下にしてください。");
+    return errors;
+  }
+
+  function validateStrictDocument(root) {
+    if (!sameKeys(root, EXPECTED_TOP_KEYS)) throw new Error("top-levelはformat_version、mc_parameters、vario_parameter_setsの3項目だけにしてください。");
+    if (typeof root.format_version !== "number" || !Number.isInteger(root.format_version) || root.format_version !== 1) throw new Error("format_versionは整数の1でなければなりません。");
+    if (!sameKeys(root.mc_parameters, SHARED_KEYS)) throw new Error("mc_parametersに未知または不足している項目があります。");
+    for (const key of SHARED_KEYS) validateScalar(key, root.mc_parameters[key]);
+    if (!Array.isArray(root.vario_parameter_sets) || root.vario_parameter_sets.length < 1 || root.vario_parameter_sets.length > 5) throw new Error("vario_parameter_setsは1～5件にしてください。");
+    const numbers = new Set();
+    for (const entry of root.vario_parameter_sets) {
+      if (!sameKeys(entry, ["parameter_number","parameters"])) throw new Error("各セットはparameter_numberとparametersだけを持つ必要があります。");
+      if (!Number.isInteger(entry.parameter_number) || entry.parameter_number < 1 || entry.parameter_number > 5) throw new Error("parameter_numberは1～5の整数にしてください。");
+      if (numbers.has(entry.parameter_number)) throw new Error(`セット番号${entry.parameter_number}が重複しています。`);
+      numbers.add(entry.parameter_number);
+      if (!sameKeys(entry.parameters, PROFILE_KEYS)) throw new Error(`セット${entry.parameter_number}のparametersに未知または不足している項目があります。`);
+      for (const key of PROFILE_KEYS) validateScalar(key, entry.parameters[key]);
+      const relationErrors = validateRelations(entry.parameters);
+      if (relationErrors.length) throw new Error(`セット${entry.parameter_number}: ${relationErrors[0]}`);
+    }
+    return root;
+  }
+
+  function parseJsonText(text) {
+    const clean = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    scanJsonForDuplicateKeys(clean);
+    try { return JSON.parse(clean); }
+    catch (error) { throw new Error(`JSONを解析できません: ${error.message}`); }
+  }
+
+  function validateCurrentStructure(root) {
+    if (!isObject(root)) throw new Error("top-levelはobjectでなければなりません。");
+    for (const key of EXPECTED_TOP_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(root, key)) throw new Error(`top-levelに${key}がありません。`);
+    }
+    if (typeof root.format_version !== "number" || !Number.isInteger(root.format_version) || root.format_version !== 1) {
+      throw new Error("format_versionは整数の1でなければなりません。旧parameters.json形式は読み込めません。");
+    }
+    if (!isObject(root.mc_parameters)) throw new Error("mc_parametersはobjectでなければなりません。");
+    if (!Array.isArray(root.vario_parameter_sets) || root.vario_parameter_sets.length < 1 || root.vario_parameter_sets.length > 5) {
+      throw new Error("vario_parameter_setsは1～5件の配列でなければなりません。");
+    }
+    const numbers = new Set();
+    for (const entry of root.vario_parameter_sets) {
+      if (!isObject(entry)) throw new Error("各パラメータセットはobjectでなければなりません。");
+      if (!Object.prototype.hasOwnProperty.call(entry, "parameter_number") ||
+          !Object.prototype.hasOwnProperty.call(entry, "parameters")) {
+        throw new Error("各セットにはparameter_numberとparametersが必要です。");
+      }
+      if (!Number.isInteger(entry.parameter_number) || entry.parameter_number < 1 || entry.parameter_number > 5) {
+        throw new Error("parameter_numberは1～5の整数でなければなりません。");
+      }
+      if (numbers.has(entry.parameter_number)) throw new Error(`セット番号${entry.parameter_number}が重複しています。`);
+      numbers.add(entry.parameter_number);
+      if (!isObject(entry.parameters)) throw new Error(`セット${entry.parameter_number}のparametersはobjectでなければなりません。`);
+    }
+  }
+
+  function recordUnknownKeys(source, expected, prefix, state) {
+    for (const key of Object.keys(source)) {
+      if (!expected.includes(key)) state.removed.push(`${prefix}.${key}`);
+    }
+  }
+
+  function scalarError(key, value) {
+    try { validateScalar(key, value); return ""; }
+    catch (error) { return error.message; }
+  }
+
+  function normalizeScope(source, keys, defaults, prefix, state, profileNumber = null) {
+    const normalized = {};
+    recordUnknownKeys(source, keys, prefix, state);
+    for (const key of keys) {
+      const path = profileNumber === null ? sharedPath(key) : profilePath(profileNumber, key);
+      if (!Object.prototype.hasOwnProperty.call(source, key)) {
+        normalized[key] = deepClone(defaults[key]);
+        state.added.add(path);
+        continue;
+      }
+      normalized[key] = deepClone(source[key]);
+      const error = scalarError(key, normalized[key]);
+      if (error) {
+        state.invalid.set(path, {scope:profileNumber === null ? "shared" : "profile", number:profileNumber, key, original:deepClone(source[key]), message:error});
+      }
+    }
+    return normalized;
+  }
+
+  function importSettingText(text) {
+    const root = parseJsonText(text);
+    validateCurrentStructure(root);
+    const state = createMigrationState();
+    recordUnknownKeys(root, EXPECTED_TOP_KEYS, "top-level", state);
+    const normalized = {
+      format_version: 1,
+      mc_parameters: normalizeScope(root.mc_parameters, SHARED_KEYS, DEFAULT_SHARED, "mc_parameters", state),
+      vario_parameter_sets: []
+    };
+    for (const entry of root.vario_parameter_sets) {
+      recordUnknownKeys(entry, ["parameter_number", "parameters"], `vario_parameter_sets[${entry.parameter_number}]`, state);
+      const profile = normalizeScope(entry.parameters, PROFILE_KEYS, DEFAULT_PROFILE,
+        `vario_parameter_sets[${entry.parameter_number}].parameters`, state, entry.parameter_number);
+      if (PROFILE_KEYS.every(key => !scalarError(key, profile[key]))) {
+        for (const message of validateRelations(profile)) {
+          state.relationInvalid.push({number:entry.parameter_number, message});
+        }
+      }
+      normalized.vario_parameter_sets.push({parameter_number:entry.parameter_number, parameters:profile});
+    }
+    state.required = state.added.size > 0 || state.removed.length > 0 || state.invalid.size > 0 || state.relationInvalid.length > 0;
+    state.confirmed = !state.required;
+    return {document:normalized, migration:state};
+  }
+
+  function parseStrictSettingText(text) {
+    return validateStrictDocument(parseJsonText(text));
+  }
+
+  function setNotice(message, kind = "") {
+    elements.notice.textContent = message;
+    elements.notice.className = `notice ${kind}`.trim();
+    elements.notice.hidden = !message;
+  }
+
+  function markDirty() {
+    dirty = true;
+    if (migration.required) {
+      migration.confirmed = false;
+      elements.migrationConfirmed.checked = false;
+    }
+    elements.dirtyState.textContent = "未保存の変更があります";
+    updateValidationState();
+  }
+
+  function parseControlValue(input, spec) {
+    if (input.value === "__invalid__") throw new Error("有効な値を選択してください。");
+    if (spec.type === "bool") return input.type === "checkbox" ? input.checked : input.value === "true";
+    if (spec.type === "enum") return input.value;
+    if (input.value.trim() === "") throw new Error("値を入力してください。");
+    const value = Number(input.value);
+    validateScalar(input.dataset.key, value);
+    return value;
+  }
+
+  function makeField(key, target) {
+    const spec = SPECS[key];
+    const number = spec.scope === "profile" ? activeProfileNumber : null;
+    const path = number === null ? sharedPath(key) : profilePath(number, key);
+    const initialError = scalarError(key, target[key]);
+    if (initialError) invalidInputs.set(path, initialError);
+    const field = document.createElement("div");
+    field.className = "field";
+    if (migration.added.has(path)) field.classList.add("supplemented");
+    if (initialError) field.classList.add("invalid");
+    field.dataset.field = key;
+    const info = document.createElement("div");
+    info.innerHTML = `<label class="field-title" for="field-${spec.scope}-${key}">${spec.label}</label><span class="field-key">${key}</span><div class="field-description">${spec.description}</div>`;
+    const control = document.createElement("div");
+    control.className = "control";
+    const row = document.createElement("div");
+    row.className = "input-row";
+    let input;
+    if (spec.type === "enum") {
+      input = document.createElement("select");
+      if (initialError) {
+        const invalidOption = document.createElement("option");
+        invalidOption.value = "__invalid__";
+        invalidOption.textContent = `現在値（要修正）: ${displayValue(target[key])}`;
+        input.append(invalidOption);
+      }
+      for (const choice of spec.choices) {
+        const option = document.createElement("option"); option.value = choice; option.textContent = spec.choiceLabels?.[choice] || choice; input.append(option);
+      }
+      input.value = initialError ? "__invalid__" : target[key];
+    } else if (spec.type === "bool") {
+      if (initialError) {
+        input = document.createElement("select");
+        for (const [value, label] of [["__invalid__", `現在値（要修正）: ${displayValue(target[key])}`], ["true", "有効 (true)"], ["false", "無効 (false)"]]) {
+          const option = document.createElement("option"); option.value = value; option.textContent = label; input.append(option);
+        }
+        input.value = "__invalid__";
+        row.append(input);
+      } else {
+        const toggle = document.createElement("label"); toggle.className = "toggle";
+        input = document.createElement("input"); input.type = "checkbox"; input.checked = target[key];
+        const text = document.createElement("span"); text.textContent = input.checked ? "有効" : "無効";
+        toggle.append(input, text); row.append(toggle);
+        input.addEventListener("change", () => { text.textContent = input.checked ? "有効" : "無効"; });
+      }
+    } else {
+      input = document.createElement("input"); input.type = "number";
+      input.value = typeof target[key] === "number" && Number.isFinite(target[key]) ? target[key] : "";
+      input.min = spec.min; input.max = spec.max; input.step = spec.type === "uint" ? "1" : "any";
+      row.append(input);
+      if (spec.unit) { const unit = document.createElement("span"); unit.className = "unit"; unit.textContent = spec.unit; row.append(unit); }
+    }
+    input.id = `field-${spec.scope}-${key}`; input.dataset.key = key;
+    if (spec.type === "enum") row.append(input);
+    const range = document.createElement("div"); range.className = "range";
+    if (spec.type === "enum") range.textContent = `選択肢: ${spec.choices.join(" / ")}`;
+    else if (spec.type === "bool") range.textContent = "true / false";
+    else range.textContent = `範囲: ${spec.min} ～ ${spec.max}${spec.unit ? " " + spec.unit : ""}`;
+    const note = document.createElement("div"); note.className = "field-note";
+    if (migration.added.has(path)) note.textContent = "不足のため現在の初期値を仮設定しました。";
+    const error = document.createElement("div"); error.className = "field-error"; error.setAttribute("aria-live", "polite");
+    error.textContent = initialError ? `${initialError} 元の値: ${displayValue(target[key])}` : "";
+    const changeEvent = spec.type === "enum" || spec.type === "bool" ? "change" : "input";
+    input.addEventListener(changeEvent, () => {
+      try {
+        target[key] = parseControlValue(input, spec);
+        invalidInputs.delete(path);
+        field.classList.remove("invalid"); error.textContent = "";
+      } catch (validationError) {
+        invalidInputs.set(path, validationError.message);
+        field.classList.add("invalid"); error.textContent = validationError.message;
+      }
+      markDirty();
+    });
+    control.append(row, range, note, error); field.append(info, control);
+    return field;
+  }
+
+  function renderGroups(container, groups, target) {
+    container.replaceChildren();
+    for (const [title, keys] of groups) {
+      const heading = document.createElement("h3"); heading.textContent = title; container.append(heading);
+      const fields = document.createElement("div"); fields.className = "fields";
+      for (const key of keys) fields.append(makeField(key, target));
+      container.append(fields);
+    }
+  }
+
+  function renderProfiles() {
+    const profiles = orderedProfiles();
+    if (!profiles.some(p => p.parameter_number === activeProfileNumber)) activeProfileNumber = profiles[0].parameter_number;
+    elements.profileTabs.replaceChildren();
+    for (const profile of profiles) {
+      const button = document.createElement("button"); button.type = "button"; button.className = `tab${profile.parameter_number === activeProfileNumber ? " active" : ""}`;
+      button.textContent = `セット ${profile.parameter_number}`; button.setAttribute("role", "tab");
+      button.addEventListener("click", () => {
+        activeProfileNumber = profile.parameter_number;
+        invalidInputs.clear();
+        renderDocument();
+      });
+      elements.profileTabs.append(button);
+    }
+    elements.profileNumber.replaceChildren();
+    const used = new Set(profiles.map(p => p.parameter_number));
+    for (let number = 1; number <= 5; number++) {
+      const option = document.createElement("option"); option.value = number; option.textContent = number;
+      option.disabled = used.has(number) && number !== activeProfileNumber; option.selected = number === activeProfileNumber; elements.profileNumber.append(option);
+    }
+    elements.addProfileButton.disabled = profiles.length >= 5;
+    elements.deleteProfileButton.disabled = profiles.length <= 1;
+    renderGroups(elements.profileFields, GROUPS.profile, currentProfile().parameters);
+  }
+
+  function renderDocument() {
+    syncInvalidInputsFromModel();
+    elements.empty.hidden = true; elements.editor.hidden = false;
+    renderGroups(elements.sharedFields, GROUPS.shared, documentModel.mc_parameters);
+    renderProfiles(); updateValidationState();
+  }
+
+  function syncInvalidInputsFromModel() {
+    invalidInputs.clear();
+    for (const key of SHARED_KEYS) {
+      const error = scalarError(key, documentModel.mc_parameters[key]);
+      if (error) invalidInputs.set(sharedPath(key), error);
+    }
+    for (const profile of documentModel.vario_parameter_sets) {
+      for (const key of PROFILE_KEYS) {
+        const error = scalarError(key, profile.parameters[key]);
+        if (error) invalidInputs.set(profilePath(profile.parameter_number, key), error);
+      }
+    }
+  }
+
+  function allValidationErrors() {
+    const errors = [...invalidInputs.values()];
+    if (documentModel) {
+      for (const profile of orderedProfiles()) {
+        if (PROFILE_KEYS.every(key => !scalarError(key, profile.parameters[key]))) {
+          for (const message of validateRelations(profile.parameters)) errors.push(`セット${profile.parameter_number}: ${message}`);
+        }
+      }
+    }
+    return [...new Set(errors)];
+  }
+
+  function currentValueForMigrationItem(item) {
+    if (item.scope === "shared") return documentModel.mc_parameters[item.key];
+    return documentModel.vario_parameter_sets.find(profile => profile.parameter_number === item.number)?.parameters[item.key];
+  }
+
+  function renderMigrationReport(errors) {
+    elements.migrationSection.hidden = !migration.required;
+    if (!migration.required) return;
+    const items = [];
+    for (const path of migration.added) items.push(`補完: ${path}（現在の初期値を仮設定）`);
+    for (const path of migration.removed) items.push(`削除予定: ${path}（未知または廃止済み）`);
+    for (const [path, item] of migration.invalid) {
+      const current = currentValueForMigrationItem(item);
+      const error = current === undefined ? item.message : scalarError(item.key, current);
+      items.push(error
+        ? `要修正: ${path} = ${displayValue(item.original)}（${error}）`
+        : `修正済み: ${path} = ${displayValue(item.original)} → ${displayValue(current)}`);
+    }
+    for (const item of migration.relationInvalid) {
+      const profile = documentModel.vario_parameter_sets.find(profile => profile.parameter_number === item.number);
+      const stillInvalid = profile && validateRelations(profile.parameters).includes(item.message);
+      items.push(`${stillInvalid ? "要修正" : "修正済み"}: vario_parameter_sets[${item.number}]（${item.message}）`);
+    }
+    elements.migrationSummary.textContent = `補完${migration.added.size}件、削除予定${migration.removed.length}件、読込時エラー${migration.invalid.size + migration.relationInvalid.length}件があります。`;
+    elements.migrationList.replaceChildren(...items.map(message => {
+      const item = document.createElement("li"); item.textContent = message; return item;
+    }));
+    elements.migrationConfirmed.checked = migration.confirmed;
+    elements.migrationConfirmed.disabled = errors.length > 0;
+  }
+
+  function updateValidationState() {
+    const errors = allValidationErrors();
+    elements.validationList.replaceChildren(...errors.map(message => { const item = document.createElement("li"); item.textContent = message; return item; }));
+    elements.validationSection.hidden = errors.length === 0;
+    renderMigrationReport(errors);
+    elements.profileNumber.disabled = errors.length > 0;
+    elements.addProfileButton.disabled = errors.length > 0 || documentModel.vario_parameter_sets.length >= 5;
+    elements.deleteProfileButton.disabled = errors.length > 0 || documentModel.vario_parameter_sets.length <= 1;
+    elements.saveButton.disabled = !fileHandle || !dirty || errors.length > 0 || (migration.required && !migration.confirmed);
+  }
+
+  async function loadFromHandle(handle) {
+    const file = await handle.getFile();
+    if (file.name !== "setting.json") throw new Error("ファイル名がsetting.jsonではありません。");
+    if (file.size === 0) throw new Error("setting.jsonが空です。");
+    if (file.size > MAX_FILE_BYTES) throw new Error("setting.jsonが32 KiBを超えています。");
+    let text;
+    try {
+      text = new TextDecoder("utf-8", {fatal: true}).decode(await file.arrayBuffer());
+    } catch (_) {
+      throw new Error("setting.jsonをUTF-8として読み込めません。");
+    }
+    const imported = importSettingText(text);
+    documentModel = imported.document;
+    migration = imported.migration;
+    fileHandle = handle; originalFileState = {size:file.size, lastModified:file.lastModified};
+    activeProfileNumber = orderedProfiles()[0].parameter_number;
+    dirty = migration.required;
+    elements.fileName.textContent = file.name;
+    elements.dirtyState.textContent = migration.required ? "最新形式への移行が必要です" : "読込済み・変更なし";
+    elements.reloadButton.disabled = false; renderDocument();
+    setNotice(
+      migration.required
+        ? `${documentModel.vario_parameter_sets.length}件のセットを読み込みました。不足・不正・削除予定の内容を確認してください。`
+        : `${documentModel.vario_parameter_sets.length}件のパラメータセットを読み込みました。`,
+      migration.required ? "warn" : "ok"
+    );
+  }
+
+  async function chooseFile() {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        id: "cloudbasevario-setting-json",
+        multiple: false,
+        types: [{description:"CloudBaseVario setting.json", accept:{"application/json":[".json"]}}],
+        excludeAcceptAllOption: true
+      });
+      await loadFromHandle(handle);
+    } catch (error) {
+      if (error.name !== "AbortError") setNotice(error.message || String(error), "error");
+    }
+  }
+
+  function canonicalText() {
+    const root = {
+      format_version: 1,
+      mc_parameters: Object.fromEntries(SHARED_KEYS.map(key => [key, documentModel.mc_parameters[key]])),
+      vario_parameter_sets: orderedProfiles().map(profile => ({
+        parameter_number: profile.parameter_number,
+        parameters: Object.fromEntries(PROFILE_KEYS.map(key => [key, profile.parameters[key]]))
+      }))
+    };
+    validateStrictDocument(root);
+    return JSON.stringify(root, null, 2) + "\n";
+  }
+
+  async function saveFile() {
+    try {
+      const current = await fileHandle.getFile();
+      if (current.size !== originalFileState.size || current.lastModified !== originalFileState.lastModified) {
+        if (!confirm("setting.jsonが読込後に別の操作で変更されています。現在の画面内容で上書きしますか？")) return;
+      }
+      const text = canonicalText();
+      const writable = await fileHandle.createWritable();
+      await writable.write(text); await writable.close();
+      const saved = await fileHandle.getFile();
+      let savedText;
+      try {
+        savedText = new TextDecoder("utf-8", {fatal: true}).decode(await saved.arrayBuffer());
+      } catch (_) {
+        throw new Error("保存後のsetting.jsonをUTF-8として読み込めません。");
+      }
+      const verified = parseStrictSettingText(savedText);
+      if (JSON.stringify(verified) !== JSON.stringify(JSON.parse(text))) throw new Error("保存後の内容が画面の値と一致しません。");
+      originalFileState = {size:saved.size, lastModified:saved.lastModified};
+      migration = createMigrationState();
+      dirty = false;
+      elements.dirtyState.textContent = "保存済み";
+      renderDocument();
+      setNotice("setting.jsonを保存して再検証しました。HTMLを閉じ、USBドライブを安全に取り外してから本体を再起動してください。", "ok");
+    } catch (error) { setNotice(`保存できませんでした: ${error.message || error}`, "error"); }
+  }
+
+  elements.openButton.addEventListener("click", chooseFile);
+  elements.saveButton.addEventListener("click", saveFile);
+  elements.migrationConfirmed.addEventListener("change", () => {
+    migration.confirmed = elements.migrationConfirmed.checked;
+    updateValidationState();
+  });
+  elements.reloadButton.addEventListener("click", async () => {
+    if (dirty && !confirm("未保存の変更を破棄してsetting.jsonを再読込しますか？")) return;
+    try { await loadFromHandle(fileHandle); } catch (error) { setNotice(error.message || String(error), "error"); }
+  });
+  elements.profileNumber.addEventListener("change", () => {
+    const next = Number(elements.profileNumber.value);
+    const previous = activeProfileNumber;
+    currentProfile().parameter_number = next;
+    renameMigrationProfile(previous, next);
+    activeProfileNumber = next;
+    invalidInputs.clear();
+    markDirty();
+    renderDocument();
+  });
+  elements.addProfileButton.addEventListener("click", () => {
+    const used = new Set(orderedProfiles().map(p => p.parameter_number));
+    const next = [1,2,3,4,5].find(number => !used.has(number));
+    if (!next) return;
+    documentModel.vario_parameter_sets.push({parameter_number:next, parameters:deepClone(currentProfile()?.parameters || DEFAULT_PROFILE)});
+    activeProfileNumber = next;
+    invalidInputs.clear();
+    markDirty();
+    renderDocument();
+    setNotice(`セット${next}を複製しました。`, "ok");
+  });
+  elements.deleteProfileButton.addEventListener("click", () => {
+    if (documentModel.vario_parameter_sets.length <= 1) return;
+    if (!confirm(`セット${activeProfileNumber}を削除しますか？`)) return;
+    removeMigrationProfile(activeProfileNumber);
+    documentModel.vario_parameter_sets = documentModel.vario_parameter_sets.filter(p => p.parameter_number !== activeProfileNumber);
+    activeProfileNumber = orderedProfiles()[0].parameter_number;
+    invalidInputs.clear();
+    markDirty();
+    renderDocument();
+  });
+  window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+
+  if (!("showOpenFilePicker" in window)) {
+    elements.unsupported.hidden = false; elements.openButton.disabled = true;
+  }
+
+  // No external test file is required; this hook only exposes pure validation and rendering to local browser tests.
+  window.settingEditorTest = {
+    importSettingText,
+    parseStrictSettingText,
+    canonicalText,
+    loadDocument(text) {
+      const imported = importSettingText(text);
+      documentModel = imported.document;
+      migration = imported.migration;
+      activeProfileNumber = orderedProfiles()[0].parameter_number;
+      fileHandle = null; dirty = migration.required;
+      elements.fileName.textContent = "テストデータ"; elements.dirtyState.textContent = "テスト表示"; renderDocument();
+      return {
+        shared:SHARED_KEYS.length,
+        profile:PROFILE_KEYS.length,
+        sets:documentModel.vario_parameter_sets.length,
+        added:migration.added.size,
+        removed:migration.removed.length,
+        invalid:migration.invalid.size + migration.relationInvalid.length,
+        required:migration.required
+      };
+    },
+    setValue(scope, number, key, value) {
+      const target = scope === "shared"
+        ? documentModel.mc_parameters
+        : documentModel.vario_parameter_sets.find(profile => profile.parameter_number === number).parameters;
+      target[key] = value;
+      markDirty();
+      renderDocument();
+    },
+    confirmMigration() {
+      migration.confirmed = true;
+      elements.migrationConfirmed.checked = true;
+      updateValidationState();
+    },
+    state() {
+      return {
+        dirty,
+        errors:allValidationErrors(),
+        migrationRequired:migration.required,
+        migrationConfirmed:migration.confirmed,
+        added:[...migration.added],
+        removed:[...migration.removed]
+      };
+    },
+    snapshot() { return deepClone(documentModel); },
+    specs: SPECS
+  };
+  </script>
+</body>
+</html>
