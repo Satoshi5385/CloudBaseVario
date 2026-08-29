@@ -75,4 +75,4 @@ jobs:
           grep -Fx '#define CONFIG_ESP_COREDUMP_ENABLE_TO_NONE 1' build/config/sdkconfig.h
           grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' build/config/sdkconfig.h
           grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CCCDS 3' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 23' build/config/sdkconfig.h
+          grep -Fx '#define CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 247' build/config/sdkconfig.h

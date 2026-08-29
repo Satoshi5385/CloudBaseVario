@@ -7,7 +7,7 @@
 #include "domain/lk8ex1.h"
 
 #define BLE_NUS_TX_MAX_SENTENCES 2U
-#define BLE_NUS_TX_TOKENS_PER_INTERVAL 2U
+#define BLE_NUS_TX_TOKENS_PER_INTERVAL 4U
 #define BLE_NUS_TX_SENTENCE_CAPACITY LK8EX1_SENTENCE_MAX_LENGTH
 
 typedef enum {
@@ -104,11 +104,11 @@ ble_nus_tx_offer_result_t ble_nus_tx_offer_gps(
     const char *rmc, size_t rmc_length,
     const char *gga, size_t gga_length);
 
-/** Reset the two-token burst budget for a new usable link. */
+/** Reset the four-token burst budget for a new usable link. */
 void ble_nus_tx_reset_budget(ble_nus_tx_state_t *state, int64_t now_us,
                              uint32_t connection_interval_us);
 
-/** Refill two tokens per elapsed connection interval, capped at two. */
+/** Refill four tokens per elapsed connection interval, capped at four. */
 void ble_nus_tx_refill_budget(ble_nus_tx_state_t *state, int64_t now_us,
                               uint32_t connection_interval_us);
 

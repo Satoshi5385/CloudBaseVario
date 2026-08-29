@@ -9,6 +9,12 @@ ROOT_CMAKE = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 UPDATE_SOURCE = (ROOT / "SRC/platform/firmware_update.c").read_text(
     encoding="utf-8"
 )
+AUTH_SOURCE = (ROOT / "SRC/platform/firmware_auth.c").read_text(
+    encoding="utf-8"
+)
+AUTH_HEADER = (ROOT / "SRC/platform/firmware_auth.h").read_text(
+    encoding="utf-8"
+)
 WORKER_SOURCE = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
 
 
@@ -45,6 +51,33 @@ class FirmwareVersionPolicyTests(unittest.TestCase):
         self.assertIn("FIRMWARE_AUTH_RECORD_SIZE", UPDATE_SOURCE)
         self.assertIn("esp_partition_erase_range", UPDATE_SOURCE)
         self.assertIn("3665920", ROOT_CMAKE)
+
+    def test_authentication_rejection_distinguishes_hash_and_signature(self) -> None:
+        for failure in (
+            "FIRMWARE_AUTH_FAILURE_NONE",
+            "FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH",
+            "FIRMWARE_AUTH_FAILURE_SIGNATURE_INVALID",
+            "FIRMWARE_AUTH_FAILURE_OTHER",
+        ):
+            self.assertIn(failure, AUTH_HEADER)
+        self.assertIn(
+            "*failure = FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH;",
+            AUTH_SOURCE,
+        )
+        self.assertIn("*failure = FIRMWARE_AUTH_FAILURE_OTHER;", AUTH_SOURCE)
+        self.assertIn("*failure = FIRMWARE_AUTH_FAILURE_NONE;", AUTH_SOURCE)
+        self.assertIn("status == PSA_ERROR_INVALID_SIGNATURE", AUTH_SOURCE)
+        self.assertIn(
+            "*failure = FIRMWARE_AUTH_FAILURE_SIGNATURE_INVALID;",
+            AUTH_SOURCE,
+        )
+        self.assertIn('return "firmware payload hash mismatch";', UPDATE_SOURCE)
+        self.assertIn(
+            'return "firmware signature verification failed";',
+            UPDATE_SOURCE,
+        )
+        self.assertIn('return "firmware authentication failed";', UPDATE_SOURCE)
+        self.assertNotIn('"auth_failure=', UPDATE_SOURCE)
 
     def test_board_and_diag_report_hash_without_removing_fingerprint(self) -> None:
         self.assertIn("firmware_hash=%s", WORKER_SOURCE)

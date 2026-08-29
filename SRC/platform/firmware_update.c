@@ -62,6 +62,7 @@ typedef struct {
     esp_image_header_t header;
     esp_app_desc_t descriptor;
     firmware_auth_header_t authentication;
+    firmware_auth_failure_t auth_failure;
 } update_image_info_t;
 
 static void make_path(const char *name, char *path, size_t capacity) {
@@ -219,7 +220,8 @@ static esp_err_t inspect_image(const char *name, update_image_info_t *info,
     }
     ret = firmware_auth_verify_package(file, (size_t) file_info.st_size,
                                        CBV_FIRMWARE_PROJECT_NAME,
-                                       &info->authentication);
+                                       &info->authentication,
+                                       &info->auth_failure);
     if (ret == ESP_OK) {
         info->size = info->authentication.payload_size;
         info->payload_offset = info->authentication.header_size;
@@ -317,13 +319,29 @@ static esp_err_t reject_input(esp_err_t reason, const char *message,
     return reason;
 }
 
-static esp_err_t reject_authentication(esp_err_t reason) {
+static const char *authentication_failure_reason(
+    firmware_auth_failure_t failure) {
+    switch (failure) {
+    case FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH:
+        return "firmware payload hash mismatch";
+    case FIRMWARE_AUTH_FAILURE_SIGNATURE_INVALID:
+        return "firmware signature verification failed";
+    case FIRMWARE_AUTH_FAILURE_NONE:
+    case FIRMWARE_AUTH_FAILURE_OTHER:
+        return "firmware authentication failed";
+    }
+    return "firmware authentication failed";
+}
+
+static esp_err_t reject_authentication(
+    esp_err_t reason, firmware_auth_failure_t auth_failure) {
     set_state(FIRMWARE_UPDATE_REJECTED, reason);
     (void) write_status(
         "state=REJECTED\r\n"
-        "reason=firmware authentication failed\r\n"
+        "reason=%s\r\n"
         "error=%s\r\n"
         "version=-\r\nhash=-\r\n",
+        authentication_failure_reason(auth_failure),
         esp_err_to_name(reason));
     return reason;
 }
@@ -637,7 +655,7 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
         if (project_mismatch) {
             ret = reject_project_mismatch(&image_info);
         } else {
-            ret = reject_authentication(ret);
+            ret = reject_authentication(ret, image_info.auth_failure);
         }
         usb_device_storage_end_app_io();
         return ret;

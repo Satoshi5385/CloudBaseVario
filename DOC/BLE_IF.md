@@ -11,7 +11,7 @@
 ### 1.1. BLEプロファイル構成
 
 * **デバイスロール (Role):** BLEペリフェラル (Peripheral)
-* **ATT MTU:** 23バイト以上。MTU negotiationの成功を前提とせず、1センテンスが `ATT_MTU - 3` を超える場合はNUSのbyte streamとして複数Notifyへ分割します。
+* **ATT MTU:** 23～247バイト。Preferred MTUは247としますが、実際の値はXCTrackとの交渉結果に従います。MTU negotiationの成功を前提とせず、1センテンスが `ATT_MTU - 3` を超える場合はNUSのbyte streamとして複数Notifyへ分割します。
 
 ### 1.2. サービス・キャラクタリスティック定義
 
@@ -82,7 +82,7 @@ LK8EX1には充電状態を示す標準フィールドがないため、独自�
 ## 3. 運用・パフォーマンス要件
 
 * **データ送信頻度 (Update Rate):** `setting.json`の共有設定`bluetooth_notify_rate_hz`で1～50 Hzに設定します。既定値は10 Hzです。
-※NUS TXは交渉済みの接続間隔ごとに最大2 fragmentを送信します。帯域が不足した場合はLK8EX1とGPSそれぞれの最新未送信データ1件だけを保持し、古い待機データを置換します。再送や過去周期への追いつき連送は行わないため、実際の成功Notify数は設定値を下回ることがあります。
+※NUS TXは交渉済みの接続間隔ごとに最大4 fragmentを送信します。接続後は15～30 msのconnection intervalを要求しますが、実際の値はXCTrackとの交渉結果に従います。帯域が不足した場合はLK8EX1とGPSそれぞれの最新未送信データ1件だけを保持し、古い待機データを置換します。再送や過去周期への追いつき連送は行わないため、実際の成功Notify数は設定値を下回ることがあります。
 * **送信電力:** `setting.json`の共有設定`bluetooth_tx_power`で`MIN`（-24 dBm）、`LOW`（-12 dBm、既定値）、`NORMAL`（0 dBm）、`HIGH`（+9 dBm）から選択します。起動時、接続成立時、および動作中の設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。
 * **GPS:** GPS搭載モデルは、checksumが正常でUTC時刻が一致するRMCとGGAをこの順でNUS TXへ送信します。`GPRMC`／`GNRMC`および`GPGGA`／`GNGGA`を受理し、各センテンスはLK8EX1と同じく`ATT_MTU - 3`以下へ分割します。1組の途中にLK8EX1を挟みません。送信周期は`gps_send_interval_ms`（200～10000 ms、既定1000 ms）で設定します。GPS搭載有無は製造時に固定され、ユーザーは変更できません。
 * **データ送信時の注意点:**

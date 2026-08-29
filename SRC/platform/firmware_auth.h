@@ -27,10 +27,18 @@ typedef struct __attribute__((packed)) {
     uint8_t signature[FIRMWARE_AUTH_SIGNATURE_LENGTH];
 } firmware_auth_header_t;
 
+typedef enum {
+    FIRMWARE_AUTH_FAILURE_NONE = 0,
+    FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH,
+    FIRMWARE_AUTH_FAILURE_SIGNATURE_INVALID,
+    FIRMWARE_AUTH_FAILURE_OTHER,
+} firmware_auth_failure_t;
+
 /** Validate an UPDATE.BIN container at its current file position. */
 esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
                                        const char *expected_project,
-                                       firmware_auth_header_t *header);
+                                       firmware_auth_header_t *header,
+                                       firmware_auth_failure_t *failure);
 
 /** Hash raw application bytes and verify their final-sector auth record. */
 esp_err_t firmware_authenticate_partition(

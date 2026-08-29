@@ -105,10 +105,12 @@ static esp_err_t signature_digest(const firmware_auth_header_t *header,
     return sha256_finish(&context, digest);
 }
 
-static esp_err_t verify_signature(const firmware_auth_header_t *header) {
+static esp_err_t verify_signature(const firmware_auth_header_t *header,
+                                  firmware_auth_failure_t *failure) {
     uint8_t digest[FIRMWARE_AUTH_SHA256_LENGTH];
     psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
     psa_key_id_t public_key = MBEDTLS_SVC_KEY_ID_INIT;
+    psa_status_t status;
     esp_err_t ret;
 
     if (!key_is_provisioned()) {
@@ -123,12 +125,24 @@ static esp_err_t verify_signature(const firmware_auth_header_t *header) {
     psa_set_key_type(&attributes,
                      PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
     psa_set_key_bits(&attributes, 256U);
-    if (psa_import_key(&attributes, k_public_key, sizeof(k_public_key),
-                       &public_key) != PSA_SUCCESS ||
-        psa_verify_hash(public_key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), digest,
-                        sizeof(digest), header->signature,
-                        sizeof(header->signature)) != PSA_SUCCESS) {
-        ret = ESP_ERR_INVALID_CRC;
+    status = psa_import_key(&attributes, k_public_key, sizeof(k_public_key),
+                            &public_key);
+    if (status != PSA_SUCCESS) {
+        ret = ESP_FAIL;
+    } else {
+        status = psa_verify_hash(public_key,
+                                 PSA_ALG_ECDSA(PSA_ALG_SHA_256), digest,
+                                 sizeof(digest), header->signature,
+                                 sizeof(header->signature));
+        if (status == PSA_ERROR_INVALID_SIGNATURE) {
+            *failure = FIRMWARE_AUTH_FAILURE_SIGNATURE_INVALID;
+            ret = ESP_ERR_INVALID_CRC;
+        } else if (status != PSA_SUCCESS) {
+            ret = ESP_FAIL;
+        }
+    }
+    if (ret == ESP_OK) {
+        *failure = FIRMWARE_AUTH_FAILURE_NONE;
     }
     if (public_key != MBEDTLS_SVC_KEY_ID_INIT) {
         (void) psa_destroy_key(public_key);
@@ -168,10 +182,15 @@ static esp_err_t hash_file_payload(FILE *file, const firmware_auth_header_t *hea
 
 esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
                                        const char *expected_project,
-                                       firmware_auth_header_t *header) {
+                                       firmware_auth_header_t *header,
+                                       firmware_auth_failure_t *failure) {
     uint8_t payload_hash[FIRMWARE_AUTH_SHA256_LENGTH];
     esp_err_t ret;
 
+    if (failure == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *failure = FIRMWARE_AUTH_FAILURE_OTHER;
     if (file == NULL || header == NULL || expected_project == NULL ||
         file_size < FIRMWARE_AUTH_HEADER_SIZE ||
         fread(header, 1, sizeof(*header), file) != sizeof(*header) ||
@@ -179,11 +198,15 @@ esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
         return ESP_ERR_INVALID_RESPONSE;
     }
     ret = hash_file_payload(file, header, payload_hash);
-    if (ret != ESP_OK ||
-        memcmp(payload_hash, header->payload_sha256, sizeof(payload_hash)) != 0) {
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (memcmp(payload_hash, header->payload_sha256,
+               sizeof(payload_hash)) != 0) {
+        *failure = FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH;
         return ESP_ERR_INVALID_CRC;
     }
-    return verify_signature(header);
+    return verify_signature(header, failure);
 }
 
 static esp_err_t hash_partition_payload(
@@ -216,6 +239,7 @@ esp_err_t firmware_authenticate_partition(
     const esp_partition_t *partition, const char *expected_project,
     firmware_authentication_t *authentication) {
     firmware_auth_header_t header;
+    firmware_auth_failure_t failure = FIRMWARE_AUTH_FAILURE_OTHER;
     uint8_t payload_hash[FIRMWARE_AUTH_SHA256_LENGTH];
     size_t record_offset;
     esp_err_t ret;
@@ -243,7 +267,7 @@ esp_err_t firmware_authenticate_partition(
         return ret;
     }
     if (memcmp(payload_hash, header.payload_sha256, sizeof(payload_hash)) != 0 ||
-        verify_signature(&header) != ESP_OK) {
+        verify_signature(&header, &failure) != ESP_OK) {
         authentication->authenticity = FIRMWARE_AUTH_NON_OFFICIAL;
         return ESP_OK;
     }

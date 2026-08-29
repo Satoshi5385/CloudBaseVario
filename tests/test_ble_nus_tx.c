@@ -36,6 +36,8 @@ static void test_token_budget(void) {
     assert(ble_nus_tx_has_token(&state));
     assert(ble_nus_tx_take_token(&state));
     assert(ble_nus_tx_take_token(&state));
+    assert(ble_nus_tx_take_token(&state));
+    assert(ble_nus_tx_take_token(&state));
     assert(!ble_nus_tx_take_token(&state));
     assert(ble_nus_tx_next_refill_us(&state) == INT64_C(51000));
 
@@ -48,9 +50,13 @@ static void test_token_budget(void) {
     ble_nus_tx_refill_budget(&state, INT64_C(101000), UINT32_C(50000));
     assert(ble_nus_tx_take_token(&state));
     assert(ble_nus_tx_take_token(&state));
+    assert(ble_nus_tx_take_token(&state));
+    assert(ble_nus_tx_take_token(&state));
     assert(!ble_nus_tx_take_token(&state));
 
     ble_nus_tx_refill_budget(&state, INT64_C(501000), UINT32_C(50000));
+    assert(ble_nus_tx_take_token(&state));
+    assert(ble_nus_tx_take_token(&state));
     assert(ble_nus_tx_take_token(&state));
     assert(ble_nus_tx_take_token(&state));
     assert(!ble_nus_tx_take_token(&state));

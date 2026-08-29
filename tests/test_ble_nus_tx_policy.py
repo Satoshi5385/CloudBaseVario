@@ -10,6 +10,7 @@ PLATFORM_HEADER = (ROOT / "SRC/platform/ble_vario.h").read_text(encoding="utf-8"
 WORKER = (ROOT / "SRC/app/ble_tx_worker.c").read_text(encoding="utf-8")
 DIAGNOSTICS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
 CI = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+SDKCONFIG_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
 
 
 class BleNusTxPolicyTests(unittest.TestCase):
@@ -29,15 +30,17 @@ class BleNusTxPolicyTests(unittest.TestCase):
         self.assertIn("state->last_selected_source == BLE_NUS_TX_SOURCE_LK8EX1", DOMAIN)
         self.assertIn("state->resync_pending = true", DOMAIN)
 
-    def test_worker_enforces_two_token_non_accumulating_budget(self) -> None:
-        self.assertIn("BLE_NUS_TX_TOKENS_PER_INTERVAL 2U", DOMAIN_HEADER)
+    def test_worker_enforces_four_token_non_accumulating_budget(self) -> None:
+        self.assertIn("BLE_NUS_TX_TOKENS_PER_INTERVAL 4U", DOMAIN_HEADER)
         self.assertIn(
             "state->available_tokens = BLE_NUS_TX_TOKENS_PER_INTERVAL;",
             DOMAIN,
         )
         self.assertIn("ble_nus_tx_take_token(tx_state)", WORKER)
         self.assertIn("ble_nus_tx_defer_until_refill(tx_state)", WORKER)
-        self.assertIn("DEFAULT_CONNECTION_INTERVAL_US UINT32_C(50000)", WORKER)
+        self.assertIn("DEFAULT_CONNECTION_INTERVAL_US UINT32_C(30000)", WORKER)
+        self.assertIn("BLE_CONNECTION_INTERVAL_MIN_MS UINT32_C(15)", PLATFORM)
+        self.assertIn("BLE_CONNECTION_INTERVAL_MAX_MS UINT32_C(30)", PLATFORM)
 
     def test_diagnostics_and_ci_cover_the_new_contract(self) -> None:
         for field in (
@@ -51,7 +54,8 @@ class BleNusTxPolicyTests(unittest.TestCase):
         ):
             self.assertIn(field, DIAGNOSTICS)
         self.assertIn("tests/test_ble_nus_tx.c", CI)
-        self.assertIn("CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 23", CI)
+        self.assertIn("CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 247", CI)
+        self.assertIn("CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247", SDKCONFIG_DEFAULTS)
         self.assertIn("CONFIG_BT_NIMBLE_MAX_CCCDS 3", CI)
 
 
