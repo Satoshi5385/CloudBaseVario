@@ -33,7 +33,8 @@
 #define CONFIG_MOUNT_PATH "/config"
 #define CONFIG_VOLUME_LABEL "CBVARIO"
 #define INFO_FILENAME "INFO.TXT"
-#define INFO_PATH_CAPACITY 16U
+#define SETTING_EDITOR_FILENAME "setting_editor.html"
+#define GENERATED_FILE_PATH_CAPACITY 32U
 #define STORAGE_MUTEX_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_QUIESCE_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_IDLE_US INT64_C(1000000)
@@ -42,6 +43,10 @@
     (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
 static const char *TAG = "usb_device";
+extern const uint8_t setting_editor_html_start[]
+    asm("_binary_setting_editor_html_start");
+extern const uint8_t setting_editor_html_end[]
+    asm("_binary_setting_editor_html_end");
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t storage_io_mutex;
 static SemaphoreHandle_t msc_policy_mutex;
@@ -283,6 +288,69 @@ static void log_config_load_result(void) {
     }
 }
 
+static esp_err_t write_read_only_file(wl_handle_t wl_handle,
+                                      const char *filename,
+                                      const uint8_t *contents,
+                                      size_t content_length) {
+    char fat_path[GENERATED_FILE_PATH_CAPACITY] = {0};
+    char vfs_path[GENERATED_FILE_PATH_CAPACITY] = {0};
+    BYTE pdrv;
+    FRESULT attribute_result;
+    FILE *file;
+    int path_length;
+    bool write_succeeded;
+
+    if (filename == NULL || filename[0] == '\0' || contents == NULL ||
+        content_length == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    pdrv = ff_diskio_get_pdrv_wl(wl_handle);
+    if (pdrv > 9U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    path_length = snprintf(fat_path, sizeof(fat_path), "%u:/%s",
+                           (unsigned int) pdrv, filename);
+    if (path_length <= 0 || (size_t) path_length >= sizeof(fat_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    path_length = snprintf(vfs_path, sizeof(vfs_path), "%s/%s",
+                           CONFIG_MOUNT_PATH, filename);
+    if (path_length <= 0 || (size_t) path_length >= sizeof(vfs_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    attribute_result = f_chmod(fat_path, 0U, AM_RDO);
+    if (attribute_result != FR_OK && attribute_result != FR_NO_FILE) {
+        ESP_LOGE(TAG, "%s read-only attribute clear failed: %d", filename,
+                 (int) attribute_result);
+        return ESP_FAIL;
+    }
+
+    file = fopen(vfs_path, "wb");
+    if (file == NULL) {
+        ESP_LOGE(TAG, "%s create failed", filename);
+        return ESP_FAIL;
+    }
+    write_succeeded =
+        fwrite(contents, 1U, content_length, file) == content_length &&
+        fflush(file) == 0 && fsync(fileno(file)) == 0;
+    if (fclose(file) != 0) {
+        write_succeeded = false;
+    }
+    if (!write_succeeded) {
+        ESP_LOGE(TAG, "%s write or sync failed", filename);
+        return ESP_FAIL;
+    }
+
+    attribute_result = f_chmod(fat_path, AM_RDO, AM_RDO);
+    if (attribute_result != FR_OK) {
+        ESP_LOGE(TAG, "%s read-only attribute set failed: %d", filename,
+                 (int) attribute_result);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t write_info_file(wl_handle_t wl_handle) {
     const board_identity_t *identity = board_active_identity();
     const board_descriptor_t *descriptor = board_active_descriptor();
@@ -291,13 +359,6 @@ static esp_err_t write_info_file(wl_handle_t wl_handle) {
     firmware_authentication_t authentication = {0};
     const esp_partition_t *running_partition;
     char contents[BOARD_INFO_TEXT_CAPACITY] = {0};
-    char fat_path[INFO_PATH_CAPACITY] = {0};
-    BYTE pdrv;
-    FRESULT attribute_result;
-    FILE *file;
-    size_t content_length;
-    int path_length;
-    bool write_succeeded;
 
     if (app != NULL) {
         (void) firmware_metadata_parse(app->version, sizeof(app->version),
@@ -317,47 +378,21 @@ static esp_err_t write_info_file(wl_handle_t wl_handle) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    pdrv = ff_diskio_get_pdrv_wl(wl_handle);
-    if (pdrv > 9U) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    path_length = snprintf(fat_path, sizeof(fat_path), "%u:/%s",
-                           (unsigned int) pdrv, INFO_FILENAME);
-    if (path_length <= 0 || (size_t) path_length >= sizeof(fat_path)) {
+    return write_read_only_file(wl_handle, INFO_FILENAME,
+                                (const uint8_t *) contents,
+                                strlen(contents));
+}
+
+static esp_err_t write_setting_editor_file(wl_handle_t wl_handle) {
+    size_t content_length;
+
+    if (&setting_editor_html_end[0] <= &setting_editor_html_start[0]) {
         return ESP_ERR_INVALID_SIZE;
     }
-
-    attribute_result = f_chmod(fat_path, 0U, AM_RDO);
-    if (attribute_result != FR_OK && attribute_result != FR_NO_FILE) {
-        ESP_LOGE(TAG, "INFO.TXT read-only attribute clear failed: %d",
-                 (int) attribute_result);
-        return ESP_FAIL;
-    }
-
-    file = fopen(CONFIG_MOUNT_PATH "/" INFO_FILENAME, "wb");
-    if (file == NULL) {
-        ESP_LOGE(TAG, "INFO.TXT create failed");
-        return ESP_FAIL;
-    }
-    content_length = strlen(contents);
-    write_succeeded =
-        fwrite(contents, 1U, content_length, file) == content_length &&
-        fflush(file) == 0 && fsync(fileno(file)) == 0;
-    if (fclose(file) != 0) {
-        write_succeeded = false;
-    }
-    if (!write_succeeded) {
-        ESP_LOGE(TAG, "INFO.TXT write or sync failed");
-        return ESP_FAIL;
-    }
-
-    attribute_result = f_chmod(fat_path, AM_RDO, AM_RDO);
-    if (attribute_result != FR_OK) {
-        ESP_LOGE(TAG, "INFO.TXT read-only attribute set failed: %d",
-                 (int) attribute_result);
-        return ESP_FAIL;
-    }
-    return ESP_OK;
+    content_length = (size_t) (setting_editor_html_end -
+                               setting_editor_html_start);
+    return write_read_only_file(wl_handle, SETTING_EDITOR_FILENAME,
+                                setting_editor_html_start, content_length);
 }
 
 static bool make_serial_number(void) {
@@ -595,6 +630,15 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     ret = write_info_file(preflight_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "INFO.TXT generation failed: %s", esp_err_to_name(ret));
+        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
+                                                   preflight_handle);
+        set_storage_unavailable(ret);
+        return ret;
+    }
+    ret = write_setting_editor_file(preflight_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "setting_editor.html generation failed: %s",
+                 esp_err_to_name(ret));
         (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
                                                    preflight_handle);
         set_storage_unavailable(ret);

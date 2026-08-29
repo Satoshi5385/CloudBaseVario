@@ -171,22 +171,10 @@ static bool parse_parameters_object(
         size_t index = 0U;
         app_parameter_info_t info = {0};
 
-        if (child->string == NULL) {
-            config_json_set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_PARAMETER, NULL, 0);
-            goto cleanup;
-        }
-        if (!parameter_index_by_name(child->string, &index, &info)) {
-            config_json_set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_PARAMETER,
-                            child->string, 0);
-            goto cleanup;
-        }
-        if (info.scope != expected_scope) {
-            config_json_set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_PARAMETER,
-                            child->string, 0);
-            goto cleanup;
+        if (child->string == NULL ||
+            !parameter_index_by_name(child->string, &index, &info) ||
+            info.scope != expected_scope) {
+            continue;
         }
         if (seen[index]) {
             config_json_set_diagnostics(diagnostics, CONFIG_VALIDATION_DUPLICATE_KEY,
@@ -267,25 +255,18 @@ bool config_json_parse(const char *json, size_t json_length,
     }
 
     for (cJSON *child = root->child; child != NULL; child = child->next) {
-        if (child->string == NULL) {
-            config_json_set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_TOP_LEVEL_KEY, NULL, 0);
-            goto cleanup;
-        }
-        if (strcmp(child->string, "format_version") == 0) {
+        if (child->string != NULL &&
+            strcmp(child->string, "format_version") == 0) {
             version_count++;
             version = child;
-        } else if (strcmp(child->string, "mc_parameters") == 0) {
+        } else if (child->string != NULL &&
+                   strcmp(child->string, "mc_parameters") == 0) {
             mc_parameters_count++;
             mc_parameters = child;
-        } else if (strcmp(child->string, "vario_parameter_sets") == 0) {
+        } else if (child->string != NULL &&
+                   strcmp(child->string, "vario_parameter_sets") == 0) {
             vario_parameter_sets_count++;
             vario_parameter_sets = child;
-        } else {
-            config_json_set_diagnostics(diagnostics,
-                            CONFIG_VALIDATION_UNKNOWN_TOP_LEVEL_KEY,
-                            child->string, 0);
-            goto cleanup;
         }
     }
     if (version_count == 0U) {
@@ -347,7 +328,7 @@ bool config_json_parse(const char *json, size_t json_length,
     }
     {
         int profile_count = 0;
-        bool seen_numbers[APP_CONFIG_PROFILE_MAX_NUMBER + 1U] = {false};
+        uint8_t number_occurrences[APP_CONFIG_PROFILE_MAX_NUMBER + 1U] = {0U};
 
 
         if (!cJSON_IsArray(vario_parameter_sets)) {
@@ -357,102 +338,99 @@ bool config_json_parse(const char *json, size_t json_length,
             goto cleanup;
         }
         profile_count = cJSON_GetArraySize(vario_parameter_sets);
-        if (profile_count < 1 ||
-            profile_count > (int) APP_CONFIG_PROFILE_MAX_COUNT) {
+        if (profile_count < 1) {
             config_json_set_diagnostics(diagnostics, CONFIG_VALIDATION_PROFILE_COUNT,
                             "vario_parameter_sets", 0);
             goto cleanup;
         }
-        candidate->count = (size_t) profile_count;
-        for (size_t index = 0U; index < candidate->count; index++) {
+        for (int index = 0; index < profile_count; index++) {
             cJSON *profile = cJSON_GetArrayItem(vario_parameter_sets, (int) index);
             cJSON *number = NULL;
-            cJSON *parameters = NULL;
             unsigned int number_count = 0U;
-            unsigned int parameters_count = 0U;
 
             if (!cJSON_IsObject(profile)) {
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_PROFILE_NOT_OBJECT,
-                                "vario_parameter_sets", 0);
-                goto cleanup;
+                continue;
             }
             for (cJSON *child = profile->child; child != NULL;
                  child = child->next) {
-                if (child->string == NULL) {
-                    config_json_set_diagnostics(diagnostics,
-                                    CONFIG_VALIDATION_UNKNOWN_PARAMETER,
-                                    "vario_parameter_sets", 0);
-                    goto cleanup;
-                }
-                if (strcmp(child->string, "parameter_number") == 0) {
+                if (child->string != NULL &&
+                    strcmp(child->string, "parameter_number") == 0) {
                     number_count++;
                     number = child;
-                } else if (strcmp(child->string, "parameters") == 0) {
-                    parameters_count++;
-                    parameters = child;
-                } else {
-                    config_json_set_diagnostics(
-                        diagnostics,
-                        CONFIG_VALIDATION_UNKNOWN_TOP_LEVEL_KEY,
-                        child->string, 0);
-                    goto cleanup;
                 }
             }
-            if (number_count == 0U) {
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_MISSING_PARAMETER_NUMBER,
-                                "parameter_number", 0);
-                goto cleanup;
-            }
-            if (number_count > 1U || parameters_count > 1U) {
-                const char *duplicate_key = "parameters";
-
-                if (number_count > 1U) {
-                    duplicate_key = "parameter_number";
-                }
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_DUPLICATE_KEY,
-                                duplicate_key, 0);
-                goto cleanup;
-            }
-            if (parameters_count == 0U) {
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_MISSING_PARAMETERS,
-                                "parameters", 0);
-                goto cleanup;
-            }
-            if (!cJSON_IsNumber(number) ||
+            if (number_count != 1U || !cJSON_IsNumber(number) ||
                 !isfinite(number->valuedouble) ||
                 floor(number->valuedouble) != number->valuedouble) {
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_PARAMETER_NUMBER_TYPE,
-                                "parameter_number", 0);
-                goto cleanup;
+                continue;
             }
             if (number->valuedouble < APP_CONFIG_PROFILE_MIN_NUMBER ||
                 number->valuedouble > APP_CONFIG_PROFILE_MAX_NUMBER) {
-                config_json_set_diagnostics(diagnostics,
-                                CONFIG_VALIDATION_PARAMETER_NUMBER_RANGE,
-                                "parameter_number", 0);
-                goto cleanup;
+                continue;
             }
-            candidate->profiles[index].parameter_number =
-                (uint8_t) number->valuedouble;
-            if (seen_numbers[candidate->profiles[index].parameter_number]) {
-                config_json_set_diagnostics(
-                    diagnostics,
-                    CONFIG_VALIDATION_DUPLICATE_PARAMETER_NUMBER,
-                    "parameter_number", 0);
-                goto cleanup;
+            if (number_occurrences[(uint8_t) number->valuedouble] < UINT8_MAX) {
+                number_occurrences[(uint8_t) number->valuedouble]++;
             }
-            seen_numbers[candidate->profiles[index].parameter_number] = true;
+        }
+        candidate->count = 0U;
+        for (int index = 0; index < profile_count; index++) {
+            cJSON *profile = cJSON_GetArrayItem(vario_parameter_sets, index);
+            cJSON *number = NULL;
+            cJSON *parameters = NULL;
+            app_config_t effective = {0};
+            config_storage_diagnostics_t profile_diagnostics = {0};
+            unsigned int number_count = 0U;
+            unsigned int parameters_count = 0U;
+            uint8_t parameter_number = 0U;
+
+            if (!cJSON_IsObject(profile)) {
+                continue;
+            }
+            for (cJSON *child = profile->child; child != NULL;
+                 child = child->next) {
+                if (child->string != NULL &&
+                    strcmp(child->string, "parameter_number") == 0) {
+                    number_count++;
+                    number = child;
+                } else if (child->string != NULL &&
+                           strcmp(child->string, "parameters") == 0) {
+                    parameters_count++;
+                    parameters = child;
+                }
+            }
+            if (number_count != 1U || parameters_count != 1U ||
+                !cJSON_IsNumber(number) || !isfinite(number->valuedouble) ||
+                floor(number->valuedouble) != number->valuedouble ||
+                number->valuedouble < APP_CONFIG_PROFILE_MIN_NUMBER ||
+                number->valuedouble > APP_CONFIG_PROFILE_MAX_NUMBER) {
+                continue;
+            }
+            parameter_number = (uint8_t) number->valuedouble;
+            if (number_occurrences[parameter_number] != 1U ||
+                candidate->count >= APP_CONFIG_PROFILE_MAX_COUNT) {
+                continue;
+            }
+            candidate->profiles[candidate->count].parameter_number =
+                parameter_number;
             if (!parse_parameters_object(
                     parameters, APP_PARAMETER_SCOPE_PROFILE,
-                    &candidate->profiles[index].config,
-                    diagnostics)) {
-                goto cleanup;
+                    &candidate->profiles[candidate->count].config,
+                    &profile_diagnostics)) {
+                continue;
             }
+            candidate->count++;
+            if (!app_config_profiles_get_config(candidate,
+                                                candidate->count - 1U,
+                                                &effective) ||
+                !app_config_validate(&effective)) {
+                candidate->count--;
+                continue;
+            }
+        }
+        if (candidate->count == 0U) {
+            config_json_set_diagnostics(diagnostics, CONFIG_VALIDATION_PROFILE_COUNT,
+                            "vario_parameter_sets", 0);
+            goto cleanup;
         }
         app_config_profiles_sort(candidate);
     }

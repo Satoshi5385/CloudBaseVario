@@ -107,7 +107,14 @@
     h3 { margin: 22px 0 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line); font-size: 1rem; }
     .format { color: var(--muted); font-size: .9rem; }
 
-    .profile-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .profile-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      margin-top: 16px;
+    }
+    .profile-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
     .tab {
       padding: 8px 14px;
       border: 1px solid var(--line);
@@ -117,9 +124,9 @@
       font-weight: 700;
     }
     .tab.active { color: #fff; border-color: var(--primary); background: var(--primary); }
-    .profile-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .profile-actions label { color: var(--muted); font-size: .9rem; }
-    .profile-actions select { margin-left: 5px; }
+    .profile-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+    .profile-number { display: block; width: 210px; margin-top: 8px; color: var(--muted); font-size: .9rem; }
+    .profile-number select { margin-top: 3px; }
 
     .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .field {
@@ -156,16 +163,30 @@
     .migration-list { margin: 10px 0 14px; padding-left: 22px; }
     .migration-list li { margin: 5px 0; overflow-wrap: anywhere; }
     .migration-confirm {
-      display: flex;
-      align-items: flex-start;
-      gap: 9px;
       padding: 12px;
       border: 1px solid #e5c47d;
       border-radius: 10px;
       background: var(--warn-bg);
       font-weight: 700;
     }
-    .migration-confirm input { flex: 0 0 auto; width: 20px; height: 20px; margin-top: 2px; accent-color: var(--primary); }
+    .migration-dialog {
+      width: min(680px, calc(100vw - 32px));
+      max-height: min(760px, calc(100vh - 32px));
+      padding: 0;
+      border: 1px solid #e5c47d;
+      border-radius: 16px;
+      color: var(--ink);
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(20, 52, 58, .28);
+    }
+    .migration-dialog::backdrop { background: rgba(21, 35, 42, .58); backdrop-filter: blur(2px); }
+    .migration-dialog-content { padding: 22px; }
+    .migration-dialog h2 { margin-bottom: 8px; }
+    .migration-dialog-lead { margin: 0; color: var(--ink); font-weight: 700; }
+    .migration-dialog-details { max-height: 42vh; margin-top: 14px; padding: 12px 14px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: #fbfdfd; }
+    .migration-dialog-details .migration-summary { margin-top: 0; }
+    .migration-dialog-details .migration-list { margin-bottom: 0; }
+    .migration-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 
     @media (max-width: 850px) {
       .fields { grid-template-columns: 1fr; }
@@ -188,6 +209,7 @@
 
     <div class="toolbar">
       <button id="openButton" class="button primary" type="button">setting.jsonを開く</button>
+      <button id="newButton" class="button" type="button">新規作成</button>
       <button id="saveButton" class="button primary" type="button" disabled>上書き保存</button>
       <button id="reloadButton" class="button" type="button" disabled>再読込</button>
       <div class="file-state"><strong id="fileName">ファイル未選択</strong><span id="dirtyState">先にsetting.jsonを開いてください</span></div>
@@ -195,7 +217,7 @@
 
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div id="unsupported" class="notice warn" hidden>このブラウザは元ファイルへの直接保存に対応していません。Windows版のMicrosoft EdgeまたはGoogle ChromeでこのHTMLを開いてください。</div>
-    <div id="empty" class="empty">「setting.jsonを開く」を押し、編集するファイルを選択してください。</div>
+    <div id="empty" class="empty">「setting.jsonを開く」または「新規作成」を選択してください。</div>
 
     <div id="editor" class="editor" hidden>
       <section class="section">
@@ -209,13 +231,19 @@
       <section class="section">
         <div class="section-heading">
           <h2>バリオ音パラメータセット</h2>
+        </div>
+        <div class="profile-controls">
+          <div>
+            <div id="profileTabs" class="profile-tabs" role="tablist"></div>
+            <label class="profile-number">セット番号変更
+              <select id="profileNumber" aria-label="選択中のセット番号を変更"></select>
+            </label>
+          </div>
           <div class="profile-actions">
-            <label>セット番号<select id="profileNumber" aria-label="選択中のセット番号"></select></label>
             <button id="addProfileButton" class="button" type="button">選択中を複製</button>
             <button id="deleteProfileButton" class="button danger" type="button">削除</button>
           </div>
         </div>
-        <div id="profileTabs" class="profile-tabs" role="tablist"></div>
         <div id="profileFields"></div>
       </section>
 
@@ -228,13 +256,25 @@
         <h2>最新形式への移行内容</h2>
         <p id="migrationSummary" class="migration-summary"></p>
         <ul id="migrationList" class="migration-list"></ul>
-        <label class="migration-confirm">
-          <input id="migrationConfirmed" type="checkbox">
-          <span>移行内容を確認しました。補完値と削除予定項目を反映して最新形式で保存します。</span>
-        </label>
+        <p class="migration-confirm">読み込み時に、最新形式への移行を確認済みです。</p>
       </section>
     </div>
   </main>
+
+  <dialog id="migrationDialog" class="migration-dialog" aria-labelledby="migrationDialogTitle">
+    <div class="migration-dialog-content">
+      <h2 id="migrationDialogTitle">最新形式へ移行しますか？</h2>
+      <p class="migration-dialog-lead">このsetting.jsonは現在の形式に適合していません。移行内容を確認し、最新形式へ移行してから編集してください。</p>
+      <div class="migration-dialog-details">
+        <p id="migrationDialogSummary" class="migration-summary"></p>
+        <ul id="migrationDialogList" class="migration-list"></ul>
+      </div>
+      <div class="migration-dialog-actions">
+        <button id="cancelMigrationButton" class="button" type="button">移行せず閉じる</button>
+        <button id="acceptMigrationButton" class="button primary" type="button">最新形式へ移行して編集</button>
+      </div>
+    </div>
+  </dialog>
 
   <script>
   "use strict";
@@ -244,7 +284,7 @@
     shared: [
       ["基本動作", ["sea_level_pressure_pa", "auto_power_off_minutes", "filter_mode"]],
       ["Bluetooth", ["bluetooth_battery_mode", "bluetooth_tx_power", "bluetooth_notify_rate_hz"]],
-      ["GPS・センサー", ["gps_send_interval_ms", "i2c_reinit_error_count", "imu_gyro_calibration_samples", "imu_mahony_kp", "imu_mahony_ki"]]
+      ["GPS・センサー", ["gps_send_interval_ms", "imu_gyro_calibration_samples"]]
     ],
     profile: [
       ["音状態", ["predictive_buzzer_enabled", "audio_climb_rate_average_s", "audio_state_hold_ms", "audio_stale_ms"]],
@@ -263,10 +303,7 @@
     bluetooth_tx_power: {scope:"shared", type:"enum", choices:["MIN","LOW","NORMAL","HIGH"], choiceLabels:{MIN:"MIN (-24 dBm)",LOW:"LOW (-12 dBm)",NORMAL:"NORMAL (0 dBm)",HIGH:"HIGH (+9 dBm)"}, label:"Bluetooth送信電力", description:"通信距離と消費電力のバランスを選びます。"},
     bluetooth_notify_rate_hz: {scope:"shared", type:"uint", min:1, max:50, unit:"Hz", label:"Bluetooth通知頻度", description:"LK8EX1データの送信試行頻度です。"},
     gps_send_interval_ms: {scope:"shared", type:"uint", min:200, max:10000, unit:"ms", label:"GPS送信間隔", description:"GPS搭載モデルで測位データを更新・送信する間隔です。"},
-    i2c_reinit_error_count: {scope:"shared", type:"uint", min:1, max:100, unit:"回", label:"I2C再初期化エラー回数", description:"連続I2Cエラーがこの回数に達すると復旧を試みます。"},
     imu_gyro_calibration_samples: {scope:"shared", type:"uint", min:50, max:2000, unit:"samples", label:"ジャイロ校正サンプル数", description:"起動時の静止校正に使う連続サンプル数です。"},
-    imu_mahony_kp: {scope:"shared", type:"float", min:0, max:20, unit:"", label:"Mahony比例ゲイン Kp", description:"姿勢推定が加速度方向へ追従する強さです。"},
-    imu_mahony_ki: {scope:"shared", type:"float", min:0, max:5, unit:"", label:"Mahony積分ゲイン Ki", description:"静止時のジャイロ誤差を積分補正する強さです。"},
 
     predictive_buzzer_enabled: {scope:"profile", type:"bool", label:"予測ブザー", description:"ゼロ付近の指定範囲で補助音を鳴らします。"},
     audio_climb_rate_average_s: {scope:"profile", type:"float", min:0, max:10, unit:"s", label:"音用上昇率平均時間", description:"音の判定・音程・テンポに使う移動平均時間です。0で平均しません。"},
@@ -297,10 +334,9 @@
   const EXPECTED_TOP_KEYS = ["format_version", "mc_parameters", "vario_parameter_sets"];
   const DEFAULT_SHARED = {
     sea_level_pressure_pa:101325.0, auto_power_off_minutes:60, filter_mode:"AUTO",
-    bluetooth_battery_mode:"VOLTAGE", bluetooth_tx_power:"LOW",
+    bluetooth_battery_mode:"PERCENT", bluetooth_tx_power:"LOW",
     bluetooth_notify_rate_hz:10, gps_send_interval_ms:1000,
-    i2c_reinit_error_count:10, imu_gyro_calibration_samples:200,
-    imu_mahony_kp:5.0, imu_mahony_ki:0.05
+    imu_gyro_calibration_samples:200
   };
   const DEFAULT_PROFILE = {
     predictive_buzzer_enabled:false, audio_climb_rate_average_s:1.0,
@@ -312,6 +348,18 @@
     sink_freq_rate_hz_per_mps:40.0, sink_freq_min_hz:240, audio_duty_percent:50,
     predictive_interval_ms:1000, predictive_duration_ms:150, predictive_min_mps:0.01
   };
+  function defaultDocument() {
+    const profile = deepClone(DEFAULT_PROFILE);
+    return {
+      format_version: 1,
+      mc_parameters: deepClone(DEFAULT_SHARED),
+      vario_parameter_sets: [
+        {parameter_number:1, parameters:deepClone(profile)},
+        {parameter_number:2, parameters:{...deepClone(profile), lift_start_mps:0.2, lift_end_mps:0.18, sink_start_mps:-2.0, sink_end_mps:-1.9}},
+        {parameter_number:3, parameters:{...deepClone(profile), lift_start_mps:0.3, lift_end_mps:0.29, sink_start_mps:-2.2, sink_end_mps:-2.1}}
+      ]
+    };
+  }
 
   let fileHandle = null;
   let originalFileState = null;
@@ -322,10 +370,11 @@
   const invalidInputs = new Map();
 
   const elements = Object.fromEntries([
-    "openButton","saveButton","reloadButton","fileName","dirtyState","notice","unsupported",
+    "openButton","newButton","saveButton","reloadButton","fileName","dirtyState","notice","unsupported",
     "empty","editor","sharedFields","profileTabs","profileFields","profileNumber",
     "addProfileButton","deleteProfileButton","validationSection","validationList",
-    "migrationSection","migrationSummary","migrationList","migrationConfirmed"
+    "migrationSection","migrationSummary","migrationList","migrationDialog",
+    "migrationDialogSummary","migrationDialogList","cancelMigrationButton","acceptMigrationButton"
   ].map(id => [id, document.getElementById(id)]));
 
   function sortedUniqueKeys(value) { return Object.keys(value).sort(); }
@@ -362,6 +411,27 @@
     }
     migration.invalid = renamedInvalid;
     for (const item of migration.relationInvalid) if (item.number === oldNumber) item.number = newNumber;
+  }
+  function swapMigrationProfiles(firstNumber, secondNumber) {
+    const swapPath = path => {
+      const firstPrefix = `vario_parameter_sets[${firstNumber}]`;
+      const secondPrefix = `vario_parameter_sets[${secondNumber}]`;
+      if (path.startsWith(firstPrefix)) return `${secondPrefix}${path.slice(firstPrefix.length)}`;
+      if (path.startsWith(secondPrefix)) return `${firstPrefix}${path.slice(secondPrefix.length)}`;
+      return path;
+    };
+    const swapNumber = number => number === firstNumber
+      ? secondNumber
+      : (number === secondNumber ? firstNumber : number);
+    migration.added = new Set([...migration.added].map(swapPath));
+    migration.removed = migration.removed.map(swapPath);
+    const swappedInvalid = new Map();
+    for (const [path, item] of migration.invalid) {
+      item.number = swapNumber(item.number);
+      swappedInvalid.set(swapPath(path), item);
+    }
+    migration.invalid = swappedInvalid;
+    for (const item of migration.relationInvalid) item.number = swapNumber(item.number);
   }
   function removeMigrationProfile(number) {
     const prefix = `vario_parameter_sets[${number}]`;
@@ -589,10 +659,6 @@
 
   function markDirty() {
     dirty = true;
-    if (migration.required) {
-      migration.confirmed = false;
-      elements.migrationConfirmed.checked = false;
-    }
     elements.dirtyState.textContent = "未保存の変更があります";
     updateValidationState();
   }
@@ -710,10 +776,9 @@
       elements.profileTabs.append(button);
     }
     elements.profileNumber.replaceChildren();
-    const used = new Set(profiles.map(p => p.parameter_number));
     for (let number = 1; number <= 5; number++) {
       const option = document.createElement("option"); option.value = number; option.textContent = number;
-      option.disabled = used.has(number) && number !== activeProfileNumber; option.selected = number === activeProfileNumber; elements.profileNumber.append(option);
+      option.selected = number === activeProfileNumber; elements.profileNumber.append(option);
     }
     elements.addProfileButton.disabled = profiles.length >= 5;
     elements.deleteProfileButton.disabled = profiles.length <= 1;
@@ -758,12 +823,10 @@
     return documentModel.vario_parameter_sets.find(profile => profile.parameter_number === item.number)?.parameters[item.key];
   }
 
-  function renderMigrationReport(errors) {
-    elements.migrationSection.hidden = !migration.required;
-    if (!migration.required) return;
+  function migrationReportItems() {
     const items = [];
     for (const path of migration.added) items.push(`補完: ${path}（現在の初期値を仮設定）`);
-    for (const path of migration.removed) items.push(`削除予定: ${path}（未知または廃止済み）`);
+    for (const path of migration.removed) items.push(`削除: ${path}（未知または廃止済み）`);
     for (const [path, item] of migration.invalid) {
       const current = currentValueForMigrationItem(item);
       const error = current === undefined ? item.message : scalarError(item.key, current);
@@ -776,23 +839,110 @@
       const stillInvalid = profile && validateRelations(profile.parameters).includes(item.message);
       items.push(`${stillInvalid ? "要修正" : "修正済み"}: vario_parameter_sets[${item.number}]（${item.message}）`);
     }
-    elements.migrationSummary.textContent = `補完${migration.added.size}件、削除予定${migration.removed.length}件、読込時エラー${migration.invalid.size + migration.relationInvalid.length}件があります。`;
+    return items;
+  }
+
+  function migrationSummaryText() {
+    return `補完${migration.added.size}件、削除${migration.removed.length}件、読込時エラー${migration.invalid.size + migration.relationInvalid.length}件があります。`;
+  }
+
+  function renderMigrationReport() {
+    elements.migrationSection.hidden = !migration.required || !migration.confirmed;
+    if (elements.migrationSection.hidden) return;
+    const items = migrationReportItems();
+    elements.migrationSummary.textContent = migrationSummaryText();
     elements.migrationList.replaceChildren(...items.map(message => {
       const item = document.createElement("li"); item.textContent = message; return item;
     }));
-    elements.migrationConfirmed.checked = migration.confirmed;
-    elements.migrationConfirmed.disabled = errors.length > 0;
+  }
+
+  function closeMigrationDialog() {
+    if (typeof elements.migrationDialog.close === "function" && elements.migrationDialog.open) {
+      elements.migrationDialog.close();
+    } else {
+      elements.migrationDialog.removeAttribute("open");
+    }
+  }
+
+  function showMigrationDialog() {
+    elements.editor.inert = true;
+    elements.migrationDialogSummary.textContent = migrationSummaryText();
+    elements.migrationDialogList.replaceChildren(...migrationReportItems().map(message => {
+      const item = document.createElement("li"); item.textContent = message; return item;
+    }));
+    if (typeof elements.migrationDialog.showModal === "function") {
+      elements.migrationDialog.showModal();
+    } else {
+      elements.migrationDialog.setAttribute("open", "");
+    }
+  }
+
+  function resetLoadedFile() {
+    closeMigrationDialog();
+    fileHandle = null;
+    originalFileState = null;
+    documentModel = null;
+    activeProfileNumber = null;
+    dirty = false;
+    migration = createMigrationState();
+    invalidInputs.clear();
+    elements.editor.inert = false;
+    elements.editor.hidden = true;
+    elements.empty.hidden = false;
+    elements.fileName.textContent = "ファイル未選択";
+    elements.dirtyState.textContent = "先にsetting.jsonを開いてください";
+    elements.saveButton.textContent = "上書き保存";
+    elements.reloadButton.disabled = true;
+    elements.saveButton.disabled = true;
+  }
+
+  function createNewDocument() {
+    if (documentModel !== null) {
+      const message = dirty
+        ? "編集中の未保存の変更を破棄して新規作成しますか？"
+        : "編集中のファイルを閉じて新規作成しますか？";
+      if (!confirm(message)) return;
+    }
+    closeMigrationDialog();
+    fileHandle = null;
+    originalFileState = null;
+    documentModel = defaultDocument();
+    activeProfileNumber = 1;
+    migration = createMigrationState();
+    invalidInputs.clear();
+    dirty = true;
+    elements.editor.inert = false;
+    elements.empty.hidden = true;
+    elements.editor.hidden = false;
+    elements.fileName.textContent = "新規 setting.json";
+    elements.dirtyState.textContent = "新規作成・未保存";
+    elements.saveButton.textContent = "setting.jsonを保存";
+    elements.reloadButton.disabled = true;
+    renderDocument();
+    setNotice("デフォルトのsetting.jsonを新規作成しました。編集後に保存してください。", "ok");
+  }
+
+  function acceptMigration() {
+    if (!migration.required) return;
+    migration.confirmed = true;
+    dirty = true;
+    elements.editor.inert = false;
+    closeMigrationDialog();
+    elements.dirtyState.textContent = "最新形式へ移行済み・未保存";
+    elements.saveButton.textContent = fileHandle ? "上書き保存" : "setting.jsonを保存";
+    renderDocument();
+    setNotice("最新形式へ移行しました。内容を確認・修正して保存してください。", "ok");
   }
 
   function updateValidationState() {
     const errors = allValidationErrors();
     elements.validationList.replaceChildren(...errors.map(message => { const item = document.createElement("li"); item.textContent = message; return item; }));
     elements.validationSection.hidden = errors.length === 0;
-    renderMigrationReport(errors);
+    renderMigrationReport();
     elements.profileNumber.disabled = errors.length > 0;
     elements.addProfileButton.disabled = errors.length > 0 || documentModel.vario_parameter_sets.length >= 5;
     elements.deleteProfileButton.disabled = errors.length > 0 || documentModel.vario_parameter_sets.length <= 1;
-    elements.saveButton.disabled = !fileHandle || !dirty || errors.length > 0 || (migration.required && !migration.confirmed);
+    elements.saveButton.disabled = !dirty || errors.length > 0 || (migration.required && !migration.confirmed);
   }
 
   async function loadFromHandle(handle) {
@@ -811,20 +961,22 @@
     migration = imported.migration;
     fileHandle = handle; originalFileState = {size:file.size, lastModified:file.lastModified};
     activeProfileNumber = orderedProfiles()[0].parameter_number;
-    dirty = migration.required;
+    dirty = false;
     elements.fileName.textContent = file.name;
-    elements.dirtyState.textContent = migration.required ? "最新形式への移行が必要です" : "読込済み・変更なし";
+    elements.dirtyState.textContent = migration.required ? "最新形式への移行確認待ち" : "読込済み・変更なし";
+    elements.saveButton.textContent = "上書き保存";
     elements.reloadButton.disabled = false; renderDocument();
-    setNotice(
-      migration.required
-        ? `${documentModel.vario_parameter_sets.length}件のセットを読み込みました。不足・不正・削除予定の内容を確認してください。`
-        : `${documentModel.vario_parameter_sets.length}件のパラメータセットを読み込みました。`,
-      migration.required ? "warn" : "ok"
-    );
+    if (migration.required) {
+      setNotice("最新形式へ移行するまで編集できません。移行内容を確認してください。", "warn");
+      showMigrationDialog();
+    } else {
+      setNotice(`${documentModel.vario_parameter_sets.length}件のパラメータセットを読み込みました。`, "ok");
+    }
   }
 
   async function chooseFile() {
     try {
+      if (dirty && !confirm("未保存の変更を破棄してsetting.jsonを開きますか？")) return;
       const [handle] = await window.showOpenFilePicker({
         id: "cloudbasevario-setting-json",
         multiple: false,
@@ -835,6 +987,17 @@
     } catch (error) {
       if (error.name !== "AbortError") setNotice(error.message || String(error), "error");
     }
+  }
+
+  async function chooseSaveHandle() {
+    const handle = await window.showSaveFilePicker({
+      id: "cloudbasevario-setting-json-save",
+      suggestedName: "setting.json",
+      types: [{description:"CloudBaseVario setting.json", accept:{"application/json":[".json"]}}],
+      excludeAcceptAllOption: true
+    });
+    if (handle.name !== "setting.json") throw new Error("保存するファイル名はsetting.jsonにしてください。");
+    return handle;
   }
 
   function canonicalText() {
@@ -852,14 +1015,17 @@
 
   async function saveFile() {
     try {
-      const current = await fileHandle.getFile();
-      if (current.size !== originalFileState.size || current.lastModified !== originalFileState.lastModified) {
-        if (!confirm("setting.jsonが読込後に別の操作で変更されています。現在の画面内容で上書きしますか？")) return;
+      const handle = fileHandle || await chooseSaveHandle();
+      if (fileHandle) {
+        const current = await handle.getFile();
+        if (current.size !== originalFileState.size || current.lastModified !== originalFileState.lastModified) {
+          if (!confirm("setting.jsonが読込後に別の操作で変更されています。現在の画面内容で上書きしますか？")) return;
+        }
       }
       const text = canonicalText();
-      const writable = await fileHandle.createWritable();
+      const writable = await handle.createWritable();
       await writable.write(text); await writable.close();
-      const saved = await fileHandle.getFile();
+      const saved = await handle.getFile();
       let savedText;
       try {
         savedText = new TextDecoder("utf-8", {fatal: true}).decode(await saved.arrayBuffer());
@@ -868,20 +1034,29 @@
       }
       const verified = parseStrictSettingText(savedText);
       if (JSON.stringify(verified) !== JSON.stringify(JSON.parse(text))) throw new Error("保存後の内容が画面の値と一致しません。");
+      fileHandle = handle;
       originalFileState = {size:saved.size, lastModified:saved.lastModified};
       migration = createMigrationState();
       dirty = false;
+      elements.saveButton.textContent = "上書き保存";
       elements.dirtyState.textContent = "保存済み";
       renderDocument();
       setNotice("setting.jsonを保存して再検証しました。HTMLを閉じ、USBドライブを安全に取り外してから本体を再起動してください。", "ok");
-    } catch (error) { setNotice(`保存できませんでした: ${error.message || error}`, "error"); }
+    } catch (error) {
+      if (error.name !== "AbortError") setNotice(`保存できませんでした: ${error.message || error}`, "error");
+    }
   }
 
   elements.openButton.addEventListener("click", chooseFile);
+  elements.newButton.addEventListener("click", createNewDocument);
   elements.saveButton.addEventListener("click", saveFile);
-  elements.migrationConfirmed.addEventListener("change", () => {
-    migration.confirmed = elements.migrationConfirmed.checked;
-    updateValidationState();
+  elements.migrationDialog.addEventListener("cancel", event => {
+    event.preventDefault();
+  });
+  elements.acceptMigrationButton.addEventListener("click", acceptMigration);
+  elements.cancelMigrationButton.addEventListener("click", () => {
+    resetLoadedFile();
+    setNotice("最新形式への移行をキャンセルしたため、ファイルを閉じました。", "warn");
   });
   elements.reloadButton.addEventListener("click", async () => {
     if (dirty && !confirm("未保存の変更を破棄してsetting.jsonを再読込しますか？")) return;
@@ -890,8 +1065,22 @@
   elements.profileNumber.addEventListener("change", () => {
     const next = Number(elements.profileNumber.value);
     const previous = activeProfileNumber;
-    currentProfile().parameter_number = next;
-    renameMigrationProfile(previous, next);
+    if (next === previous) return;
+    const selectedProfile = currentProfile();
+    const occupiedProfile = documentModel.vario_parameter_sets.find(profile => profile.parameter_number === next);
+    if (occupiedProfile) {
+      if (!confirm(`セット${next}は使用中です。セット${previous}とセット${next}の番号を入れ替えますか？`)) {
+        elements.profileNumber.value = String(previous);
+        return;
+      }
+      selectedProfile.parameter_number = next;
+      occupiedProfile.parameter_number = previous;
+      swapMigrationProfiles(previous, next);
+      setNotice(`セット${previous}とセット${next}の番号を入れ替えました。`, "ok");
+    } else {
+      selectedProfile.parameter_number = next;
+      renameMigrationProfile(previous, next);
+    }
     activeProfileNumber = next;
     invalidInputs.clear();
     markDirty();
@@ -923,6 +1112,9 @@
   if (!("showOpenFilePicker" in window)) {
     elements.unsupported.hidden = false; elements.openButton.disabled = true;
   }
+  if (!("showSaveFilePicker" in window)) {
+    elements.unsupported.hidden = false; elements.newButton.disabled = true;
+  }
 
   // No external test file is required; this hook only exposes pure validation and rendering to local browser tests.
   window.settingEditorTest = {
@@ -934,7 +1126,7 @@
       documentModel = imported.document;
       migration = imported.migration;
       activeProfileNumber = orderedProfiles()[0].parameter_number;
-      fileHandle = null; dirty = migration.required;
+      fileHandle = null; dirty = false;
       elements.fileName.textContent = "テストデータ"; elements.dirtyState.textContent = "テスト表示"; renderDocument();
       return {
         shared:SHARED_KEYS.length,
@@ -955,9 +1147,7 @@
       renderDocument();
     },
     confirmMigration() {
-      migration.confirmed = true;
-      elements.migrationConfirmed.checked = true;
-      updateValidationState();
+      acceptMigration();
     },
     state() {
       return {

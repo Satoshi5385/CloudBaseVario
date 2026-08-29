@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from tools.vario_sound_simulator.parameters_model import (
-    ConfigError,
+    default_config_document,
     parse_config_document_text,
 )
 
@@ -32,12 +32,12 @@ class GpsConfigTests(unittest.TestCase):
                 interval,
             )
 
-    def test_invalid_or_presence_keys_are_rejected(self) -> None:
+    def test_invalid_values_use_defaults_and_unknown_keys_are_ignored(self) -> None:
+        defaults = default_config_document()
         for value in (199, 10001, True):
             candidate = copy.deepcopy(self.raw)
             candidate["mc_parameters"]["gps_send_interval_ms"] = value
-            with self.assertRaises(ConfigError):
-                self.parse(candidate)
+            self.assertEqual(self.parse(candidate), defaults)
         for name in (
             "gps_module_installed",
             "gps_installed",
@@ -48,8 +48,9 @@ class GpsConfigTests(unittest.TestCase):
         ):
             candidate = copy.deepcopy(self.raw)
             candidate["mc_parameters"][name] = True
-            with self.assertRaises(ConfigError):
-                self.parse(candidate)
+            parsed = self.parse(candidate)
+            self.assertEqual(parsed.mc_parameters["gps_send_interval_ms"], 1000)
+            self.assertEqual(parsed.sorted_numbers(), (1, 2, 3))
 
 
 if __name__ == "__main__":

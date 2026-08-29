@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from tools.vario_sound_simulator.parameters_model import (
-    ConfigError,
     config_document_json_text,
+    default_config_document,
     parse_config_document_text,
 )
 
@@ -37,17 +37,20 @@ class BluetoothTxPowerConfigTests(unittest.TestCase):
                 reparsed.mc_parameters["bluetooth_tx_power"], preset
             )
 
-    def test_missing_invalid_and_numeric_values_are_rejected(self) -> None:
+    def test_missing_invalid_and_numeric_values_use_defaults(self) -> None:
+        defaults = default_config_document()
         missing = copy.deepcopy(self.raw_document)
         del missing["mc_parameters"]["bluetooth_tx_power"]
-        with self.assertRaises(ConfigError):
-            parse_config_document_text(json.dumps(missing))
+        self.assertEqual(
+            parse_config_document_text(json.dumps(missing)), defaults
+        )
 
         for invalid in ("MAX", "INVALID", 20):
             candidate = copy.deepcopy(self.raw_document)
             candidate["mc_parameters"]["bluetooth_tx_power"] = invalid
-            with self.assertRaises(ConfigError):
-                parse_config_document_text(json.dumps(candidate))
+            self.assertEqual(
+                parse_config_document_text(json.dumps(candidate)), defaults
+            )
 
 
 if __name__ == "__main__":

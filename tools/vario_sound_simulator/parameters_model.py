@@ -1,4 +1,4 @@
-"""Strict firmware-compatible setting.json model for the sound simulator."""
+"""Firmware-compatible setting.json model for the sound simulator."""
 
 from __future__ import annotations
 
@@ -160,6 +160,31 @@ def _duplicate_rejecting_object(pairs: Iterable[tuple[str, Any]]) -> dict[str, A
     return result
 
 
+@dataclass(frozen=True)
+class _ParsedObject:
+    pairs: tuple[tuple[str, Any], ...]
+
+
+def _preserve_object_pairs(pairs: Iterable[tuple[str, Any]]) -> _ParsedObject:
+    return _ParsedObject(tuple(pairs))
+
+
+def _recognized_object(
+    value: Any, recognized_keys: Iterable[str]
+) -> dict[str, Any] | None:
+    if not isinstance(value, _ParsedObject):
+        return None
+    recognized = set(recognized_keys)
+    result: dict[str, Any] = {}
+    for key, item in value.pairs:
+        if key not in recognized:
+            continue
+        if key in result:
+            return None
+        result[key] = item
+    return result
+
+
 def _reject_constant(value: str) -> None:
     raise ConfigError(f"non-finite JSON number: {value}")
 
@@ -257,76 +282,106 @@ def _parse_parameter_values(
     }
 
 
+def _read_parameter_values(
+    raw: Any, specs: Mapping[str, ParameterSpec]
+) -> dict[str, Any] | None:
+    values = _recognized_object(raw, specs)
+    if values is None or set(values) != set(specs):
+        return None
+    try:
+        return {
+            name: _validate_scalar(name, values[name], spec)
+            for name, spec in specs.items()
+        }
+    except ConfigError:
+        return None
+
+
+def _read_profile_number(raw: Any) -> int | None:
+    profile = _recognized_object(raw, ("parameter_number",))
+    if profile is None or "parameter_number" not in profile:
+        return None
+    number = profile["parameter_number"]
+    if type(number) not in (int, float) or not math.isfinite(float(number)):
+        return None
+    if not float(number).is_integer() or not 1 <= int(number) <= 5:
+        return None
+    return int(number)
+
+
 def parse_config_document_text(text: str) -> ConfigDocument:
     try:
         root = json.loads(
             text.lstrip("\ufeff"),
-            object_pairs_hook=_duplicate_rejecting_object,
+            object_pairs_hook=_preserve_object_pairs,
             parse_constant=_reject_constant,
         )
-    except ConfigError:
-        raise
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise ConfigError(f"invalid JSON: {exc}") from exc
+    except (ConfigError, json.JSONDecodeError, TypeError):
+        return default_config_document()
 
-    if not isinstance(root, dict):
-        raise ConfigError("top-level value must be an object")
-    if "format_version" not in root:
-        raise ConfigError("missing top-level key: format_version")
-    raw_version = root["format_version"]
+    root_values = _recognized_object(
+        root, ("format_version", "mc_parameters", "vario_parameter_sets")
+    )
+    if root_values is None or set(root_values) != {
+        "format_version",
+        "mc_parameters",
+        "vario_parameter_sets",
+    }:
+        return default_config_document()
+    raw_version = root_values["format_version"]
     if (
         type(raw_version) not in (int, float)
         or not math.isfinite(float(raw_version))
         or not float(raw_version).is_integer()
     ):
-        raise ConfigError("format_version must be an integer")
+        return default_config_document()
     version = int(raw_version)
     if version != FORMAT_VERSION:
-        raise ConfigError(f"unsupported format_version: {version}")
-    expected_keys = {"format_version", "mc_parameters", "vario_parameter_sets"}
-    unknown_top = set(root) - expected_keys
-    if unknown_top:
-        raise ConfigError(f"unknown top-level key: {sorted(unknown_top)[0]}")
-    missing = expected_keys - set(root)
-    if missing:
-        raise ConfigError(f"missing top-level key: {sorted(missing)[0]}")
-    shared_parameters = _parse_parameter_values(
-        root["mc_parameters"], SHARED_PARAMETER_SPECS
+        return default_config_document()
+    shared_parameters = _read_parameter_values(
+        root_values["mc_parameters"], SHARED_PARAMETER_SPECS
     )
-    raw_sets = root["vario_parameter_sets"]
+    if shared_parameters is None:
+        return default_config_document()
+    raw_sets = root_values["vario_parameter_sets"]
     if not isinstance(raw_sets, list):
-        raise ConfigError("vario_parameter_sets must be an array")
-    if not 1 <= len(raw_sets) <= 5:
-        raise ConfigError("vario_parameter_sets must contain 1 to 5 sets")
+        return default_config_document()
+    number_counts: dict[int, int] = {}
+    for raw_set in raw_sets:
+        number = _read_profile_number(raw_set)
+        if number is not None:
+            number_counts[number] = number_counts.get(number, 0) + 1
     parameter_sets: dict[int, dict[str, Any]] = {}
     for raw_set in raw_sets:
-        if not isinstance(raw_set, dict):
-            raise ConfigError("each parameter set must be an object")
-        if set(raw_set) != {"parameter_number", "parameters"}:
-            unknown = set(raw_set) - {"parameter_number", "parameters"}
-            if unknown:
-                raise ConfigError(f"unknown profile key: {sorted(unknown)[0]}")
-            missing = {"parameter_number", "parameters"} - set(raw_set)
-            raise ConfigError(f"missing profile key: {sorted(missing)[0]}")
-        number = raw_set["parameter_number"]
-        if type(number) not in (int, float) or not math.isfinite(float(number)):
-            raise ConfigError("parameter_number must be an integer")
-        if not float(number).is_integer() or not 1 <= int(number) <= 5:
-            raise ConfigError("parameter_number must be between 1 and 5")
-        number = int(number)
-        if number in parameter_sets:
-            raise ConfigError(f"duplicate parameter_number: {number}")
-        profile_parameters = _parse_parameter_values(
-            raw_set["parameters"], PROFILE_PARAMETER_SPECS
+        number = _read_profile_number(raw_set)
+        profile = _recognized_object(
+            raw_set, ("parameter_number", "parameters")
         )
-        validate_parameters(
-            {
-                **default_parameters(),
-                **shared_parameters,
-                **profile_parameters,
-            }
+        if (
+            number is None
+            or number_counts.get(number) != 1
+            or profile is None
+            or "parameters" not in profile
+        ):
+            continue
+        profile_parameters = _read_parameter_values(
+            profile["parameters"], PROFILE_PARAMETER_SPECS
         )
+        if profile_parameters is None:
+            continue
+        try:
+            validate_parameters(
+                {
+                    **default_parameters(),
+                    **shared_parameters,
+                    **profile_parameters,
+                }
+            )
+        except ConfigError:
+            continue
         parameter_sets[number] = profile_parameters
+    if not parameter_sets:
+        return default_config_document()
     return ConfigDocument(
         shared_parameters, dict(sorted(parameter_sets.items()))
     )
@@ -348,15 +403,13 @@ def load_config_document_file(path: str | os.PathLike[str]) -> ConfigDocument:
     except (OSError, UnicodeError) as exc:
         raise ConfigError(f"could not read file: {exc}") from exc
     if not contents:
-        raise ConfigError("configuration file is empty")
+        return default_config_document()
     if len(contents) > MAX_CONFIG_FILE_BYTES:
-        raise ConfigError(
-            f"configuration file exceeds {MAX_CONFIG_FILE_BYTES} bytes"
-        )
+        return default_config_document()
     try:
         text = contents.decode("utf-8-sig")
-    except UnicodeError as exc:
-        raise ConfigError(f"configuration file is not UTF-8: {exc}") from exc
+    except UnicodeError:
+        return default_config_document()
     return parse_config_document_text(text)
 
 
@@ -438,10 +491,17 @@ def save_config_document_file(
             stream.write(rendered)
             stream.flush()
             os.fsync(stream.fileno())
-        verified = load_config_document_file(temporary_path)
-        expected = parse_config_document_text(rendered)
-        if verified != expected:
+        verified_bytes = temporary_path.read_bytes()
+        if verified_bytes != rendered.encode("utf-8"):
             raise ConfigError("saved file verification failed")
+        try:
+            json.loads(
+                verified_bytes.decode("utf-8"),
+                object_pairs_hook=_duplicate_rejecting_object,
+                parse_constant=_reject_constant,
+            )
+        except (ConfigError, json.JSONDecodeError, UnicodeError) as exc:
+            raise ConfigError("saved file verification failed") from exc
         os.replace(temporary_path, target)
         temporary_path = None
     except ConfigError:

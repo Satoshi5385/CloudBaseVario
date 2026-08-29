@@ -69,6 +69,15 @@ idf_component_register(
         wear_levelling
 )
 
+# Ship the offline setting editor inside the application image.  Startup
+# restores these exact bytes to the read-only MSC root on every boot.
+target_add_binary_data(
+    ${COMPONENT_LIB}
+    "${CMAKE_SOURCE_DIR}/DOC/setting_editor.html"
+    BINARY
+    RENAME_TO "setting_editor_html"
+)
+
 # Keep the USB-MSC update identity identical to the project name embedded by
 # ESP-IDF in esp_app_desc_t.
 target_compile_definitions(

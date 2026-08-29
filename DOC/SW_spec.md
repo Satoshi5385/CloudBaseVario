@@ -453,6 +453,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 - partition tableは `nvs 0x9000/0x6000`、`phy_init 0xf000/0x1000`、`factory 0x10000/4 MiB`、`config 0x410000/4 MiB`、`otadata 0x810000/0x2000`、`ota_0 0x820000/0x380000`、`ota_1 0xba0000/0x380000`とする。
 - `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`はOTA書込み失敗またはrollbackされたimage、`UPDATE_RESULT.TXT`はASCIIの状態・理由・手動`version`・7桁Git `hash`・対象partitionを記録するstatus fileとする。署名なし・署名不正・破損した署名containerは`UPDATE.BIN`を保持して`REJECTED`を記録し、OTA書込みへ進まない。認証拒否では既存の `state`、`reason`、`error`、`version`、`hash` の行構成を維持し、新しい判別用fieldを追加しない。対象imageを検査できない状態では`version=-`、`hash=-`とする。旧形式の7桁hashだけを持つ同一project imageは拒否せず、`version=-`とhashへ分離する。version/hashはupgradeまたはdowngradeの拒否判定に使用しない。
 - config FAT直下の`INFO.TXT`は実行中のボード情報を示す読み取り専用ASCIIファイルとし、既存のboard／version／Git hashに加え、`Firmware authenticity`、`Authenticity key ID`および`Firmware image SHA-256`をCRLF改行で記録する。実行中app partitionの最終4 KiBにある認証記録とraw payloadを再検証し、validなら`OFFICIAL`、記録なし・不正なら`NON_OFFICIAL`、partition読出しエラーなら`UNKNOWN`を表示する。内容は有効なboard identity/descriptorと実行imageの`esp_app_desc_t.version`から生成する。起動時にFATをAPP側へmountした直後、`setting.json`読込みおよびMSC公開前に必ず全量再生成する。既存ファイルは読み取り専用属性を一時解除して置換、flush/sync後に属性を再設定する。削除、編集または属性変更されても次回起動時に復元する。生成または属性設定に失敗した場合はMSCを公開しない。
+- config FAT直下の`setting_editor.html`は、ファームウェアBINへ組み込んだ`DOC/setting_editor.html`と同一内容の読み取り専用設定エディターとする。起動時にFATをAPP側へmountした後、`setting.json`読込みおよびMSC公開前に必ず全量再生成し、flush/sync後に読み取り専用属性を設定する。削除、編集または属性変更されても次回起動時に組込み内容へ復元する。生成または属性設定に失敗した場合はMSCを公開しない。
 - 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
@@ -487,12 +488,12 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 ```
 
 - 出力はUTF-8、BOMなし、2 space indent、LF改行、末尾改行ありの整形済みJSONとする。読込みではUTF-8 BOM、LFおよびCRLFを許容するが、JSON commentは許容しない。
-- top-levelには整数の `format_version`、共通8項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`だけを置き、正本はversion 1とする。配列は1～5件、各要素は1～5の重複しない整数`parameter_number`と、音関連22項目を持つobject型`parameters`だけを持つこと。保存時は番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
-- version 1の規定構造だけを受理する。未知のparameter、誤った階層、項目不足、重複key、型違いまたは値域違反を含むファイルは全体を無効とし、自動変換しないこと。
+- top-levelには整数の `format_version`、共通8項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`を置き、正本はversion 1とする。選別後の有効セットは1～5件とし、各要素は1～5の整数`parameter_number`と、音関連22項目を持つobject型`parameters`を持つこと。未知の項目は読み飛ばし、保存時は未知の項目を含めず番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
+- version 1の規定構造だけを受理し、自動変換しないこと。未知のtop-level key、未知のparameter、誤った階層の項目は読み飛ばすこと。
 - `mc_parameters`および各セットの`parameters`には値だけを格納する。パラメータ名、型、単位、値域、既定値および相互関係は、本書の単一パラメータ表と対応する実装テーブルを正本とすること。
 - boolはJSON boolean、uint32は0以上の整数、floatは有限のJSON number、enumは定義済み名称のJSON stringとして表すこと。NaNおよび無限大を受理しないこと。
 - ファイルサイズの上限は32 KiBとする。上限を超えるファイルは途中まで解析せず無効とすること。
-- 共通項目および各セットの音関連項目はすべて必須とし、省略値を組込み既定値で補完しないこと。不正番号、番号重複、未知または誤配置の項目名、同一階層の重複key、未対応version、型違い、値域違反または相互関係違反が1件でもあれば、共通部と全セットを含むファイル全体を無効とすること。
+- 共通8項目はすべて必須とし、欠落、既知keyの重複、型違いまたは値域違反があればファイル全体を無効とすること。各セットの音関連22項目もすべて必須とするが、不正番号、既知keyの重複、項目不足、型違い、値域違反または相互関係違反は該当セットだけを無効とすること。同じ`parameter_number`が複数あれば、その番号のセットをすべて無効とすること。有効なセットが0件なら共通値も適用せず、組込み標準構成を使用すること。
 - 設定ファイルには認証情報、秘密鍵、tokenなどの秘密情報を保存しないこと。
 
 加速度個体較正は同じFAT直下の`mc_data.json`へ、`format_version=2`、対象`model`および3軸`offset_mps2`だけを格納する。`who_am_i`、座標系、校正方法および校正サンプル数は`model`ごとのファームウェア固定定義とし、ICM-42688P-HXYではそれぞれ`0x6A`、`SENSOR`、`LEVEL_Z_UP`、800とする。UTF-8 JSONとして厳格に検証し、非有限値、未知・重複key、対象不一致または±0.20 gを超える値を受理しない。保存は`mc_data.tmp`、`mc_data.bak`を使う全量置換とし、正本がない場合だけ有効なbackupを復元する。
@@ -501,7 +502,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 
 - 起動時は組込み既定値から一時設定を作成し、USB MSCをhostへ公開する前にFAT領域をESP32側へmountして `setting.json`を読み込むこと。
 - 安全GPIO初期化直後にSW2とSW3が同時押下されている状態を10 ms周期で確認し、30 ms継続した場合だけ、設定FATを明示的にformatしてからmountし、組込み既定値の `setting.json`を生成すること。この操作は保存済み設定を全消去する。SW2またはSW3の単独押下、30 ms未満の同時押下および通常起動ではformatしないこと。
-- JSON全体の構文、形式version、key、型、値域およびパラメータ間の関係を一時設定上で検証し、すべて妥当な場合だけmutex下で実行時設定を一括置換すること。検証途中の値を部分的に反映してはならない。
+- JSON全体の構文、形式versionおよび共通必須項目を一時設定上で検証し、有効なパラメータセットだけを選別すること。選別完了後に共通値と有効セットをmutex下で実行時設定へ一括反映し、検証途中の値を部分的に反映してはならない。有効セットが0件なら組込み標準構成を維持すること。
 - 有効なファイルを反映した後は、読込み元がファイルであることと形式versionを診断状態へ記録すること。
 - `setting.json`が存在しない場合は組込み既定値で起動し、FAT領域をUSB hostへ渡す前に既定値を使用した整形済みファイルを自動生成すること。
 - ファイルの構文または内容が無効な場合は、ファイルを自動上書きせずに組込み既定値で起動し、失敗理由を診断状態とconsole logへ記録すること。
@@ -752,7 +753,8 @@ typedef struct {
 | 5分以内の2回目以降のTask／Interrupt Watchdog reset | 自動復帰せず`POWER_ON_WAIT`へ入り、SW1未成立なら電源保持を解除して電池駆動では`OFF`、外部給電中は`SAFE_STOP`へ移る |
 | generic WDT／panic／brownout／software reset、またはRTC記録不正 | 自動復帰せず通常の`POWER_ON_WAIT`へ入る |
 | 設定ファイルなし | 組込み既定値で起動し、MSC公開前に既定の `setting.json`を生成する |
-| 設定ファイル不正 | ファイルを上書きせず全項目を組込み既定値として起動し、検証失敗理由を診断する |
+| 共通必須項目またはファイル全体が不正 | ファイルを上書きせず全項目を組込み既定値として起動し、検証失敗理由を診断する |
+| 一部セットが不正 | 不正セットを読み飛ばし、残った有効セットだけで起動する。有効セットが0件なら組込み既定値を使用する |
 | スイッチ設定NVSなし／不正／読込み失敗 | 小音量・シンク音ON・番号1（番号1がなければ最小番号）で主要機能を継続し、load結果と失敗を診断する |
 | スイッチ設定NVS保存失敗 | 失敗を診断してconsole taskの停止ackを返し、設定保存より電源OFFを優先する |
 | 設定用FAT mount失敗 | 自動formatせず組込み既定値で起動する。MSC class driverを維持してLUNを「メディアなし」とし、CDC、センサー取得、推定、音声およびBLEを継続する。mount失敗回数と最後のstorage errorを診断する |
@@ -781,7 +783,7 @@ typedef struct {
 - 起動時に有効なversion 1の`setting.json`がある場合は、共通8項目と音関連22項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
 - consoleによる変更は `PARAM SAVE`が成功するまでRAMだけに保持し、再起動時は最後に正常保存されたファイルから再構成する。
 - 公開パラメータは本節の表に定義した項目だけとする。SW1音量、SW2シンク状態、SW3選択番号は専用NVSを正本とし、`PARAM LIST/GET/SET/RESET/SAVE`の対象外とする。
-- I2C連続エラーによるセンサ再初期化閾値は10回、Mahony姿勢フィルタのKpは5.0、Kiは0.05にファームウェアで固定し、`setting.json`および`PARAM`操作へ公開しない。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`を含むversion 1ファイルも未知のparameterとして全体を無効とする。
+- I2C連続エラーによるセンサ再初期化閾値は10回、Mahony姿勢フィルタのKpは5.0、Kiは0.05にファームウェアで固定し、`setting.json`および`PARAM`操作へ公開しない。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`を含むversion 1ファイルでは、これらを未知のparameterとして読み飛ばす。
 
 公開するパラメータを次に示す。
 

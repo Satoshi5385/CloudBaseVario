@@ -62,11 +62,12 @@ typedef struct {
 } config_storage_diagnostics_t;
 
 /**
- * @brief Load and strictly validate setting.json from a mounted FAT volume.
+ * @brief Load and validate setting.json from a mounted FAT volume.
  *
- * All nine shared parameters and all 22 parameters in every version-1
- * profile are required. An invalid file never partially changes the returned
- * configuration.
+ * All eight shared parameters are required. Each complete, valid version-1
+ * profile is loaded independently; invalid profiles are skipped. Missing or
+ * invalid shared data, or zero valid profiles, leaves built-in defaults in
+ * the returned configuration.
  */
 config_load_result_t config_storage_load(const char *base_path,
                                          app_config_profiles_t *profiles,

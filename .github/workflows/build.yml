@@ -43,6 +43,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_usb_storage_policy.c SRC/domain/usb_storage_policy.c -o /tmp/test_usb_storage_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_watchdog_recovery_policy.c SRC/domain/watchdog_recovery_policy.c -o /tmp/test_watchdog_recovery_policy
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_identity.c SRC/domain/board_identity.c -o /tmp/test_board_identity
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I tests/host_stubs -I SRC -I managed_components/espressif__cjson/cJSON tests/test_config_json.c SRC/platform/config_json.c SRC/domain/app_config.c managed_components/espressif__cjson/cJSON/cJSON.c -lm -o /tmp/test_config_json
           /tmp/test_auto_power_off
           /tmp/test_firmware_update_policy
           /tmp/test_firmware_metadata
@@ -55,6 +56,7 @@ jobs:
           /tmp/test_usb_storage_policy
           /tmp/test_watchdog_recovery_policy
           /tmp/test_board_identity
+          /tmp/test_config_json
 
       - name: Configure ESP32-S3 target
         run: /opt/esp/entrypoint.sh idf.py set-target esp32s3

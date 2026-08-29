@@ -58,7 +58,7 @@ PARAM SAVE
 4. 本体を再起動します。PC でのファイル編集は動作中の RAM 値へ即時反映されません。
 5. CDC で `PARAM LIST` または `PARAM GET <name>` を実行し、読込み後の値を確認します。
 
-ファイルが不正な場合は、その中の一部だけを採用せず、全項目を組込み既定値として起動します。不正なファイルは自動上書きされません。
+未知の項目は読み飛ばします。不完全または不正なパラメータセットはセット単位で読み飛ばし、残った有効なセットだけを使用します。共通の必須項目が不正な場合、または有効なセットが1つもない場合は、全項目を組込み既定値として起動します。不正なファイルは自動上書きされません。
 
 ### 2.3 初期化
 
@@ -173,15 +173,15 @@ PARAM SAVE
 
 ### 3.1 構造上の規則
 
-- top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` だけが使用できます。
+- top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` を使用します。それ以外の項目は読み飛ばされます。
 - `format_version` は整数で、現行形式では `1` です。それ以外のversionは読み込みません。
 - top-level `mc_parameters` は共通8項目すべてを持つobjectです。
-- `vario_parameter_sets` は1～5件の配列です。各要素は `parameter_number` と `parameters` だけを持ちます。
+- `vario_parameter_sets` は配列です。選別後に番号1～5の有効なセットを1～5件使用します。各要素では `parameter_number` と `parameters` を使用し、それ以外の項目は読み飛ばされます。
 - `parameter_number` は1～5の整数で重複できません。配列順は任意ですが、保存時は番号順に整列します。
-- `mc_parameters` と各セットの `parameters` は JSON object です。1セットでも不正ならファイル全体を無効とします。
+- `mc_parameters` と各セットの `parameters` は JSON object です。不完全または不正なセットは、そのセットだけを読み飛ばします。
 - parameter key は大文字・小文字を区別します。
-- 未知の top-level key、未知の parameter、同じ key の重複はエラーです。
-- 各セットの`parameters`には音関連22項目すべてが必要です。共通項目をセット内へ置く、または音関連項目をtop-level `mc_parameters`へ置くこともエラーです。
+- 未知の top-level key、未知の parameter、各セット直下の未知のkeyは読み飛ばします。既知keyの重複は、top-levelまたは`mc_parameters`ではファイル全体、各セットではそのセットを無効にします。
+- 各セットの`parameters`には音関連22項目すべてが必要です。共通項目をセット内へ置く、または音関連項目をtop-level `mc_parameters`へ置いた場合、その誤配置項目は読み飛ばされます。正しい階層の必須項目が不足した結果として、共通部全体または該当セットが無効になります。
 - boolean は引用符なしの `true` または `false`、整数は小数部なし、float は有限の JSON number として記述します。
 - `filter_mode` は文字列 `"AUTO"` または `"BARO_ONLY"` です。
 - `bluetooth_battery_mode` は文字列 `"VOLTAGE"` または `"PERCENT"` です。
@@ -224,7 +224,7 @@ board_axis_value = sensor[source] * sign
 
 Aohazuku Rev.0 は加速度・ジャイロとも `source={0, 1, 2}`、`sign={+1, +1, +1}` に固定されています。これらは `setting.json`、`PARAM LIST`、`PARAM GET`、`PARAM SET`、`PARAM RESET` の対象ではありません。軸変換は `SRC/platform/board.c` のボード定義を使用します。
 
-version 1では、軸keyを含む未知のparameterはファイル全体のエラーになります。`mc_data.json` のoffsetは、軸変換前のセンサ座標で保持されます。
+version 1では、軸keyを含む未知のparameterは読み飛ばされ、設定として使用されません。`mc_data.json` のoffsetは、軸変換前のセンサ座標で保持されます。
 
 ### 4.4 音状態制御
 
@@ -325,7 +325,10 @@ predictive_duration_ms <= predictive_interval_ms
 | 正常な version 1 | 共通8項目と音関連22項目を持つ全セットを読込み |
 | version 1以外 | 非対応versionとしてファイル全体を無効化 |
 | ファイルなし | 全項目を組込み既定値とし、既定ファイルを自動生成 |
-| JSON 構文、型、範囲、関係が不正 | ファイルの値を一切適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
+| JSON 構文、root、共通必須項目の型または範囲が不正 | ファイルの値を適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
+| 一部のパラメータセットが不完全、型・範囲・関係・番号が不正 | 該当セットを読み飛ばし、残った有効セットだけを番号順で使用 |
+| 同じ`parameter_number`が複数存在 | その番号のセットをすべて読み飛ばし、他番号の有効セットは使用 |
+| 有効なパラメータセットが0件 | 共通値も含め、全項目を組込み既定値として継続 |
 | 読込み I/O error | 全項目を組込み既定値として継続し、診断へ error を記録 |
 | `setting.json` がなく、有効な `setting.bak` がある | backup を `setting.json` へ復元して読込み |
 | `setting.json` 自体が不正 | `setting.bak` へ自動 fallback せず、組込み既定値を使用 |
@@ -348,7 +351,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 ## 8. versionの扱い
 
-ファームウェアはversion 1の構造だけを読み込みます。top-level、共通8項目、各セットの音関連22項目について、未知のkey、誤った階層、欠落、重複、型違いまたは値域違反があるファイルは全体を無効とし、自動変換しません。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`や、`gps_module_installed`などの搭載有無キーも未知のkeyとして拒否します。
+ファームウェアはversion 1の構造だけを読み込み、自動変換は行いません。未知のkeyと誤った階層の項目は読み飛ばします。top-levelまたは共通8項目の欠落、重複、型違い、値域違反は全体を無効にします。各セットの音関連22項目の欠落、重複、型違い、値域違反、相互関係違反はそのセットだけを無効にします。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`や、`gps_module_installed`などの搭載有無キーも読み飛ばされ、設定には使用されません。
 
 ## 9. 実装上の正本
 
