@@ -45,15 +45,19 @@ typedef struct {
 
 typedef bool (*usb_storage_mode_begin_cb_t)(uint32_t timeout_ms, void *arg);
 typedef void (*usb_storage_mode_end_cb_t)(void *arg);
+typedef void (*usb_storage_progress_cb_t)(void *arg);
 
 /**
  * @brief Prepare the shared FAT volume and load parameters before USB starts.
  *
  * A blank or damaged volume is never formatted implicitly. Formatting occurs
  * only when @p format_config_storage is true (the SW2+SW3 boot gesture).
+ * @p progress_cb is called between bounded storage operations and may be NULL.
  */
 esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
-                                  bool format_config_storage);
+                                  bool format_config_storage,
+                                  usb_storage_progress_cb_t progress_cb,
+                                  void *progress_arg);
 
 /** Start the self-powered TinyUSB CDC + MSC composite device. */
 esp_err_t usb_device_start(void);

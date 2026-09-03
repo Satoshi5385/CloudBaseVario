@@ -162,6 +162,11 @@ static void feed_startup_watchdog(void) {
     (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
 }
 
+static void report_startup_storage_progress(void *arg) {
+    (void) arg;
+    feed_startup_watchdog();
+}
+
 static bool nvs_recovery_required(esp_err_t result) {
     return result == ESP_ERR_NVS_NO_FREE_PAGES ||
            result == ESP_ERR_NVS_NEW_VERSION_FOUND;
@@ -524,7 +529,8 @@ void app_startup_run(void) {
 
     storage_result =
         usb_device_storage_init(&startup_runtime_profiles,
-                                config_format_requested);
+                                config_format_requested,
+                                report_startup_storage_progress, NULL);
     feed_startup_watchdog();
     if (storage_result != ESP_OK) {
         ESP_LOGW(TAG, "config FAT/MSC storage degraded: %s",

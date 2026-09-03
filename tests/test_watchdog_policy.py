@@ -117,6 +117,22 @@ class WatchdogPolicyTests(unittest.TestCase):
             "watchdog_service_feed(WATCHDOG_ACTOR_STARTUP)", apply_update
         )
 
+    def test_startup_storage_progress_feeds_startup_watchdog(self) -> None:
+        callback_start = STARTUP.index(
+            "static void report_startup_storage_progress"
+        )
+        callback_end = STARTUP.index(
+            "static bool nvs_recovery_required", callback_start
+        )
+        callback = STARTUP[callback_start:callback_end]
+        storage_call = STARTUP.index("usb_device_storage_init(")
+
+        self.assertIn("feed_startup_watchdog();", callback)
+        self.assertIn(
+            "report_startup_storage_progress, NULL",
+            STARTUP[storage_call : storage_call + 240],
+        )
+
     def test_diag_and_build_contract_cover_effective_configuration(self) -> None:
         self.assertIn('"WATCHDOG reset=%s action=%s', WORKERS)
         self.assertIn("CONFIG_ESP_TASK_WDT_PANIC 1", WORKFLOW)

@@ -726,7 +726,7 @@ typedef struct {
 4. `startup_prep`完了後、保存音量または既定小音量で起動サウンドを同期再生する。NVSが全消去を必要とする場合は起動サウンド後に消去して1回だけ再初期化し、SW2+SW3 format要求時は専用スイッチ設定を消去する。緑LEDは100 %を維持する。
 5. ボード設定を検証し、診断カウンタと単一テーブルのパラメータ既定値を準備する。ADC分圧定数、ICM-42688P-HXYの固定アドレス、識別値、I2C速度、ODRおよびrangeが本書の確定値と一致しない場合は該当機能を無効として診断へ示す。
 6. 最大80 MHz、最小40 MHz、Light-sleep許可でPMを初期化し、通常動作用Light-sleep禁止lockを取得する。初期化またはlock生成に失敗した場合は80 MHz固定・Light-sleep無効へ戻し、主要機能を継続する。
-7. SW2とSW3による明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。mount失敗時は自動formatせず既定値で継続する。
+7. SW2とSW3による明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、syncおよびMSC生成の各処理間で起動Task Watchdogを給餌する。mount失敗時は自動formatせず既定値で継続する。
 8. 電池ADCを一度だけ初期化し、GPIO42 Lowの場合は100 ms間隔、最大5 sampleで起動時電池電圧を取得する。有効かつ有限な電圧が3.2 V以下なら、起動サウンドおよび以降の通常初期化へ進まず`SAFE_STOP`へ移る。同じ測定値をOTA電源判定にも再利用し、`UPDATE.PND/BAD/TXT`を整理した後、GPIO42 High、または電池電圧が3.4 Vを超え、かつ `UPDATE.BIN`がある場合はimageを検証してinactive OTA slotへ書き、成功時は再起動する。OTA pending-verify起動にも3.2 Vの起動禁止は適用するが、3.4 VのOTA適用条件は再適用せず10秒の確認taskを開始する。
 9. TinyUSB CDCを開始して起動中の診断を可能にする。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外しまたはdetachではESP32側へ戻す。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
 10. キュー、mutex、Event Groupを生成する。必須同期オブジェクトを生成できない場合はブザーを停止したfatal stateへ入り、電源OFF操作だけを受理する。

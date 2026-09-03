@@ -1,5 +1,6 @@
 #include "platform/usb_device_service.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
@@ -35,6 +36,7 @@
 #define INFO_FILENAME "INFO.TXT"
 #define SETTING_EDITOR_FILENAME "setting_editor.html"
 #define GENERATED_FILE_PATH_CAPACITY 32U
+#define GENERATED_FILE_IO_CHUNK_BYTES UINT32_C(4096)
 #define STORAGE_MUTEX_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_QUIESCE_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_IDLE_US INT64_C(1000000)
@@ -64,6 +66,7 @@ static int64_t current_write_started_us;
 static int64_t last_write_completed_us;
 static bool storage_mode_force_exit;
 static char serial_number[USB_SERIAL_NUMBER_LENGTH];
+static uint8_t generated_file_io_buffer[GENERATED_FILE_IO_CHUNK_BYTES];
 static const char *usb_strings[] = {
     (const char[]) {0x09, 0x04},
     "CloudBaseVario",
@@ -288,17 +291,97 @@ static void log_config_load_result(void) {
     }
 }
 
+static void report_storage_progress(usb_storage_progress_cb_t progress_cb,
+                                    void *progress_arg) {
+    if (progress_cb != NULL) {
+        progress_cb(progress_arg);
+    }
+}
+
+static esp_err_t generated_file_matches(
+    const char *vfs_path, const uint8_t *contents, size_t content_length,
+    usb_storage_progress_cb_t progress_cb, void *progress_arg,
+    bool *matches) {
+    FILE *file;
+    size_t offset = 0U;
+    esp_err_t result = ESP_OK;
+
+    if (matches == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *matches = false;
+    errno = 0;
+    file = fopen(vfs_path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            return ESP_OK;
+        }
+        ESP_LOGE(TAG, "%s comparison open failed: errno=%d", vfs_path,
+                 errno);
+        return ESP_FAIL;
+    }
+
+    *matches = true;
+    while (offset < content_length) {
+        size_t remaining = content_length - offset;
+        size_t chunk_size = remaining;
+        size_t read_size;
+
+        if (chunk_size > sizeof(generated_file_io_buffer)) {
+            chunk_size = sizeof(generated_file_io_buffer);
+        }
+        read_size = fread(generated_file_io_buffer, 1U, chunk_size, file);
+        report_storage_progress(progress_cb, progress_arg);
+        if (read_size != chunk_size) {
+            if (ferror(file)) {
+                ESP_LOGE(TAG, "%s comparison read failed", vfs_path);
+                result = ESP_FAIL;
+            }
+            *matches = false;
+            break;
+        }
+        if (memcmp(generated_file_io_buffer, contents + offset,
+                   chunk_size) != 0) {
+            *matches = false;
+            break;
+        }
+        offset += chunk_size;
+    }
+    if (result == ESP_OK && *matches) {
+        int trailing_byte = fgetc(file);
+
+        report_storage_progress(progress_cb, progress_arg);
+        if (trailing_byte != EOF) {
+            *matches = false;
+        } else if (ferror(file)) {
+            ESP_LOGE(TAG, "%s trailing-byte check failed", vfs_path);
+            *matches = false;
+            result = ESP_FAIL;
+        }
+    }
+    if (fclose(file) != 0 && result == ESP_OK) {
+        ESP_LOGE(TAG, "%s comparison close failed", vfs_path);
+        result = ESP_FAIL;
+    }
+    report_storage_progress(progress_cb, progress_arg);
+    return result;
+}
+
 static esp_err_t write_read_only_file(wl_handle_t wl_handle,
                                       const char *filename,
                                       const uint8_t *contents,
-                                      size_t content_length) {
+                                      size_t content_length,
+                                      usb_storage_progress_cb_t progress_cb,
+                                      void *progress_arg) {
     char fat_path[GENERATED_FILE_PATH_CAPACITY] = {0};
     char vfs_path[GENERATED_FILE_PATH_CAPACITY] = {0};
     BYTE pdrv;
     FRESULT attribute_result;
     FILE *file;
     int path_length;
-    bool write_succeeded;
+    size_t offset = 0U;
+    bool matches = false;
+    esp_err_t ret;
 
     if (filename == NULL || filename[0] == '\0' || contents == NULL ||
         content_length == 0U) {
@@ -319,7 +402,26 @@ static esp_err_t write_read_only_file(wl_handle_t wl_handle,
         return ESP_ERR_INVALID_SIZE;
     }
 
+    ret = generated_file_matches(vfs_path, contents, content_length,
+                                 progress_cb, progress_arg, &matches);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (matches) {
+        report_storage_progress(progress_cb, progress_arg);
+        attribute_result = f_chmod(fat_path, AM_RDO, AM_RDO);
+        report_storage_progress(progress_cb, progress_arg);
+        if (attribute_result != FR_OK) {
+            ESP_LOGE(TAG, "%s read-only attribute set failed: %d", filename,
+                     (int) attribute_result);
+            return ESP_FAIL;
+        }
+        return ESP_OK;
+    }
+
+    report_storage_progress(progress_cb, progress_arg);
     attribute_result = f_chmod(fat_path, 0U, AM_RDO);
+    report_storage_progress(progress_cb, progress_arg);
     if (attribute_result != FR_OK && attribute_result != FR_NO_FILE) {
         ESP_LOGE(TAG, "%s read-only attribute clear failed: %d", filename,
                  (int) attribute_result);
@@ -331,18 +433,43 @@ static esp_err_t write_read_only_file(wl_handle_t wl_handle,
         ESP_LOGE(TAG, "%s create failed", filename);
         return ESP_FAIL;
     }
-    write_succeeded =
-        fwrite(contents, 1U, content_length, file) == content_length &&
-        fflush(file) == 0 && fsync(fileno(file)) == 0;
-    if (fclose(file) != 0) {
-        write_succeeded = false;
+    while (offset < content_length) {
+        size_t remaining = content_length - offset;
+        size_t chunk_size = remaining;
+
+        if (chunk_size > GENERATED_FILE_IO_CHUNK_BYTES) {
+            chunk_size = GENERATED_FILE_IO_CHUNK_BYTES;
+        }
+        report_storage_progress(progress_cb, progress_arg);
+        if (fwrite(contents + offset, 1U, chunk_size, file) != chunk_size) {
+            ESP_LOGE(TAG, "%s write failed", filename);
+            (void) fclose(file);
+            return ESP_FAIL;
+        }
+        offset += chunk_size;
+        report_storage_progress(progress_cb, progress_arg);
     }
-    if (!write_succeeded) {
-        ESP_LOGE(TAG, "%s write or sync failed", filename);
+    report_storage_progress(progress_cb, progress_arg);
+    if (fflush(file) != 0) {
+        ESP_LOGE(TAG, "%s flush failed", filename);
+        (void) fclose(file);
+        return ESP_FAIL;
+    }
+    report_storage_progress(progress_cb, progress_arg);
+    if (fsync(fileno(file)) != 0) {
+        ESP_LOGE(TAG, "%s sync failed", filename);
+        (void) fclose(file);
+        return ESP_FAIL;
+    }
+    report_storage_progress(progress_cb, progress_arg);
+    if (fclose(file) != 0) {
+        ESP_LOGE(TAG, "%s close failed", filename);
         return ESP_FAIL;
     }
 
+    report_storage_progress(progress_cb, progress_arg);
     attribute_result = f_chmod(fat_path, AM_RDO, AM_RDO);
+    report_storage_progress(progress_cb, progress_arg);
     if (attribute_result != FR_OK) {
         ESP_LOGE(TAG, "%s read-only attribute set failed: %d", filename,
                  (int) attribute_result);
@@ -351,7 +478,9 @@ static esp_err_t write_read_only_file(wl_handle_t wl_handle,
     return ESP_OK;
 }
 
-static esp_err_t write_info_file(wl_handle_t wl_handle) {
+static esp_err_t write_info_file(wl_handle_t wl_handle,
+                                 usb_storage_progress_cb_t progress_cb,
+                                 void *progress_arg) {
     const board_identity_t *identity = board_active_identity();
     const board_descriptor_t *descriptor = board_active_descriptor();
     const esp_app_desc_t *app = esp_app_get_description();
@@ -380,10 +509,13 @@ static esp_err_t write_info_file(wl_handle_t wl_handle) {
 
     return write_read_only_file(wl_handle, INFO_FILENAME,
                                 (const uint8_t *) contents,
-                                strlen(contents));
+                                strlen(contents), progress_cb,
+                                progress_arg);
 }
 
-static esp_err_t write_setting_editor_file(wl_handle_t wl_handle) {
+static esp_err_t write_setting_editor_file(
+    wl_handle_t wl_handle, usb_storage_progress_cb_t progress_cb,
+    void *progress_arg) {
     size_t content_length;
 
     if (&setting_editor_html_end[0] <= &setting_editor_html_start[0]) {
@@ -392,7 +524,8 @@ static esp_err_t write_setting_editor_file(wl_handle_t wl_handle) {
     content_length = (size_t) (setting_editor_html_end -
                                setting_editor_html_start);
     return write_read_only_file(wl_handle, SETTING_EDITOR_FILENAME,
-                                setting_editor_html_start, content_length);
+                                setting_editor_html_start, content_length,
+                                progress_cb, progress_arg);
 }
 
 static bool make_serial_number(void) {
@@ -538,7 +671,9 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
 }
 
 esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
-                                  bool format_config_storage) {
+                                  bool format_config_storage,
+                                  usb_storage_progress_cb_t progress_cb,
+                                  void *progress_arg) {
     esp_vfs_fat_mount_config_t mount_config = {
         .format_if_mount_failed = false,
         .max_files = 6,
@@ -555,6 +690,7 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         return ESP_ERR_INVALID_ARG;
     }
     app_config_profiles_set_defaults(profiles);
+    report_storage_progress(progress_cb, progress_arg);
 
     storage_io_mutex = xSemaphoreCreateMutex();
     if (storage_io_mutex == NULL) {
@@ -603,8 +739,10 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     if (format_config_storage) {
         esp_vfs_fat_mount_config_t format_config = mount_config;
         format_config.format_if_mount_failed = true;
+        report_storage_progress(progress_cb, progress_arg);
         ret = esp_vfs_fat_spiflash_format_cfg_rw_wl(
             CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &format_config);
+        report_storage_progress(progress_cb, progress_arg);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "explicit config FAT format failed: %s",
                      esp_err_to_name(ret));
@@ -614,9 +752,11 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         ESP_LOGW(TAG, "config FAT formatted by SW2+SW3 startup request");
     }
 
+    report_storage_progress(progress_cb, progress_arg);
     ret = esp_vfs_fat_spiflash_mount_rw_wl(
         CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &mount_config,
         &preflight_handle);
+    report_storage_progress(progress_cb, progress_arg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "config FAT unavailable; automatic format prohibited: %s",
                  esp_err_to_name(ret));
@@ -627,7 +767,7 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         return ret;
     }
 
-    ret = write_info_file(preflight_handle);
+    ret = write_info_file(preflight_handle, progress_cb, progress_arg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "INFO.TXT generation failed: %s", esp_err_to_name(ret));
         (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
@@ -635,7 +775,8 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         set_storage_unavailable(ret);
         return ret;
     }
-    ret = write_setting_editor_file(preflight_handle);
+    ret = write_setting_editor_file(preflight_handle, progress_cb,
+                                    progress_arg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "setting_editor.html generation failed: %s",
                  esp_err_to_name(ret));
@@ -645,11 +786,15 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         return ret;
     }
 
+    report_storage_progress(progress_cb, progress_arg);
     usb_diagnostics.load_result =
         config_storage_load(CONFIG_MOUNT_PATH, profiles,
                             &usb_diagnostics.config);
+    report_storage_progress(progress_cb, progress_arg);
     if (usb_diagnostics.load_result == CONFIG_LOAD_DEFAULT_NO_FILE) {
+        report_storage_progress(progress_cb, progress_arg);
         ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
+        report_storage_progress(progress_cb, progress_arg);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "default setting.json generation failed: %s",
                      esp_err_to_name(ret));
@@ -660,9 +805,12 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     if (f_setlabel(CONFIG_VOLUME_LABEL) != FR_OK) {
         ESP_LOGW(TAG, "FAT volume label could not be set");
     }
+    report_storage_progress(progress_cb, progress_arg);
 
+    report_storage_progress(progress_cb, progress_arg);
     ret = esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
                                               preflight_handle);
+    report_storage_progress(progress_cb, progress_arg);
     if (ret != ESP_OK) {
         set_storage_unavailable(ret);
         return ret;
@@ -675,7 +823,9 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         set_storage_unavailable(ESP_ERR_NOT_FOUND);
         return ESP_ERR_NOT_FOUND;
     }
+    report_storage_progress(progress_cb, progress_arg);
     ret = wl_mount(partition, &wear_levelling_handle);
+    report_storage_progress(progress_cb, progress_arg);
     if (ret != ESP_OK) {
         set_storage_unavailable(ret);
         return ret;
@@ -702,7 +852,9 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         .mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB,
     };
 
+    report_storage_progress(progress_cb, progress_arg);
     ret = tinyusb_msc_new_storage_spiflash(&storage_config, &msc_storage);
+    report_storage_progress(progress_cb, progress_arg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "MSC storage initialization failed: %s",
                  esp_err_to_name(ret));
@@ -713,8 +865,10 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
         set_storage_unavailable(ret);
         return ret;
     }
+    report_storage_progress(progress_cb, progress_arg);
     ret = tinyusb_msc_set_storage_mount_point(
         msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP);
+    report_storage_progress(progress_cb, progress_arg);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "MSC application mount request failed: %s",
                  esp_err_to_name(ret));
