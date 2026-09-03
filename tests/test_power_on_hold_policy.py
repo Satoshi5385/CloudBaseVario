@@ -32,8 +32,8 @@ SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 
 
 class PowerOnHoldPolicyTests(unittest.TestCase):
-    def test_power_on_hold_duration_is_a_shared_two_second_define(self) -> None:
-        self.assertIn("#define POWER_ON_HOLD_MS UINT32_C(2000)", TASK_HEADER)
+    def test_power_on_hold_duration_is_a_shared_one_second_define(self) -> None:
+        self.assertIn("#define POWER_ON_HOLD_MS UINT32_C(1000)", TASK_HEADER)
         self.assertIn("POWER_ON_HOLD_MS", MAIN_SOURCE)
         self.assertIn("POWER_ON_HOLD_MS", TASK_SOURCE)
 

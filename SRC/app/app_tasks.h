@@ -11,7 +11,7 @@
 #include "platform/imu_calibration_storage.h"
 
 /** Required stable SW1 press duration before accepting a power-on request. */
-#define POWER_ON_HOLD_MS UINT32_C(2000)
+#define POWER_ON_HOLD_MS UINT32_C(1000)
 
 _Static_assert(POWER_ON_HOLD_MS > 0U,
                "Power-on hold duration must be nonzero");
