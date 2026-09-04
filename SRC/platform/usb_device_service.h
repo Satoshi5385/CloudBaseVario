@@ -27,6 +27,7 @@ typedef struct {
     esp_err_t last_save_result;
     uint32_t attach_count;
     uint32_t detach_count;
+    uint32_t host_release_count;
     uint32_t mount_failure_count;
     uint32_t format_required_count;
     uint32_t rx_error_count;
@@ -51,7 +52,7 @@ typedef void (*usb_storage_progress_cb_t)(void *arg);
  * @brief Prepare the shared FAT volume and load parameters before USB starts.
  *
  * A blank or damaged volume is never formatted implicitly. Formatting occurs
- * only when @p format_config_storage is true (the SW2+SW3 boot gesture).
+ * only when @p format_config_storage is true (the SW3-only boot gesture).
  * @p progress_cb is called between bounded storage operations and may be NULL.
  */
 esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
@@ -59,8 +60,20 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
                                   usb_storage_progress_cb_t progress_cb,
                                   void *progress_arg);
 
+/**
+ * @brief Prepare only the existing FAT volume and MSC transport for recovery.
+ *
+ * This path never formats the volume, loads setting.json, or creates generated
+ * files. It leaves the valid FAT volume mounted for application inspection.
+ */
+esp_err_t usb_device_recovery_storage_init(
+    usb_storage_progress_cb_t progress_cb, void *progress_arg);
+
 /** Start the self-powered TinyUSB CDC + MSC composite device. */
 esp_err_t usb_device_start(void);
+
+/** Start TinyUSB for recovery with an eFuse-MAC-derived serial number. */
+esp_err_t usb_device_start_recovery(void);
 
 /**
  * @brief Stop the application TinyUSB task and PHY without deleting FAT/MSC storage.
@@ -76,6 +89,13 @@ esp_err_t usb_device_stop(void);
  * so startup calibration, OTA cleanup, and configuration writes can complete.
  */
 esp_err_t usb_device_enable_msc(void);
+
+/**
+ * Wait for a completed HOST-to-APP ownership transition after @p release_count.
+ * A successful result also guarantees that no accepted MSC write remains.
+ */
+esp_err_t usb_device_wait_for_host_release(uint32_t release_count,
+                                           uint32_t timeout_ms);
 
 /** Register application quiesce/resume hooks used around actual MSC writes. */
 void usb_device_set_storage_mode_callbacks(

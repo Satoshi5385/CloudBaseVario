@@ -63,7 +63,7 @@
  */
 esp_err_t board_init_power_hold(void);
 
-/** Select the validated immutable identity before board GPIO initialization. */
+/** Select the validated immutable identity before board-specific services. */
 bool board_select_identity(const board_identity_t *identity);
 
 /** Return the active identity, or NULL before successful selection. */

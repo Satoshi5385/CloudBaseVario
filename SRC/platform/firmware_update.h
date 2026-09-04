@@ -57,6 +57,14 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
                                        bool battery_valid,
                                        float battery_voltage_v);
 
+/**
+ * Apply UPDATE.BIN from the application-owned recovery volume.
+ *
+ * Recovery requires USB VBUS and reports ESP_ERR_NOT_FOUND when no input file
+ * is present so the caller can expose MSC and wait for a host session.
+ */
+esp_err_t firmware_update_process_recovery(bool external_power_present);
+
 /** Start the ten-second first-boot rollback confirmation gate if required. */
 esp_err_t firmware_update_begin_confirmation(void);
 

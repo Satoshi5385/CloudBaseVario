@@ -43,6 +43,7 @@ BMP581の気圧とICM-42688P-HXYの姿勢補正済み鉛直加速度から高度
 - `app_main()`の先頭で、他の初期化より先に `PIN_PWR_HOLD`（GPIO47）を出力Highへ設定し、電源を自己保持すること。ROM・2nd stage bootloaderの起動時間中はハードウェア側のラッチで電源を維持する。
 - `BOOT`後は原則として `POWER_ON_WAIT`へ入り、安全GPIOと緑LED PWMを初期化してSW1を10 ms周期、30 msデバウンスで監視すること。`POWER_ON_HOLD_MS`（既定1000 ms）の連続押下成立まで、CPU1の一時taskでは専用NVSの読込みとブザー用LEDCの無音初期化だけを許可し、NVS消去・書込み、USB、センサー、通常のRTOS資源およびBLEを開始してはならない。ただし、実行中partitionが`ESP_OTA_IMG_PENDING_VERIFY`のOTA初回boot、またはRTC保持された正常な復帰記録に対する最初の`ESP_RST_TASK_WDT`／`ESP_RST_INT_WDT` bootでは長押し判定を省略し、緑LEDを100 %にして同じ起動準備と確定音を実行すること。後者は`ACTIVE`を5分継続するまで1回だけ許可し、5分以内の再発、RTC記録不正、generic WDT、panic、brownoutおよびsoftware resetは`POWER_ON_WAIT`を省略してはならない。
 - `POWER_ON_WAIT`中はブザーと黄LEDを停止し、緑LEDを押下確定時間に比例して消灯から100 %まで線形増光すること。規定時間前にSW1を離した場合は両LEDを消灯して `PIN_PWR_HOLD`をLowにすること。
+- OTA初回boot以外では、安全GPIOと起動Task Watchdogの初期化後、製造用board identity、NVS、音声、設定および通常serviceを開始する前に起動時のSW2+SW3を判定する。30 ms以上安定した同時押下をさらに2秒継続した場合はMSCリカバリーモードへ入り、途中で一方を離した場合は曖昧入力としてリカバリーと設定FAT formatの両方を行わない。SW3だけを起動時から2秒継続した場合を設定FATの明示format要求とし、SW2だけでは特別処理を行わない。
 - 電源ON確定後は、専用NVSから復元した音量で起動サウンドを1回再生し、緑LEDを100 %、黄LEDを消灯のまま維持すること。NVSが未作成、不正または回復を必要とする場合は既定の小音量とし、NVS全消去を伴う回復は確定音の後に行うこと。BMP581起動完了後は、100 %を始点として選択されたライフサイクル表示へ移行すること。
 - 電源OFF要求を受けた場合、直ちに新規BLE送信を禁止して通常のバリオ音を停止し、最終system snapshotを公開してから`SHUTTING_DOWN`への遷移時点から15秒の終了期限を開始すること。低優先度console taskはdirtyなスイッチ設定だけを専用NVSへ保存して停止ackを返し、system taskはほかの起動済みworkerの停止ackと処理開始済み永続化workerの完了を待つ。期限前にすべて完了した場合は終了サウンドの再生後に`PIN_PWR_HOLD`をLowにすること。`setting.json`の未保存RAM値を暗黙に保存してはならない。15秒の終了期限に達した場合は、SW1の状態、workerのack、書き込み、保存および終了サウンドの状態にかかわらず、直ちに`PIN_PWR_HOLD`をLowにすること。
 - `PIN_PWR_EXT`（GPIO42）からUSB外部電源の有無を取得できること。
@@ -73,10 +74,13 @@ stateDiagram-v2
     BOOT --> POWER_ON_WAIT: app_main開始<br/>PWR_HOLD=High
     BOOT --> INITIALIZING: OTA初回boot<br/>PENDING_VERIFY
     BOOT --> INITIALIZING: 最初のTask/Interrupt WDT<br/>自動復帰
+    BOOT --> RECOVERY: SW2+SW3を<br/>30 ms + 2秒継続
     POWER_ON_WAIT --> INITIALIZING: SW1を1秒長押し
     POWER_ON_WAIT --> OFF: 規定時間前にSW1を解放<br/>給電消失
     POWER_ON_WAIT --> SAFE_STOP: 規定時間前にSW1を解放<br/>外部給電継続
     INITIALIZING --> ACTIVE: 初期化完了
+    RECOVERY --> INITIALIZING: 署名済み更新を適用<br/>再起動してPENDING_VERIFY
+    RECOVERY --> SAFE_STOP: VBUS消失／MSC初期化失敗
     INITIALIZING --> FATAL: 必須リソース生成失敗<br/>BMP581起動時初期化失敗
 
     ACTIVE --> SHUTTING_DOWN: SW1解放確認後<br/>1秒長押し
@@ -132,7 +136,7 @@ stateDiagram-v2
 
 SW1の1秒長押し成立直後、またはOTA pending-verify起動で緑LEDを100 %にした直後に、`app_main`が電源ONを示す起動サウンドを同期的に1回再生する。起動サウンドは現在選択されている音量、デューティ50 %で、700 Hzを180 ms鳴動、80 ms無音、1200 Hzを120 ms鳴動する。全長は380 msとし、共有FAT、USB、センサーおよび通常taskの初期化より前に再生する。
 
-現在音量は`POWER_ON_WAIT`と並行して専用NVSから復元し、SW1短押しで更新する消音・小・中・大の4段階とする。小・中・大はそれぞれPAM8904Eの1倍・2倍・3倍モードとし、消音では起動サウンドを鳴らさず、待ち時間を追加せず再生完了として扱う。SW2+SW3による起動時format、NVS未作成、不正、読込み失敗または回復要求では既定の小音量を使う。通常の音声taskは未起動であるため、起動サウンドとリフト音、シンク音または予測ブザーを同時に出力してはならない。
+現在音量は`POWER_ON_WAIT`と並行して専用NVSから復元し、SW1短押しで更新する消音・小・中・大の4段階とする。小・中・大はそれぞれPAM8904Eの1倍・2倍・3倍モードとし、消音では起動サウンドを鳴らさず、待ち時間を追加せず再生完了として扱う。SW3だけの起動時長押しによるformat、NVS未作成、不正、読込み失敗または回復要求では既定の小音量を使う。通常の音声taskは未起動であるため、起動サウンドとリフト音、シンク音または予測ブザーを同時に出力してはならない。
 
 起動サウンドはセンサー初期化より前に再生するため、その後BMP581初期化失敗または必須task生成失敗で`FATAL`へ遷移する場合も再生済みとなる。`ACTIVE`移行後のBMP581再検出または再初期化では再生しない。`SAFE_STOP`からSW1解放確認後の1秒長押しでS/Wリセットした場合は新しい起動として再生する。
 
@@ -359,7 +363,7 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 ### TinyUSB CDC + MSC構成
 
 - ESP32-S3のUSB OTG内蔵PHYを使用し、CDC ACM 1 interfaceとMSC 1 LUNを同時に公開する。USB Serial/JTAG、UART consoleおよびUSB DFU interfaceは併用しない。
-- TinyUSB device taskはcore0固定、priority 6、stack 4096 byteとする。CDC RX/TX/endpoint bufferは512/4096/512 byte、MSC転送bufferは8192 byteとする。
+- TinyUSB device taskはcore0固定、priority 6、stack 4096 byteとする。CDC RX/TX/endpoint bufferは512/4096/512 byte、MSC転送bufferは4096 byteとする。
 - CDCはESP-IDF log、10 Hzテレメトリーおよびコマンドコンソールを提供する。MSCは4 MiB共有FATを公開する。
 - MSC class driverはFAT mountより先に初期化する。FATをmountできない場合はLUNへmediaを登録せず、CDC + MSC descriptorを維持してSCSI要求へ「メディアなし」として応答する。未初期化のMSC class callbackをhostへ公開してはならない。
 - FAT mount失敗時もTinyUSB CDC、センサー、推定、音声およびBLEを継続する。MSC class driver自体を初期化できない場合はTinyUSB compositeを開始せず、USB以外の主要機能を継続する。
@@ -427,7 +431,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 #### 保存領域とUSBインターフェース
 
 - 内蔵Flashに4 MiBの設定・更新共有FAT partitionを設け、512 byte sectorのwear levelling Safety modeを介して使用すること。Bluetooth Controller用NVSとは分離すること。
-- FATをmountできない場合も自動formatしないこと。SW2とSW3を押したまま電源ONする明示操作または `idf.py config-flash`によってだけ初期化すること。
+- FATをmountできない場合も自動formatしないこと。SW2を押さずSW3だけを2秒間押したまま電源ONする明示操作または `idf.py config-flash`によってだけ初期化すること。
 - `config-flash`用FAT imageは`wl_fatfsgen.py`へ`--sector_size 512 --wl_mode safe`を指定して生成すること。build時にimageのWL設定、BPB sector sizeおよびBPB総sector数を検証し、BPB総sector数がSafety WL実行時の`wl_size() / wl_sector_size()`相当と一致しない場合はbuildを失敗させること。4 MiB partitionの実行時容量は8080 sectorとする。
 - ESP32-S3のUSB OTG peripheralと内蔵PHYをTinyUSBで使用し、CDCとMSCを同時に公開する複合デバイスとすること。USB OTGが内蔵PHYを使用している間はUSB Serial/JTAGを同時に使用しないこと。
 - CDCは既存のコンソール入出力を提供し、MSCは設定保存用FAT partitionをリムーバブルストレージとして公開すること。
@@ -446,14 +450,17 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 
 - Aohazukuシリーズ共通のESP-IDF project nameを `CloudBaseVario-Aohazuku`とする。build成功時に通常のraw `CloudBaseVario-Aohazuku.bin` と同一内容の `UPDATE.UNSIGNED.BIN`を生成し、OTA slot最終4 KiBの認証記録を除く `0x37f000` byteを超える場合はbuildを失敗させる。所有者はリポジトリ外のECDSA P-256秘密鍵でraw applicationを明示的に署名し、固定長署名ヘッダとpayloadからなる `UPDATE.BIN`、および4 KiBの `FIRMWARE.AUTH`を生成する。
 - release versionの正本は `SRC/firmware_version.h` の `CBV_FIRMWARE_VERSION`とし、`major.minor.patch`形式で手動管理する。初期値は`0.1.0`とする。build時のHEADを7桁小文字hexのGit hashとして取得し、dirty suffixは付けず、`esp_app_desc_t.version`へ `<version>+<hash>`形式で格納する。31文字を超える値、形式不正またはGit hashを取得できないbuildは失敗させる。バイナリ内容の識別には別途ELF/application SHA-256を維持する。
-- USBドライブ直下へ `UPDATE.BIN`をコピーして安全な取り外しを行い、次回起動時にだけ更新を適用する。稼働中に検出または適用しない。
+- 通常動作ではUSBドライブ直下へ `UPDATE.BIN`をコピーして安全な取り外しを行い、次回起動時にだけ更新を適用する。通常稼働中には検出または適用しない。MSCリカバリーモードでは安全な取り外しによってhostからAPPへ所有権が戻った直後にだけ適用する。
 - 更新処理は通常task開始前に行い、GPIO42がHighの外部給電中、またはGPIO42がLowでも有効かつ有限な電池電圧が3.4 Vを超える場合に許可する。3.4 Vちょうどは許可しない。外部給電がない場合は電池ADCを一度だけ初期化し、100 ms間隔、最大5 sample（500 ms以内）で既存の中央値測定を成立させる。ADC初期化失敗、測定無効、非有限、saturationまたは3.4 V以下では、`UPDATE.BIN`を保持して `UPDATE_RESULT.TXT`へ外部給電、電池有効性、測定電圧および閾値を含むdeferred理由を記録し、現在のfirmwareを起動する。GPIO42がHighの場合は電池測定の成立を待たない。
 - 入力は固定header（magic、format version、鍵ID、project、chip ID、payload size、payload SHA-256、ECDSA P-256 signature）とESP-IDF raw application payloadからなる単一の `UPDATE.BIN`とする。headerのproject、chip、サイズ、digestおよび所有者公開鍵によるsignatureをOTA書込み前に検証する。署名が無い、壊れている、別鍵・別project・別payloadの入力は拒否し、入力を残して `UPDATE_RESULT.TXT`へ認証拒否を記録する。payload SHA-256不一致では `reason=firmware payload hash mismatch`、ECDSA署名不一致では `reason=firmware signature verification failed`、header不正、I/O失敗または暗号処理失敗などその他の認証失敗では `reason=firmware authentication failed` とする。payloadは `0x37f000` byte以下で、ESP image magic、ESP32-S3 chip ID、`esp_app_desc_t` magic、project nameのNUL終端、およびproject name `CloudBaseVario-Aohazuku`との完全一致を検証する。同じproject name内では同一versionとdowngradeを許可する。
 - `esp_ota_begin/write/end`で検証済みpayloadだけをinactive OTA partitionへ書き、`esp_ota_end`のimage checksum確認後にpartition最終4 KiBへ同じ署名headerを記録する。認証記録のerase/writeが成功した場合だけboot partitionを変更する。更新中は電源保持を継続し、緑LEDを消灯、黄LEDを100 ms周期で点滅させ、通常taskを開始しない。
 - partition tableは `nvs 0x9000/0x6000`、`phy_init 0xf000/0x1000`、`factory 0x10000/4 MiB`、`config 0x410000/4 MiB`、`otadata 0x810000/0x2000`、`ota_0 0x820000/0x380000`、`ota_1 0xba0000/0x380000`とする。
 - `UPDATE.BIN`は未処理入力、`UPDATE.PND`は書込み済み・初回boot確認待ち、`UPDATE.BAD`はOTA書込み失敗またはrollbackされたimage、`UPDATE_RESULT.TXT`はASCIIの状態・理由・手動`version`・7桁Git `hash`・対象partitionを記録するstatus fileとする。署名なし・署名不正・破損した署名containerは`UPDATE.BIN`を保持して`REJECTED`を記録し、OTA書込みへ進まない。認証拒否では既存の `state`、`reason`、`error`、`version`、`hash` の行構成を維持し、新しい判別用fieldを追加しない。対象imageを検査できない状態では`version=-`、`hash=-`とする。旧形式の7桁hashだけを持つ同一project imageは拒否せず、`version=-`とhashへ分離する。version/hashはupgradeまたはdowngradeの拒否判定に使用しない。
-- config FAT直下の`INFO.TXT`は実行中のボード情報を示す読み取り専用ASCIIファイルとし、既存のboard／version／Git hashに加え、`Firmware authenticity`、`Authenticity key ID`および`Firmware image SHA-256`をCRLF改行で記録する。実行中app partitionの最終4 KiBにある認証記録とraw payloadを再検証し、validなら`OFFICIAL`、記録なし・不正なら`NON_OFFICIAL`、partition読出しエラーなら`UNKNOWN`を表示する。内容は有効なboard identity/descriptorと実行imageの`esp_app_desc_t.version`から生成する。起動時にFATをAPP側へmountした直後、`setting.json`読込みおよびMSC公開前に必ず全量再生成する。既存ファイルは読み取り専用属性を一時解除して置換、flush/sync後に属性を再設定する。削除、編集または属性変更されても次回起動時に復元する。生成または属性設定に失敗した場合はMSCを公開しない。
-- config FAT直下の`setting_editor.html`は、ファームウェアBINへ組み込んだ`DOC/setting_editor.html`と同一内容の読み取り専用設定エディターとする。起動時にFATをAPP側へmountした後、`setting.json`読込みおよびMSC公開前に必ず全量再生成し、flush/sync後に読み取り専用属性を設定する。削除、編集または属性変更されても次回起動時に組込み内容へ復元する。生成または属性設定に失敗した場合はMSCを公開しない。
+- config FAT直下の`INFO.TXT`は実行中のボード情報を示す読み取り専用ASCIIファイルとし、既存のboard／version／Git hashに加え、`Firmware authenticity`、`Authenticity key ID`および`Firmware image SHA-256`をCRLF改行で記録する。実行中app partitionの最終4 KiBにある認証記録とraw payloadを再検証し、validなら`OFFICIAL`、記録なし・不正なら`NON_OFFICIAL`、partition読出しエラーなら`UNKNOWN`を表示する。内容は有効なboard identity/descriptorと実行imageの`esp_app_desc_t.version`から生成する。通常起動時にFATをAPP側へmountした直後、`setting.json`読込みおよびMSC公開前に組込み内容と比較し、同一なら再書込みせずread-only属性だけを保証する。欠落または不一致では属性を解除して4 KiB単位で置換し、flush/sync後に属性を再設定する。生成または属性設定に失敗した場合はMSCを公開しない。
+- config FAT直下の`setting_editor.html`は、ファームウェアBINへ組み込んだ`DOC/setting_editor.html`と同一内容の読み取り専用設定エディターとする。通常起動時にFATをAPP側へmountした後、`setting.json`読込みおよびMSC公開前に組込み内容と比較し、同一なら再書込みせずread-only属性だけを保証する。欠落または不一致では4 KiB単位で復元し、flush/sync後に読み取り専用属性を設定する。生成または属性設定に失敗した場合はMSCを公開しない。
+- MSCリカバリーモードはUSB VBUSを必須とし、電源保持、安全GPIO、5秒Task Watchdog、既存config FATのAPP mount、TinyUSB CDC+MSC、署名検証およびinactive OTA書込みだけを開始する。製造用board identityがなくてもeFuse MACから`REC-`で始まるUSB serialを生成し、NVS、設定読込み、生成ファイル更新、較正、音声、表示、SD、センサー、BLEおよび通常workerを開始しない。config FATを自動formatせず、mount失敗時はMSCを公開しない。
+- リカバリー開始時にAPP所有の`UPDATE.BIN`があればMSC公開前に処理する。ない場合はMSCを公開し、一度`HOST_OWNED`になった後、SYNCHRONIZE CACHE、安全な取り外し、受理済みWRITEの完了を経て`APP_OWNED`へ戻った回数を確認してからファイルを処理する。初期APP mountを取り外し完了として扱わず、待機中は100 ms以下の周期で起動Watchdogを給餌する。ファイルなしまたは拒否時はboot partitionを変更せずMSCを再公開し、成功時は既存の`UPDATE.PND`、再起動、PENDING_VERIFYおよびrollback手順へ接続する。
+- リカバリー更新の初回bootでは`ESP_OTA_IMG_PENDING_VERIFY`をSW2+SW3より優先し、ボタンが押されたままでも通常workerを起動して10秒確認を行う。bootloader、partition table、現在のapplication自体、config FAT、USBまたはリカバリー経路が実行不能な場合は復旧できず、GPIO0を使うROM Download Modeが必要である。mask ROM自体は書換対象ではなく、更新対象はinactive OTA partitionである。
 - 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
@@ -501,12 +508,12 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 #### 起動時の読み込み
 
 - 起動時は組込み既定値から一時設定を作成し、USB MSCをhostへ公開する前にFAT領域をESP32側へmountして `setting.json`を読み込むこと。
-- 安全GPIO初期化直後にSW2とSW3が同時押下されている状態を10 ms周期で確認し、30 ms継続した場合だけ、設定FATを明示的にformatしてからmountし、組込み既定値の `setting.json`を生成すること。この操作は保存済み設定を全消去する。SW2またはSW3の単独押下、30 ms未満の同時押下および通常起動ではformatしないこと。
+- SW2を押さずSW3だけを起動時から2秒間継続した場合だけ、設定FATを明示的にformatしてからmountし、組込み既定値の `setting.json`を生成すること。この操作は保存済み設定を全消去する。SW2単独、SW2+SW3、途中で変化した入力および通常起動ではformatしないこと。
 - JSON全体の構文、形式versionおよび共通必須項目を一時設定上で検証し、有効なパラメータセットだけを選別すること。選別完了後に共通値と有効セットをmutex下で実行時設定へ一括反映し、検証途中の値を部分的に反映してはならない。有効セットが0件なら組込み標準構成を維持すること。
 - 有効なファイルを反映した後は、読込み元がファイルであることと形式versionを診断状態へ記録すること。
 - `setting.json`が存在しない場合は組込み既定値で起動し、FAT領域をUSB hostへ渡す前に既定値を使用した整形済みファイルを自動生成すること。
 - ファイルの構文または内容が無効な場合は、ファイルを自動上書きせずに組込み既定値で起動し、失敗理由を診断状態とconsole logへ記録すること。
-- SW2とSW3による明示的な初期化要求がない状態でFAT領域をmountできない場合は自動formatせず、組込み既定値で主要機能を継続すること。設定ファイルの異常をセンサー取得、推定、音声またはBLEのfatal条件にしてはならない。
+- SW3だけの明示的な初期化要求がない状態でFAT領域をmountできない場合は自動formatせず、組込み既定値で主要機能を継続すること。設定ファイルの異常をセンサー取得、推定、音声またはBLEのfatal条件にしてはならない。
 - USB hostが編集したファイルは動作中に自動再読込みせず、次回起動時に検証して反映すること。動作中の各機能は起動時またはconsole操作で確定したRAM上の設定を使用すること。
 
 #### 明示保存
@@ -529,7 +536,7 @@ SW3：通常動作中は30 msのdebounce成立時に存在する次のパラメ�
 
 音量、シンク有効状態および選択番号はRAMへ即時反映し、起動時の保存値と異なる場合だけdirtyとする。操作時にはFlashへ書かず、変更後に保存値へ戻った場合はdirtyを解除する。通常電源OFF時だけ、namespace `switch_pref`、key `state`へversion・音量段階・シンク有効状態・選択番号・予約byteからなる5 byte固定blobを一括保存する。NVS未保存または不正時は小音量・シンク音ON・番号1（存在しない場合は最小番号）で主要機能を継続する。
 
-SW2とSW3を同時に押したまま電源ONした場合は、30 msのdebounce成立後に設定FATをformatして番号1～3の組込み既定値を生成し、`switch_pref/state`だけを消去する。NVS全体は消去せずBLE用領域を保持する。起動判定に使用した押下状態をシンク音切替またはパラメータ切替として扱わない。
+SW2を押さずSW3だけを押したまま電源ONして2秒間継続した場合は、設定FATをformatして番号1～3の組込み既定値を生成し、`switch_pref/state`だけを消去する。NVS全体は消去せずBLE用領域を保持する。起動判定に使用した押下状態をシンク音切替またはパラメータ切替として扱わない。SW2+SW3はMSCリカバリー専用としformatしない。
 
 ## 非機能要件
 
@@ -721,12 +728,12 @@ typedef struct {
 ### 初期化順序
 
 1. `PIN_PWR_HOLD`をHighにし、安全GPIO、LEDおよびブザーを安全な初期状態へ設定する。
-2. CPU1に一回限りの`startup_prep` taskを開始し、ブザー用LEDCを無音状態で初期化して専用NVSの音量設定を読み込む。NVS全消去・書込みは行わない。
-3. 実行中partitionが`ESP_OTA_IMG_PENDING_VERIFY`の場合、またはRTC記録が正常な最初のTask/Interrupt WDT再起動の場合は`POWER_ON_WAIT`を省略して緑LEDを100 %にする。それ以外はCPU0でSW1を10 ms周期、30 ms継続の条件で判定し、`POWER_ON_HOLD_MS`の連続押下成立まで緑LEDを0→100 %で増光する。同時にSW2+SW3の30 ms継続を設定FATの明示format要求として判定する。規定時間前にSW1を離した場合は`startup_prep`完了後に電源保持を解除し、給電が残る場合は`SAFE_STOP`へ入る。SW1確認成立時はWatchdog復帰回数を解除する。
-4. `startup_prep`完了後、保存音量または既定小音量で起動サウンドを同期再生する。NVSが全消去を必要とする場合は起動サウンド後に消去して1回だけ再初期化し、SW2+SW3 format要求時は専用スイッチ設定を消去する。緑LEDは100 %を維持する。
+2. 実行中partitionのPENDING_VERIFY判定と起動Watchdog登録後、PENDING_VERIFYでなければSW2+SW3を30 ms + 2秒確認する。成立時は通常初期化を開始せずMSCリカバリーへ入り、PENDING_VERIFYではボタン判定を省略する。成立しない場合にboard identityを読込み、CPU1に一回限りの`startup_prep` taskを開始してブザー用LEDCを無音状態で初期化し、専用NVSの音量設定を読み込む。
+3. 実行中partitionが`ESP_OTA_IMG_PENDING_VERIFY`の場合、またはRTC記録が正常な最初のTask/Interrupt WDT再起動の場合は`POWER_ON_WAIT`を省略して緑LEDを100 %にする。それ以外はCPU0でSW1を10 ms周期、30 ms継続の条件で判定し、`POWER_ON_HOLD_MS`の連続押下成立まで緑LEDを0→100 %で増光する。起動時からSW2を離したままSW3だけを2秒継続した場合は設定FATの明示format要求とし、途中で入力が変化した場合はformatしない。規定時間前にSW1を離した場合は`startup_prep`完了後に電源保持を解除し、給電が残る場合は`SAFE_STOP`へ入る。SW1確認成立時はWatchdog復帰回数を解除する。
+4. `startup_prep`完了後、保存音量または既定小音量で起動サウンドを同期再生する。NVSが全消去を必要とする場合は起動サウンド後に消去して1回だけ再初期化し、SW3だけのformat要求時は専用スイッチ設定を消去する。緑LEDは100 %を維持する。
 5. ボード設定を検証し、診断カウンタと単一テーブルのパラメータ既定値を準備する。ADC分圧定数、ICM-42688P-HXYの固定アドレス、識別値、I2C速度、ODRおよびrangeが本書の確定値と一致しない場合は該当機能を無効として診断へ示す。
 6. 最大80 MHz、最小40 MHz、Light-sleep許可でPMを初期化し、通常動作用Light-sleep禁止lockを取得する。初期化またはlock生成に失敗した場合は80 MHz固定・Light-sleep無効へ戻し、主要機能を継続する。
-7. SW2とSW3による明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、syncおよびMSC生成の各処理間で起動Task Watchdogを給餌する。mount失敗時は自動formatせず既定値で継続する。
+7. SW3だけの明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、syncおよびMSC生成の各処理間で起動Task Watchdogを給餌する。mount失敗時は自動formatせず既定値で継続する。
 8. 電池ADCを一度だけ初期化し、GPIO42 Lowの場合は100 ms間隔、最大5 sampleで起動時電池電圧を取得する。有効かつ有限な電圧が3.2 V以下なら、起動サウンドおよび以降の通常初期化へ進まず`SAFE_STOP`へ移る。同じ測定値をOTA電源判定にも再利用し、`UPDATE.PND/BAD/TXT`を整理した後、GPIO42 High、または電池電圧が3.4 Vを超え、かつ `UPDATE.BIN`がある場合はimageを検証してinactive OTA slotへ書き、成功時は再起動する。OTA pending-verify起動にも3.2 Vの起動禁止は適用するが、3.4 VのOTA適用条件は再適用せず10秒の確認taskを開始する。
 9. TinyUSB CDCを開始して起動中の診断を可能にする。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外しまたはdetachではESP32側へ戻す。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
 10. キュー、mutex、Event Groupを生成する。必須同期オブジェクトを生成できない場合はブザーを停止したfatal stateへ入り、電源OFF操作だけを受理する。
@@ -758,7 +765,9 @@ typedef struct {
 | スイッチ設定NVSなし／不正／読込み失敗 | 小音量・シンク音ON・番号1（番号1がなければ最小番号）で主要機能を継続し、load結果と失敗を診断する |
 | スイッチ設定NVS保存失敗 | 失敗を診断してconsole taskの停止ackを返し、設定保存より電源OFFを優先する |
 | 設定用FAT mount失敗 | 自動formatせず組込み既定値で起動する。MSC class driverを維持してLUNを「メディアなし」とし、CDC、センサー取得、推定、音声およびBLEを継続する。mount失敗回数と最後のstorage errorを診断する |
-| SW2＋SW3起動時format失敗 | 組込み既定値で主要機能を継続し、設定保存を無効化してformat失敗をconsole logと診断へ記録する |
+| SW3のみの起動時長押しによるformat失敗 | 組込み既定値で主要機能を継続し、設定保存を無効化してformat失敗をconsole logと診断へ記録する |
+| MSCリカバリー開始時のVBUSなし／FAT・USB初期化失敗 | 通常serviceとFlash書込みを開始せず、黄LEDを点灯して電源保持を解除する。外部給電が残る間はWatchdogを給餌した安全停止状態を維持する |
+| MSCリカバリー中のファイルなし／更新拒否 | boot partitionを変更せず、`UPDATE_RESULT.TXT`へ既存形式の結果を記録できた場合は記録し、MSCを再公開して次の安全な取り外しを待つ |
 | MSC class driver初期化失敗 | TinyUSB複合デバイスを開始せず、センサー取得、推定、音声およびBLEを継続する |
 | TinyUSB CDC初期化失敗 | 利用できないconsole機能を診断し、センサー取得、推定、音声およびBLEを継続する |
 | MSC host所有中の `PARAM SAVE` | 保存を予約せずファイルを変更せずに `ERR SAVE BUSY`を返す |

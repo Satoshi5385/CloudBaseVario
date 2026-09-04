@@ -587,9 +587,10 @@ bool firmware_update_running_image_pending_verify(void) {
            ota_state == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
-esp_err_t firmware_update_process_boot(bool external_power_present,
-                                       bool battery_valid,
-                                       float battery_voltage_v) {
+static esp_err_t process_update(bool external_power_present,
+                                bool battery_valid,
+                                float battery_voltage_v,
+                                bool report_missing_input) {
     const esp_app_desc_t *running_desc = esp_app_get_description();
     update_image_info_t image_info;
     esp_err_t ret;
@@ -629,6 +630,9 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
     }
     if (!file_exists(UPDATE_INPUT_NAME)) {
         usb_device_storage_end_app_io();
+        if (report_missing_input) {
+            return ESP_ERR_NOT_FOUND;
+        }
         return ESP_OK;
     }
     if (!update_power_allowed) {
@@ -672,6 +676,20 @@ esp_err_t firmware_update_process_boot(bool external_power_present,
         usb_device_storage_end_app_io();
     }
     return ret;
+}
+
+esp_err_t firmware_update_process_boot(bool external_power_present,
+                                       bool battery_valid,
+                                       float battery_voltage_v) {
+    return process_update(external_power_present, battery_valid,
+                          battery_voltage_v, false);
+}
+
+esp_err_t firmware_update_process_recovery(bool external_power_present) {
+    if (!external_power_present) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return process_update(true, false, 0.0f, true);
 }
 
 static void confirmation_task(void *argument) {

@@ -71,7 +71,9 @@ class ImuCalibrationSkipPolicyTests(unittest.TestCase):
             "APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED |",
             wait_position,
         )
-        msc_position = MAIN_SOURCE.index("usb_device_enable_msc();")
+        msc_position = MAIN_SOURCE.index(
+            "usb_device_enable_msc();", skipped_position
+        )
 
         self.assertLess(wait_position, skipped_position)
         self.assertLess(skipped_position, msc_position)

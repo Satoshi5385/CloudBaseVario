@@ -10,6 +10,7 @@ TINYUSB = (ROOT / "components/esp_tinyusb/tinyusb.c").read_text(
     encoding="utf-8"
 )
 SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
+SDKCONFIG_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
 LOCAL_PATCH = (ROOT / "components/esp_tinyusb/LOCAL_PATCH.md").read_text(
     encoding="utf-8"
 )
@@ -22,6 +23,11 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 
 
 class UsbMscEjectDurabilityTests(unittest.TestCase):
+    def test_esp32s3_msc_transfer_buffer_is_4096_bytes(self) -> None:
+        self.assertIn("CONFIG_TINYUSB_MSC_BUFSIZE=4096", SDKCONFIG_DEFAULTS)
+        self.assertNotIn("CONFIG_TINYUSB_MSC_BUFSIZE=8192", SDKCONFIG_DEFAULTS)
+        self.assertIn("MSC転送bufferは4096 byte", SPEC)
+
     def test_write_runs_on_worker_and_queues_ownership_transition(self) -> None:
         write = function_body(
             MSC,

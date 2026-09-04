@@ -47,7 +47,7 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
             "startup_preparation_started = start_startup_preparation();"
         )
         power_wait = MAIN_SOURCE.index(
-            "power_on_result = startup_power_on_confirmed();"
+            "power_on_result = startup_power_on_confirmed("
         )
         storage = MAIN_SOURCE.index("usb_device_storage_init(")
 
@@ -89,7 +89,7 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
 
     def test_startup_wait_debounces_and_fades_green_until_confirmation(self) -> None:
         start = MAIN_SOURCE.index(
-            "static startup_power_on_result_t startup_power_on_confirmed(void)"
+            "static startup_power_on_result_t startup_power_on_confirmed("
         )
         end = MAIN_SOURCE.index("static bool startup_config_format_requested", start)
         wait_function = MAIN_SOURCE[start:end]

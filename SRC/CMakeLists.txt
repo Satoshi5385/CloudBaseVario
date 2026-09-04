@@ -69,8 +69,8 @@ idf_component_register(
         wear_levelling
 )
 
-# Ship the offline setting editor inside the application image.  Startup
-# restores these exact bytes to the read-only MSC root on every boot.
+# Ship the offline setting editor inside the application image. Normal startup
+# restores changed or missing bytes to the read-only MSC root.
 target_add_binary_data(
     ${COMPONENT_LIB}
     "${CMAKE_SOURCE_DIR}/DOC/setting_editor.html"

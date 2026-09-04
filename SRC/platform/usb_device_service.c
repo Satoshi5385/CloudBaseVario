@@ -12,6 +12,7 @@
 #include "domain/firmware_metadata.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
@@ -19,6 +20,7 @@
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "platform/board.h"
 #include "platform/imu_calibration_storage.h"
 #include "platform/firmware_auth.h"
@@ -40,6 +42,7 @@
 #define STORAGE_MUTEX_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_QUIESCE_TIMEOUT_MS UINT32_C(100)
 #define STORAGE_MODE_IDLE_US INT64_C(1000000)
+#define STORAGE_RELEASE_POLL_MS UINT32_C(10)
 #define USB_SERIAL_NUMBER_LENGTH BOARD_SERIAL_BUFFER_SIZE
 #define USB_CONFIG_TOTAL_LENGTH \
     (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
@@ -53,6 +56,8 @@ static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t storage_io_mutex;
 static SemaphoreHandle_t msc_policy_mutex;
 static bool storage_transition_locked;
+static usb_storage_owner_t storage_transition_from =
+    USB_STORAGE_UNAVAILABLE;
 static bool msc_exposure_enabled;
 static bool usb_stopping;
 static bool console_redirect_ready;
@@ -540,6 +545,19 @@ static bool make_serial_number(void) {
     return true;
 }
 
+static bool make_recovery_serial_number(void) {
+    uint8_t mac[6] = {0};
+
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
+        serial_number[0] = '\0';
+        return false;
+    }
+    (void) snprintf(serial_number, sizeof(serial_number),
+                    "REC-%02X%02X%02X%02X%02X%02X",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return true;
+}
+
 static void tinyusb_device_event(tinyusb_event_t *event, void *arg) {
     bool restore_app_ownership = false;
     bool policy_locked = false;
@@ -637,6 +655,7 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
         (void) xSemaphoreTake(storage_io_mutex, portMAX_DELAY);
         storage_transition_locked = true;
         portENTER_CRITICAL(&state_lock);
+        storage_transition_from = usb_diagnostics.storage_owner;
         usb_diagnostics.storage_owner = USB_STORAGE_SWITCHING;
         portEXIT_CRITICAL(&state_lock);
         return;
@@ -649,6 +668,11 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
         usb_diagnostics.last_storage_error = ESP_OK;
         usb_diagnostics.storage_owner = usb_storage_policy_mount_owner(
             event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
+        if (event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP &&
+            storage_transition_from == USB_STORAGE_HOST_OWNED &&
+            usb_diagnostics.host_release_count < UINT32_MAX) {
+            usb_diagnostics.host_release_count++;
+        }
     } else {
         usb_diagnostics.storage_ready = false;
         usb_diagnostics.msc_media_ready = false;
@@ -662,6 +686,7 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
             usb_diagnostics.format_required_count++;
         }
     }
+    storage_transition_from = USB_STORAGE_UNAVAILABLE;
     portEXIT_CRITICAL(&state_lock);
 
     if (storage_transition_locked) {
@@ -670,28 +695,12 @@ static void msc_storage_event(tinyusb_msc_storage_handle_t handle,
     }
 }
 
-esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
-                                  bool format_config_storage,
-                                  usb_storage_progress_cb_t progress_cb,
-                                  void *progress_arg) {
-    esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 6,
-        .allocation_unit_size = 4096,
-        .use_one_fat = false,
-    };
-    const esp_partition_t *partition = NULL;
-    wl_handle_t preflight_handle = WL_INVALID_HANDLE;
-    bool media_ready;
-    esp_err_t storage_error;
+static esp_err_t initialize_storage_service(void) {
     esp_err_t ret;
 
-    if (profiles == NULL) {
-        return ESP_ERR_INVALID_ARG;
+    if (storage_io_mutex != NULL || msc_policy_mutex != NULL) {
+        return ESP_ERR_INVALID_STATE;
     }
-    app_config_profiles_set_defaults(profiles);
-    report_storage_progress(progress_cb, progress_arg);
-
     storage_io_mutex = xSemaphoreCreateMutex();
     if (storage_io_mutex == NULL) {
         set_storage_unavailable(ESP_ERR_NO_MEM);
@@ -735,86 +744,15 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     portENTER_CRITICAL(&state_lock);
     usb_diagnostics.msc_driver_ready = true;
     portEXIT_CRITICAL(&state_lock);
+    return ESP_OK;
+}
 
-    if (format_config_storage) {
-        esp_vfs_fat_mount_config_t format_config = mount_config;
-        format_config.format_if_mount_failed = true;
-        report_storage_progress(progress_cb, progress_arg);
-        ret = esp_vfs_fat_spiflash_format_cfg_rw_wl(
-            CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &format_config);
-        report_storage_progress(progress_cb, progress_arg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "explicit config FAT format failed: %s",
-                     esp_err_to_name(ret));
-            set_storage_unavailable(ret);
-            return ret;
-        }
-        ESP_LOGW(TAG, "config FAT formatted by SW2+SW3 startup request");
-    }
-
-    report_storage_progress(progress_cb, progress_arg);
-    ret = esp_vfs_fat_spiflash_mount_rw_wl(
-        CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &mount_config,
-        &preflight_handle);
-    report_storage_progress(progress_cb, progress_arg);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "config FAT unavailable; automatic format prohibited: %s",
-                 esp_err_to_name(ret));
-        set_storage_unavailable(ret);
-        if (ret == ESP_ERR_NOT_FOUND) {
-            increment_counter(&usb_diagnostics.format_required_count);
-        }
-        return ret;
-    }
-
-    ret = write_info_file(preflight_handle, progress_cb, progress_arg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "INFO.TXT generation failed: %s", esp_err_to_name(ret));
-        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
-                                                   preflight_handle);
-        set_storage_unavailable(ret);
-        return ret;
-    }
-    ret = write_setting_editor_file(preflight_handle, progress_cb,
-                                    progress_arg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "setting_editor.html generation failed: %s",
-                 esp_err_to_name(ret));
-        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
-                                                   preflight_handle);
-        set_storage_unavailable(ret);
-        return ret;
-    }
-
-    report_storage_progress(progress_cb, progress_arg);
-    usb_diagnostics.load_result =
-        config_storage_load(CONFIG_MOUNT_PATH, profiles,
-                            &usb_diagnostics.config);
-    report_storage_progress(progress_cb, progress_arg);
-    if (usb_diagnostics.load_result == CONFIG_LOAD_DEFAULT_NO_FILE) {
-        report_storage_progress(progress_cb, progress_arg);
-        ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
-        report_storage_progress(progress_cb, progress_arg);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "default setting.json generation failed: %s",
-                     esp_err_to_name(ret));
-        }
-    } else {
-        log_config_load_result();
-    }
-    if (f_setlabel(CONFIG_VOLUME_LABEL) != FR_OK) {
-        ESP_LOGW(TAG, "FAT volume label could not be set");
-    }
-    report_storage_progress(progress_cb, progress_arg);
-
-    report_storage_progress(progress_cb, progress_arg);
-    ret = esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
-                                              preflight_handle);
-    report_storage_progress(progress_cb, progress_arg);
-    if (ret != ESP_OK) {
-        set_storage_unavailable(ret);
-        return ret;
-    }
+static esp_err_t create_msc_storage(
+    usb_storage_progress_cb_t progress_cb, void *progress_arg) {
+    const esp_partition_t *partition = NULL;
+    bool media_ready;
+    esp_err_t storage_error;
+    esp_err_t ret;
 
     partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT,
@@ -890,7 +828,124 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     return ESP_OK;
 }
 
-esp_err_t usb_device_start(void) {
+esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
+                                  bool format_config_storage,
+                                  usb_storage_progress_cb_t progress_cb,
+                                  void *progress_arg) {
+    esp_vfs_fat_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 6,
+        .allocation_unit_size = 4096,
+        .use_one_fat = false,
+    };
+    wl_handle_t preflight_handle = WL_INVALID_HANDLE;
+    esp_err_t ret;
+
+    if (profiles == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    app_config_profiles_set_defaults(profiles);
+    report_storage_progress(progress_cb, progress_arg);
+    ret = initialize_storage_service();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (format_config_storage) {
+        esp_vfs_fat_mount_config_t format_config = mount_config;
+        format_config.format_if_mount_failed = true;
+        report_storage_progress(progress_cb, progress_arg);
+        ret = esp_vfs_fat_spiflash_format_cfg_rw_wl(
+            CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &format_config);
+        report_storage_progress(progress_cb, progress_arg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "explicit config FAT format failed: %s",
+                     esp_err_to_name(ret));
+            set_storage_unavailable(ret);
+            return ret;
+        }
+        ESP_LOGW(TAG, "config FAT formatted by SW3 startup request");
+    }
+
+    report_storage_progress(progress_cb, progress_arg);
+    ret = esp_vfs_fat_spiflash_mount_rw_wl(
+        CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &mount_config,
+        &preflight_handle);
+    report_storage_progress(progress_cb, progress_arg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "config FAT unavailable; automatic format prohibited: %s",
+                 esp_err_to_name(ret));
+        set_storage_unavailable(ret);
+        if (ret == ESP_ERR_NOT_FOUND) {
+            increment_counter(&usb_diagnostics.format_required_count);
+        }
+        return ret;
+    }
+
+    ret = write_info_file(preflight_handle, progress_cb, progress_arg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "INFO.TXT generation failed: %s", esp_err_to_name(ret));
+        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
+                                                   preflight_handle);
+        set_storage_unavailable(ret);
+        return ret;
+    }
+    ret = write_setting_editor_file(preflight_handle, progress_cb,
+                                    progress_arg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "setting_editor.html generation failed: %s",
+                 esp_err_to_name(ret));
+        (void) esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
+                                                   preflight_handle);
+        set_storage_unavailable(ret);
+        return ret;
+    }
+
+    report_storage_progress(progress_cb, progress_arg);
+    usb_diagnostics.load_result =
+        config_storage_load(CONFIG_MOUNT_PATH, profiles,
+                            &usb_diagnostics.config);
+    report_storage_progress(progress_cb, progress_arg);
+    if (usb_diagnostics.load_result == CONFIG_LOAD_DEFAULT_NO_FILE) {
+        report_storage_progress(progress_cb, progress_arg);
+        ret = config_storage_save(CONFIG_MOUNT_PATH, profiles);
+        report_storage_progress(progress_cb, progress_arg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "default setting.json generation failed: %s",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        log_config_load_result();
+    }
+    if (f_setlabel(CONFIG_VOLUME_LABEL) != FR_OK) {
+        ESP_LOGW(TAG, "FAT volume label could not be set");
+    }
+    report_storage_progress(progress_cb, progress_arg);
+
+    report_storage_progress(progress_cb, progress_arg);
+    ret = esp_vfs_fat_spiflash_unmount_rw_wl(CONFIG_MOUNT_PATH,
+                                              preflight_handle);
+    report_storage_progress(progress_cb, progress_arg);
+    if (ret != ESP_OK) {
+        set_storage_unavailable(ret);
+        return ret;
+    }
+    return create_msc_storage(progress_cb, progress_arg);
+}
+
+esp_err_t usb_device_recovery_storage_init(
+    usb_storage_progress_cb_t progress_cb, void *progress_arg) {
+    esp_err_t ret;
+
+    report_storage_progress(progress_cb, progress_arg);
+    ret = initialize_storage_service();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    return create_msc_storage(progress_cb, progress_arg);
+}
+
+static esp_err_t start_usb_device(bool recovery_mode) {
     esp_err_t first_error = ESP_OK;
     esp_err_t ret;
     bool driver_ready;
@@ -913,8 +968,9 @@ esp_err_t usb_device_start(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!make_serial_number()) {
-        ESP_LOGE(TAG, "TinyUSB requires a valid board product serial");
+    if ((!recovery_mode && !make_serial_number()) ||
+        (recovery_mode && !make_recovery_serial_number())) {
+        ESP_LOGE(TAG, "TinyUSB serial number initialization failed");
         return ESP_ERR_INVALID_STATE;
     }
     tinyusb_config_t tinyusb_config =
@@ -978,7 +1034,21 @@ esp_err_t usb_device_start(void) {
                  "MSC media unavailable (%s); CDC and vario operation continue",
                  esp_err_to_name(storage_error));
     }
+    if (recovery_mode && first_error != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "recovery MSC continuing without CDC console redirect: %s",
+                 esp_err_to_name(first_error));
+        return ESP_OK;
+    }
     return first_error;
+}
+
+esp_err_t usb_device_start(void) {
+    return start_usb_device(false);
+}
+
+esp_err_t usb_device_start_recovery(void) {
+    return start_usb_device(true);
 }
 
 esp_err_t usb_device_stop(void) {
@@ -1162,6 +1232,40 @@ esp_err_t usb_device_enable_msc(void) {
     }
     ESP_LOGI(TAG, "MSC medium enabled for USB host");
     return ESP_OK;
+}
+
+esp_err_t usb_device_wait_for_host_release(uint32_t release_count,
+                                           uint32_t timeout_ms) {
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+    for (;;) {
+        usb_storage_owner_t owner;
+        uint32_t pending_writes;
+        uint32_t current_release_count;
+        esp_err_t storage_error;
+
+        portENTER_CRITICAL(&state_lock);
+        owner = usb_diagnostics.storage_owner;
+        pending_writes = usb_diagnostics.pending_write_count;
+        current_release_count = usb_diagnostics.host_release_count;
+        storage_error = usb_diagnostics.last_storage_error;
+        portEXIT_CRITICAL(&state_lock);
+        if (current_release_count != release_count &&
+            owner == USB_STORAGE_APP_OWNED && pending_writes == 0U) {
+            return ESP_OK;
+        }
+        if (owner == USB_STORAGE_UNAVAILABLE) {
+            if (storage_error == ESP_OK) {
+                return ESP_FAIL;
+            }
+            return storage_error;
+        }
+        if (xTaskGetTickCount() - started >= timeout_ticks) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(STORAGE_RELEASE_POLL_MS));
+    }
 }
 
 void usb_device_set_storage_mode_callbacks(

@@ -14,7 +14,9 @@ class InfoFilePolicyTests(unittest.TestCase):
     def test_info_file_is_generated_before_configuration_and_msc_exposure(self) -> None:
         generation = USB_SOURCE.index("ret = write_info_file(preflight_handle,")
         config_load = USB_SOURCE.index("config_storage_load(", generation)
-        msc_storage = USB_SOURCE.index("tinyusb_msc_new_storage_spiflash", generation)
+        msc_storage = USB_SOURCE.index(
+            "return create_msc_storage(progress_cb, progress_arg);", generation
+        )
 
         self.assertLess(generation, config_load)
         self.assertLess(config_load, msc_storage)
@@ -120,7 +122,7 @@ class SettingEditorFilePolicyTests(unittest.TestCase):
         )
         config_load = USB_SOURCE.index("config_storage_load(", generation)
         msc_storage = USB_SOURCE.index(
-            "tinyusb_msc_new_storage_spiflash", generation
+            "return create_msc_storage(progress_cb, progress_arg);", generation
         )
 
         self.assertLess(generation, config_load)

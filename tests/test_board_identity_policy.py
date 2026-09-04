@@ -13,15 +13,16 @@ IDENTITY_STORAGE = (ROOT / "SRC/platform/board_identity_storage.c").read_text(
 
 
 class BoardIdentityPolicyTests(unittest.TestCase):
-    def test_identity_precedes_every_board_specific_initialization(self) -> None:
+    def test_recovery_gate_precedes_identity_and_normal_services(self) -> None:
         load = STARTUP.index("board_identity_storage_load(")
         select = STARTUP.index("board_select_identity(&board_identity)")
         safe_gpio = STARTUP.index("ret = board_init_safe_gpio();")
+        recovery = STARTUP.index("boot_gesture = startup_recovery_gesture();")
         preparation = STARTUP.index("start_startup_preparation();")
+        self.assertLess(safe_gpio, recovery)
+        self.assertLess(recovery, load)
         self.assertLess(load, select)
-        self.assertLess(select, safe_gpio)
-        self.assertLess(safe_gpio, preparation)
-        self.assertNotIn("BOARD_IDENTITY_LOAD_MISSING", STARTUP[safe_gpio:])
+        self.assertLess(select, preparation)
 
     def test_board_data_is_dedicated_readonly_partition(self) -> None:
         with PARTITIONS.open(encoding="utf-8", newline="") as stream:
@@ -32,9 +33,13 @@ class BoardIdentityPolicyTests(unittest.TestCase):
         self.assertEqual(board_data[5].strip(), "readonly")
 
     def test_usb_serial_comes_from_validated_board_identity(self) -> None:
-        self.assertIn("board_active_identity()", USB)
-        self.assertIn("board_identity_validate(identity)", USB)
-        self.assertNotIn("ESP_MAC_WIFI_STA", USB)
+        normal_start = USB[
+            USB.index("static bool make_serial_number(void)") :
+            USB.index("static bool make_recovery_serial_number(void)")
+        ]
+        self.assertIn("board_active_identity()", normal_start)
+        self.assertIn("board_identity_validate(identity)", normal_start)
+        self.assertNotIn("esp_read_mac", normal_start)
 
     def test_schema_one_requires_the_fourth_gps_key(self) -> None:
         self.assertIn('#define BOARD_DATA_KEY_GPS_INSTALLED "gps_inst"', IDENTITY_STORAGE)

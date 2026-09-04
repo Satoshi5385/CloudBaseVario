@@ -112,8 +112,11 @@
 #define EXPECTED_FLASH_SIZE_BYTES UINT32_C(16777216)
 #define EXPECTED_PSRAM_SIZE_BYTES UINT32_C(8388608)
 #define STARTUP_FORMAT_SAMPLE_PERIOD_MS SYSTEM_POLICY_SAMPLE_PERIOD_MS
-#define STARTUP_FORMAT_DEBOUNCE_MS SYSTEM_POLICY_SWITCH_DEBOUNCE_MS
 #define STARTUP_POWER_SAMPLE_PERIOD_MS SYSTEM_POLICY_SAMPLE_PERIOD_MS
+#define STARTUP_MODE_HOLD_MS UINT32_C(2000)
+#define STARTUP_RECOVERY_HOLD_MS \
+    (STARTUP_MODE_HOLD_MS + SYSTEM_POLICY_SWITCH_DEBOUNCE_MS)
+#define RECOVERY_STORAGE_RELEASE_WAIT_MS UINT32_C(100)
 #define STARTUP_PREP_TASK_STACK_BYTES UINT32_C(4096)
 #define STARTUP_PREP_TASK_PRIORITY ((UBaseType_t) 5U)
 #define STARTUP_PREP_TASK_CORE ((BaseType_t) 1)
@@ -127,6 +130,12 @@ typedef struct {
     bool config_format_requested;
 } startup_power_on_result_t;
 
+typedef enum {
+    STARTUP_BOOT_GESTURE_NONE = 0,
+    STARTUP_BOOT_GESTURE_AMBIGUOUS,
+    STARTUP_BOOT_GESTURE_RECOVERY,
+} startup_boot_gesture_t;
+
 typedef struct {
     esp_err_t audio_result;
     esp_err_t nvs_result;
@@ -139,6 +148,7 @@ static app_config_profiles_t startup_runtime_profiles;
 static startup_preparation_result_t startup_preparation_result;
 static TaskHandle_t startup_preparation_waiter = NULL;
 static volatile bool startup_preparation_watchdog_failed;
+static void feed_startup_watchdog(void);
 
 static void board_identity_service_safe_stop(
     const board_identity_storage_diagnostics_t *diagnostics) {
@@ -152,9 +162,10 @@ static void board_identity_service_safe_stop(
     ESP_LOGE(TAG, "board identity unavailable: status=%s error=%s",
              board_identity_load_result_name(result),
              esp_err_to_name(error));
-    ESP_LOGE(TAG, "service-safe-stop: no board-specific GPIO will be initialized");
+    ESP_LOGE(TAG, "service-safe-stop: board-specific services remain disabled");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        feed_startup_watchdog();
     }
 }
 
@@ -165,6 +176,103 @@ static void feed_startup_watchdog(void) {
 static void report_startup_storage_progress(void *arg) {
     (void) arg;
     feed_startup_watchdog();
+}
+
+static startup_boot_gesture_t startup_recovery_gesture(void) {
+    uint32_t stable_time_ms = 0U;
+
+    if (!system_io_sw2_pressed() || !system_io_sw3_pressed()) {
+        return STARTUP_BOOT_GESTURE_NONE;
+    }
+    while (system_io_sw2_pressed() && system_io_sw3_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(STARTUP_POWER_SAMPLE_PERIOD_MS));
+        feed_startup_watchdog();
+        stable_time_ms += STARTUP_POWER_SAMPLE_PERIOD_MS;
+        if (stable_time_ms >= STARTUP_RECOVERY_HOLD_MS) {
+            return STARTUP_BOOT_GESTURE_RECOVERY;
+        }
+    }
+    return STARTUP_BOOT_GESTURE_AMBIGUOUS;
+}
+
+static void recovery_stop(esp_err_t error, const char *message) {
+    if (message != NULL) {
+        ESP_LOGE(TAG, "%s: %s", message, esp_err_to_name(error));
+    }
+    (void) usb_device_stop();
+    board_set_status_leds(false, true);
+    (void) board_set_power_hold(false);
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(RECOVERY_STORAGE_RELEASE_WAIT_MS));
+        feed_startup_watchdog();
+    }
+}
+
+static void run_recovery_mode(void) {
+    usb_device_diagnostics_t diagnostics = {0};
+    esp_err_t ret;
+
+    watchdog_service_mark_stage(WATCHDOG_STAGE_INITIALIZING);
+    board_set_status_leds(false, true);
+    if (!system_io_external_power_present()) {
+        recovery_stop(ESP_ERR_INVALID_STATE,
+                      "MSC recovery requires USB VBUS");
+    }
+
+    ret = usb_device_recovery_storage_init(
+        report_startup_storage_progress, NULL);
+    feed_startup_watchdog();
+    if (ret != ESP_OK) {
+        recovery_stop(ret, "recovery config FAT initialization failed");
+    }
+
+    ret = firmware_update_process_recovery(true);
+    feed_startup_watchdog();
+    if (ret != ESP_ERR_NOT_FOUND && ret != ESP_OK) {
+        ESP_LOGW(TAG, "stored recovery update rejected: %s",
+                 esp_err_to_name(ret));
+    }
+
+    ret = usb_device_start_recovery();
+    if (ret != ESP_OK) {
+        recovery_stop(ret, "recovery USB initialization failed");
+    }
+    ESP_LOGW(TAG,
+             "MSC recovery active; copy signed UPDATE.BIN and safely eject");
+
+    for (;;) {
+        uint32_t release_count;
+
+        board_set_status_leds(false, true);
+        usb_device_get_diagnostics(&diagnostics);
+        release_count = diagnostics.host_release_count;
+        ret = usb_device_enable_msc();
+        if (ret != ESP_OK) {
+            recovery_stop(ret, "recovery MSC exposure failed");
+        }
+
+        do {
+            ret = usb_device_wait_for_host_release(
+                release_count, RECOVERY_STORAGE_RELEASE_WAIT_MS);
+            feed_startup_watchdog();
+            if (!system_io_external_power_present()) {
+                recovery_stop(ESP_ERR_INVALID_STATE,
+                              "USB VBUS lost during recovery wait");
+            }
+        } while (ret == ESP_ERR_TIMEOUT);
+        if (ret != ESP_OK) {
+            recovery_stop(ret, "recovery MSC ownership failed");
+        }
+
+        ret = firmware_update_process_recovery(true);
+        feed_startup_watchdog();
+        if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "safe eject completed without UPDATE.BIN");
+        } else if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "recovery update rejected: %s",
+                     esp_err_to_name(ret));
+        }
+    }
 }
 
 static bool nvs_recovery_required(esp_err_t result) {
@@ -291,11 +399,15 @@ static bool startup_read_battery(float *battery_voltage_v) {
     return false;
 }
 
-static startup_power_on_result_t startup_power_on_confirmed(void) {
+static startup_power_on_result_t startup_power_on_confirmed(
+    bool format_allowed) {
     system_policy_button_t sw1 = {0};
     startup_power_on_result_t result = {0};
     uint32_t hold_time_ms = 0U;
     uint32_t format_hold_time_ms = 0U;
+    bool format_eligible = format_allowed &&
+                           !system_io_sw2_pressed() &&
+                           system_io_sw3_pressed();
 
     sw1.candidate_pressed = board_is_sw1_pressed();
     sw1.stable_pressed = sw1.candidate_pressed;
@@ -306,9 +418,12 @@ static startup_power_on_result_t startup_power_on_confirmed(void) {
         bool pressed = system_policy_debounce(&sw1,
                                               board_is_sw1_pressed());
         bool format_pressed =
-            system_io_sw2_pressed() && system_io_sw3_pressed();
+            !system_io_sw2_pressed() && system_io_sw3_pressed();
 
-        if (format_pressed) {
+        if (!format_pressed) {
+            format_eligible = false;
+        }
+        if (format_eligible) {
             if (UINT32_MAX - format_hold_time_ms <
                 STARTUP_FORMAT_SAMPLE_PERIOD_MS) {
                 format_hold_time_ms = UINT32_MAX;
@@ -333,11 +448,13 @@ static startup_power_on_result_t startup_power_on_confirmed(void) {
                 system_policy_power_on_brightness(
                     hold_time_ms, POWER_ON_HOLD_MS),
                 false);
-            if (hold_time_ms >= POWER_ON_HOLD_MS) {
+            if (hold_time_ms >= POWER_ON_HOLD_MS &&
+                (!format_eligible ||
+                 format_hold_time_ms >= STARTUP_MODE_HOLD_MS)) {
                 result.confirmed = true;
                 result.config_format_requested =
-                    format_pressed &&
-                    format_hold_time_ms >= STARTUP_FORMAT_DEBOUNCE_MS;
+                    format_eligible &&
+                    format_hold_time_ms >= STARTUP_MODE_HOLD_MS;
                 return result;
             }
         } else {
@@ -348,14 +465,18 @@ static startup_power_on_result_t startup_power_on_confirmed(void) {
     }
 }
 
-static bool startup_config_format_requested(void) {
+static bool startup_config_format_requested(bool format_allowed) {
     uint32_t stable_time_ms = 0U;
 
+    if (!format_allowed || system_io_sw2_pressed() ||
+        !system_io_sw3_pressed()) {
+        return false;
+    }
     for (;;) {
-        if (!system_io_sw2_pressed() || !system_io_sw3_pressed()) {
+        if (system_io_sw2_pressed() || !system_io_sw3_pressed()) {
             return false;
         }
-        if (stable_time_ms >= STARTUP_FORMAT_DEBOUNCE_MS) {
+        if (stable_time_ms >= STARTUP_MODE_HOLD_MS) {
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(STARTUP_FORMAT_SAMPLE_PERIOD_MS));
@@ -376,6 +497,7 @@ void app_startup_run(void) {
     bool usb_composite_active = false;
     bool imu_accel_calibration_required = false;
     bool ota_confirmation_boot = false;
+    startup_boot_gesture_t boot_gesture = STARTUP_BOOT_GESTURE_NONE;
     watchdog_boot_action_t watchdog_boot_action =
         WATCHDOG_BOOT_REQUIRE_SW1;
     bool startup_preparation_started = false;
@@ -405,13 +527,6 @@ void app_startup_run(void) {
         app_tasks_run_fatal_fallback();
     }
 
-    if (board_identity_storage_load(
-            &board_identity, &board_identity_diagnostics) !=
-            BOARD_IDENTITY_LOAD_VALID ||
-        !board_select_identity(&board_identity)) {
-        board_identity_service_safe_stop(&board_identity_diagnostics);
-    }
-
     ret = board_init_safe_gpio();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "safe GPIO initialization failed: %s", esp_err_to_name(ret));
@@ -434,13 +549,33 @@ void app_startup_run(void) {
         watchdog_service_mark_stage(WATCHDOG_STAGE_FATAL);
         app_tasks_run_fatal_fallback();
     }
+    if (!ota_confirmation_boot) {
+        boot_gesture = startup_recovery_gesture();
+        if (boot_gesture == STARTUP_BOOT_GESTURE_RECOVERY) {
+            ESP_LOGW(TAG, "SW2+SW3 startup request: entering MSC recovery");
+            watchdog_service_mark_user_confirmed();
+            run_recovery_mode();
+        }
+    }
+
+    if (board_identity_storage_load(
+            &board_identity, &board_identity_diagnostics) !=
+            BOARD_IDENTITY_LOAD_VALID ||
+        !board_select_identity(&board_identity)) {
+        board_identity_service_safe_stop(&board_identity_diagnostics);
+    }
+
     startup_preparation_started = start_startup_preparation();
-    if (watchdog_boot_action != WATCHDOG_BOOT_REQUIRE_SW1) {
+    if (ota_confirmation_boot) {
         board_set_status_leds_brightness(100U, false);
-        config_format_requested = startup_config_format_requested();
+    } else if (watchdog_boot_action != WATCHDOG_BOOT_REQUIRE_SW1) {
+        board_set_status_leds_brightness(100U, false);
+        config_format_requested = startup_config_format_requested(
+            boot_gesture == STARTUP_BOOT_GESTURE_NONE);
     } else {
         watchdog_service_mark_stage(WATCHDOG_STAGE_POWER_ON_WAIT);
-        power_on_result = startup_power_on_confirmed();
+        power_on_result = startup_power_on_confirmed(
+            boot_gesture == STARTUP_BOOT_GESTURE_NONE);
         config_format_requested =
             power_on_result.config_format_requested;
         if (!power_on_result.confirmed) {
@@ -519,7 +654,7 @@ void app_startup_run(void) {
     }
 
     if (config_format_requested) {
-        ESP_LOGW(TAG, "SW2+SW3 startup request: config FAT will be formatted");
+        ESP_LOGW(TAG, "SW3 startup request: config FAT will be formatted");
     }
 
     ret = app_power_init();
