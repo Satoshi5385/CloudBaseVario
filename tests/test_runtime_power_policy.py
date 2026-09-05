@@ -112,6 +112,40 @@ class RuntimePowerPolicyTests(unittest.TestCase):
         self.assertNotIn("sensor_try_save_accel_calibration", calibration)
         self.assertIn("実際にIMUまたはBMP581のサンプル処理", SW_SPEC)
 
+    def test_bmp_overrun_tracking_starts_with_first_read_attempt(self):
+        state_definition = function_body(
+            WORKERS,
+            "typedef struct {\n    vario_result_t result;",
+            "static const char *TAG",
+        )
+        initialization = function_body(
+            WORKERS,
+            "static bool sensor_try_initialize_devices(",
+            "static bool imu_configs_match(",
+        )
+        bmp = function_body(
+            WORKERS,
+            "static bool sensor_process_bmp581(",
+            "static bool sensor_check_stale(",
+        )
+
+        self.assertIn("bool bmp_period_tracking_started;", state_definition)
+        self.assertIn(
+            "state->bmp_period_tracking_started = false;", initialization
+        )
+        tracking_start = bmp.index("if (!state->bmp_period_tracking_started)")
+        overrun_calculation = bmp.index("periods_elapsed =", tracking_start)
+        first_read = bmp.index("bmp581_read_sample(&sample)")
+        self.assertLess(tracking_start, overrun_calculation)
+        self.assertLess(overrun_calculation, first_read)
+        self.assertIn(
+            "state->next_bmp_deadline_us = now_us + BMP581_SAMPLE_PERIOD_US;",
+            bmp,
+        )
+        self.assertIn(
+            "最初のBMP581読み出しを10 ms絶対期限の基準", SW_SPEC
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

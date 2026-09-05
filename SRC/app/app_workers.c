@@ -101,6 +101,7 @@ typedef struct {
     bool bus_timeout_detected;
     bool imu_ready;
     bool imu_interrupt_pending;
+    bool bmp_period_tracking_started;
     int64_t next_bmp_deadline_us;
     int64_t next_publication_us;
     int64_t next_bmp_retry_us;
@@ -844,6 +845,7 @@ static bool sensor_try_initialize_devices(sensor_task_state_t *state, int64_t no
             state->bmp_ready = true;
             state->bmp_consecutive_errors = 0U;
             state->bmp_bus_failed = false;
+            state->bmp_period_tracking_started = false;
             state->last_bmp_valid_us = now_us;
             state->next_bmp_deadline_us = now_us;
             set_bmp581_recovering(false);
@@ -1234,17 +1236,26 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
         return false;
     }
 
-    periods_elapsed = (now_us - state->next_bmp_deadline_us) / BMP581_SAMPLE_PERIOD_US;
-    if (periods_elapsed > 0) {
-        uint32_t overrun_increment = UINT32_MAX;
+    if (!state->bmp_period_tracking_started) {
+        state->bmp_period_tracking_started = true;
+        state->next_bmp_deadline_us = now_us + BMP581_SAMPLE_PERIOD_US;
+    } else {
+        periods_elapsed =
+            (now_us - state->next_bmp_deadline_us) /
+            BMP581_SAMPLE_PERIOD_US;
+        if (periods_elapsed > 0) {
+            uint32_t overrun_increment = UINT32_MAX;
 
-        if (periods_elapsed <= (int64_t) UINT32_MAX) {
-            overrun_increment = (uint32_t) periods_elapsed;
+            if (periods_elapsed <= (int64_t) UINT32_MAX) {
+                overrun_increment = (uint32_t) periods_elapsed;
+            }
+            add_saturating_u32(
+                &state->result.bmp_period_overrun_count,
+                overrun_increment);
         }
-        add_saturating_u32(&state->result.bmp_period_overrun_count,
-                           overrun_increment);
+        state->next_bmp_deadline_us +=
+            (periods_elapsed + 1) * BMP581_SAMPLE_PERIOD_US;
     }
-    state->next_bmp_deadline_us += (periods_elapsed + 1) * BMP581_SAMPLE_PERIOD_US;
 
     ret = bmp581_read_sample(&sample);
     if (ret != ESP_OK) {
