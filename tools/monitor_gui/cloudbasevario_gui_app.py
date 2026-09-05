@@ -11,7 +11,12 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 try:
-    from .cloudbasevario_serial import SerialWorker, list_ports, serial
+    from .cloudbasevario_serial import (
+        SerialEventInbox,
+        SerialWorker,
+        list_ports,
+        serial,
+    )
     from .cloudbasevario_theme import (
         COLOR_ACCENT,
         COLOR_BACKGROUND,
@@ -46,7 +51,12 @@ try:
         parse_telemetry_line,
     )
 except ImportError:
-    from cloudbasevario_serial import SerialWorker, list_ports, serial
+    from cloudbasevario_serial import (
+        SerialEventInbox,
+        SerialWorker,
+        list_ports,
+        serial,
+    )
     from cloudbasevario_theme import (
         COLOR_ACCENT,
         COLOR_BACKGROUND,
@@ -85,6 +95,7 @@ except ImportError:
 APP_TITLE = "CloudBaseVario Monitor"
 DEFAULT_BAUD = 115200
 GUI_POLL_MS = 30
+DISPLAY_REFRESH_MS = 100
 COMMAND_TIMEOUT_MS = 4000
 MAX_LOG_LINES = 5000
 
@@ -97,7 +108,7 @@ class CloudBaseVarioApp:
         self.root.minsize(1100, 720)
         self.root.configure(bg=COLOR_BACKGROUND)
 
-        self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.events = SerialEventInbox()
         self.serial_worker = SerialWorker(self.events)
         self.pending_command: str | None = None
         self.pending_parameters: dict[str, str] = {}
@@ -110,6 +121,9 @@ class CloudBaseVarioApp:
         self.last_gps_time = 0.0
         self.last_gps_sample: GpsSample | None = None
         self.gps_stale = False
+        self.pending_telemetry: TelemetrySample | None = None
+        self.pending_gps: GpsSample | None = None
+        self.next_display_refresh = 0.0
         self.auto_list_after_connect: str | None = None
 
         self.port_var = tk.StringVar()
@@ -698,6 +712,8 @@ class CloudBaseVarioApp:
             self.last_gps_time = 0.0
             self.last_gps_sample = None
             self.gps_stale = False
+            self.pending_telemetry = None
+            self.pending_gps = None
             for badge in self.status_badges.values():
                 badge.unknown()
 
@@ -878,6 +894,7 @@ class CloudBaseVarioApp:
 
     def _poll_events(self) -> None:
         processed = 0
+        log_lines: list[str] = []
         while processed < 300:
             try:
                 event_type, payload = self.events.get_nowait()
@@ -885,15 +902,39 @@ class CloudBaseVarioApp:
                 break
             processed += 1
             if event_type == "line":
-                self._process_serial_line(str(payload))
+                line = str(payload)
+                self._process_serial_line(line)
+                log_lines.append(line)
             elif event_type == "serial_error":
                 self.command_status_var.set(f"Serial error: {payload}")
-                self._append_log(f"[ERROR] {payload}")
+                log_lines.append(f"[ERROR] {payload}")
             elif event_type == "disconnected":
                 if not self.serial_worker.connected:
                     self.pending_command = None
                     self._set_connected_state(False)
                     self.connection_var.set("Disconnected")
+
+        self._append_log_batch(log_lines)
+
+        baro_line, gps_line = self.events.take_latest_lines()
+        if baro_line is not None:
+            telemetry = parse_telemetry_line(baro_line)
+            if telemetry is not None:
+                self.pending_telemetry = telemetry
+        if gps_line is not None:
+            gps = parse_gps_line(gps_line)
+            if gps is not None:
+                self.pending_gps = gps
+
+        if self.telemetry_log_var.get():
+            self._append_log_batch(self.events.drain_telemetry_log())
+        else:
+            self.events.discard_telemetry_log()
+
+        now = time.monotonic()
+        if now >= self.next_display_refresh:
+            self._refresh_display()
+            self.next_display_refresh = now + DISPLAY_REFRESH_MS / 1000.0
 
         if (
             self.serial_worker.connected
@@ -911,21 +952,6 @@ class CloudBaseVarioApp:
         self.root.after(GUI_POLL_MS, self._poll_events)
 
     def _process_serial_line(self, line: str) -> None:
-        telemetry = parse_telemetry_line(line)
-        if telemetry is not None:
-            self._handle_telemetry(telemetry)
-            if self.telemetry_log_var.get():
-                self._append_log(line)
-            return
-
-        gps = parse_gps_line(line)
-        if gps is not None:
-            self._handle_gps(gps)
-            if self.telemetry_log_var.get():
-                self._append_log(line)
-            return
-
-        self._append_log(line)
         if self.pending_command is None:
             return
         if line == "OK" or line.startswith("ERR"):
@@ -939,6 +965,16 @@ class CloudBaseVarioApp:
             if parameter is not None:
                 name, value = parameter
                 self.pending_parameters[name] = value
+
+    def _refresh_display(self) -> None:
+        telemetry = self.pending_telemetry
+        gps = self.pending_gps
+        self.pending_telemetry = None
+        self.pending_gps = None
+        if telemetry is not None:
+            self._handle_telemetry(telemetry)
+        if gps is not None:
+            self._handle_gps(gps)
 
     def _handle_telemetry(self, sample: TelemetrySample) -> None:
         now = time.monotonic()
@@ -1007,6 +1043,12 @@ class CloudBaseVarioApp:
         self.accel_chart.add(
             now, vertical_accel if vertical_accel_valid else None
         )
+        for chart in (
+            self.pressure_chart,
+            self.climb_chart,
+            self.accel_chart,
+        ):
+            chart.redraw()
         self._update_detail_fields(sample)
 
     def _handle_gps(self, sample: GpsSample) -> None:
@@ -1039,9 +1081,14 @@ class CloudBaseVarioApp:
                 )
 
     def _append_log(self, line: str) -> None:
+        self._append_log_batch([line])
+
+    def _append_log_batch(self, lines: list[str]) -> None:
+        if not lines:
+            return
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", line + "\n")
-        self.log_line_count += 1
+        self.log_text.insert("end", "\n".join(lines) + "\n")
+        self.log_line_count += len(lines)
         if self.log_line_count > MAX_LOG_LINES:
             remove_count = self.log_line_count - MAX_LOG_LINES
             self.log_text.delete("1.0", f"{remove_count + 1}.0")

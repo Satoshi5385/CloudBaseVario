@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 from typing import Any
 
 try:
@@ -19,10 +20,63 @@ except ImportError:
     from cloudbasevario_protocol import format_command
 
 
+class SerialEventInbox:
+    """Keep control events ordered while coalescing periodic telemetry."""
+
+    TELEMETRY_LOG_LINES = 5000
+
+    def __init__(self) -> None:
+        self._events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._latest_lines: dict[str, str | None] = {
+            "BARO": None,
+            "GPS": None,
+        }
+        self._telemetry_log: deque[str] = deque(
+            maxlen=self.TELEMETRY_LOG_LINES
+        )
+        self._lock = threading.Lock()
+
+    def put(self, event: tuple[str, Any]) -> None:
+        event_type, payload = event
+        if event_type == "line":
+            line = str(payload)
+            prefix = line.split(maxsplit=1)[0] if line else ""
+            if prefix in self._latest_lines:
+                with self._lock:
+                    self._latest_lines[prefix] = line
+                    self._telemetry_log.append(line)
+                return
+        self._events.put(event)
+
+    def get_nowait(self) -> tuple[str, Any]:
+        return self._events.get_nowait()
+
+    def take_latest_lines(self) -> tuple[str | None, str | None]:
+        with self._lock:
+            lines = (self._latest_lines["BARO"], self._latest_lines["GPS"])
+            self._latest_lines["BARO"] = None
+            self._latest_lines["GPS"] = None
+        return lines
+
+    def drain_telemetry_log(self) -> list[str]:
+        with self._lock:
+            lines = list(self._telemetry_log)
+            self._telemetry_log.clear()
+        return lines
+
+    def discard_telemetry_log(self) -> None:
+        with self._lock:
+            self._telemetry_log.clear()
+
+    @property
+    def control_event_count(self) -> int:
+        return self._events.qsize()
+
+
 class SerialWorker:
     """Own the serial port and transfer complete lines to the GUI thread."""
 
-    def __init__(self, events: queue.Queue[tuple[str, Any]]) -> None:
+    def __init__(self, events: SerialEventInbox) -> None:
         self.events = events
         self.port: Any = None
         self.thread: threading.Thread | None = None

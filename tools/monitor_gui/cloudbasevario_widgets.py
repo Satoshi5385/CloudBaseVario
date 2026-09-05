@@ -6,7 +6,7 @@ from collections import deque
 import math
 import tkinter as tk
 from tkinter import ttk
-from typing import Any
+from typing import Any, Sequence
 
 try:
     from .cloudbasevario_protocol import DisplayItem, TelemetryGroup
@@ -42,6 +42,50 @@ except ImportError:
     )
 
 
+def downsample_values(
+    values: Sequence[tuple[float, float | None]], max_points: int
+) -> list[tuple[float, float | None]]:
+    """Reduce chart points while retaining bucket extrema and gaps."""
+
+    if max_points < 2:
+        raise ValueError("max_points must be at least 2")
+    if len(values) <= max_points:
+        return list(values)
+
+    bucket_count = max(1, (max_points - 2) // 2)
+    sampled: list[tuple[float, float | None]] = []
+    for bucket_index in range(bucket_count):
+        start = len(values) * bucket_index // bucket_count
+        end = len(values) * (bucket_index + 1) // bucket_count
+        bucket = values[start:end]
+        if not bucket:
+            continue
+        valid = [
+            (index, point)
+            for index, point in enumerate(bucket)
+            if point[1] is not None
+        ]
+        if not valid:
+            sampled.append(bucket[len(bucket) // 2])
+            continue
+
+        minimum = min(valid, key=lambda entry: entry[1][1])
+        maximum = max(valid, key=lambda entry: entry[1][1])
+        selected = [minimum, maximum]
+        if bucket[0][1] is None:
+            selected.append((0, bucket[0]))
+        if bucket[-1][1] is None:
+            selected.append((len(bucket) - 1, bucket[-1]))
+        for _, point in sorted(selected, key=lambda entry: entry[0]):
+            if not sampled or sampled[-1] != point:
+                sampled.append(point)
+    if sampled[0] != values[0]:
+        sampled.insert(0, values[0])
+    if sampled[-1] != values[-1]:
+        sampled.append(values[-1])
+    return sampled
+
+
 class MetricCard(tk.Frame):
     def __init__(
         self, parent: tk.Misc, title: str, unit: str = ""
@@ -56,6 +100,7 @@ class MetricCard(tk.Frame):
         )
         self.unit = unit
         self.value_var = tk.StringVar(value="--")
+        self._last_item: tuple[str, str] | None = None
         tk.Label(
             self,
             text=title,
@@ -89,9 +134,13 @@ class MetricCard(tk.Frame):
         unit_suffix = f" {self.unit}" if self.unit else ""
         if unit_suffix and value.endswith(unit_suffix):
             value = value[: -len(unit_suffix)]
+        state = item.state
+        if self._last_item == (value, state):
+            return
+        self._last_item = (value, state)
         self.set(value)
         self.value_label.configure(
-            fg=DISPLAY_COLORS.get(item.state, COLOR_TEXT)
+            fg=DISPLAY_COLORS.get(state, COLOR_TEXT)
         )
 
 
@@ -107,6 +156,7 @@ class StatusBadge(tk.Label):
             pady=4,
         )
         self.title = title
+        self._last_item: tuple[str, str] | None = None
 
     def set(self, active: bool, detail: str | None = None) -> None:
         text = detail if detail is not None else ("ON" if active else "OFF")
@@ -116,12 +166,17 @@ class StatusBadge(tk.Label):
         )
 
     def set_item(self, item: DisplayItem) -> None:
+        current = (item.value, item.state)
+        if self._last_item == current:
+            return
+        self._last_item = current
         self.configure(
             text=f"{self.title}: {item.value}",
             fg=DISPLAY_COLORS.get(item.state, COLOR_MUTED),
         )
 
     def unknown(self) -> None:
+        self._last_item = None
         self.configure(text=f"{self.title}: --", fg=COLOR_MUTED)
 
 
@@ -131,6 +186,7 @@ class DiagnosticTable(ttk.Labelframe):
     def __init__(self, parent: tk.Misc, title: str) -> None:
         super().__init__(parent, text=title, padding=(8, 6))
         self.items: dict[str, str] = {}
+        self.item_values: dict[str, tuple[str, str, str]] = {}
         self.tree = ttk.Treeview(
             self,
             columns=("field", "value"),
@@ -154,6 +210,7 @@ class DiagnosticTable(ttk.Labelframe):
             if key not in visible_keys:
                 self.tree.delete(row)
                 del self.items[key]
+                self.item_values.pop(key, None)
         for item in group.items:
             row = self.items.get(item.key)
             values = (item.label, item.value)
@@ -161,8 +218,12 @@ class DiagnosticTable(ttk.Labelframe):
                 row = self.tree.insert("", "end", values=values, tags=(item.state,))
 
                 self.items[item.key] = row
+                self.item_values[item.key] = (item.label, item.value, item.state)
             else:
-                self.tree.item(row, values=values, tags=(item.state,))
+                current = (item.label, item.value, item.state)
+                if self.item_values.get(item.key) != current:
+                    self.tree.item(row, values=values, tags=(item.state,))
+                    self.item_values[item.key] = current
 
 
 class StripChart(tk.Frame):
@@ -197,7 +258,6 @@ class StripChart(tk.Frame):
         cutoff = timestamp - self.seconds
         while self.values and self.values[0][0] < cutoff:
             self.values.popleft()
-        self.redraw()
 
     def clear(self) -> None:
         self.values.clear()
@@ -224,9 +284,10 @@ class StripChart(tk.Frame):
             font=("Segoe UI Semibold", 9),
         )
 
-        valid_values = [
-            value for _, value in self.values if value is not None
-        ]
+        points = downsample_values(
+            list(self.values), max(120, int((right - left) * 0.75))
+        )
+        valid_values = [value for _, value in points if value is not None]
         if not valid_values:
             canvas.create_text(
                 width / 2,
@@ -277,7 +338,7 @@ class StripChart(tk.Frame):
         )
 
         segment: list[float] = []
-        for timestamp, value in self.values:
+        for timestamp, value in points:
             if value is None:
                 if len(segment) >= 4:
                     canvas.create_line(
@@ -429,5 +490,3 @@ class AttitudeIndicator(tk.Frame):
             fill=COLOR_TEXT,
             font=("Consolas", 10),
         )
-
-
