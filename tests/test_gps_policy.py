@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GPS_WORKER = (ROOT / "SRC/app/gps_worker.c").read_text(encoding="utf-8")
 GPS_PLATFORM = (ROOT / "SRC/platform/gps_l96.c").read_text(encoding="utf-8")
 APP_WORKERS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
+APP_TASKS = (ROOT / "SRC/app/app_tasks.c").read_text(encoding="utf-8")
 BLE_PLATFORM = (ROOT / "SRC/platform/ble_vario.c").read_text(encoding="utf-8")
 BLE_WORKER = (ROOT / "SRC/app/ble_tx_worker.c").read_text(encoding="utf-8")
 BLE_NUS_TX = (ROOT / "SRC/domain/ble_nus_tx.c").read_text(encoding="utf-8")
@@ -24,6 +25,22 @@ class GpsPolicyTests(unittest.TestCase):
         absent_block = GPS_WORKER[absent:connect]
         self.assertIn("acknowledge_and_delete();", absent_block)
         self.assertNotIn("gps_l96_", absent_block)
+
+    def test_absent_model_does_not_create_gps_task(self) -> None:
+        self.assertIn(
+            "descriptor->worker != APP_TASK_WORKER_GPS || gps_is_installed()",
+            APP_TASKS,
+        )
+        create_loop = APP_TASKS.split("esp_err_t app_tasks_start", 1)[1].split(
+            "if (result != ESP_OK)", 1
+        )[0]
+        self.assertIn("if (!worker_is_enabled(descriptor))", create_loop)
+        self.assertIn("continue;", create_loop)
+        required_workers = APP_TASKS.split(
+            "bool app_tasks_required_workers_started", 1
+        )[1].split("TaskHandle_t app_tasks_worker_handle", 1)[0]
+        self.assertIn("worker_is_enabled(descriptor)", required_workers)
+        self.assertIn("worker_stack_watermark(APP_TASK_WORKER_GPS)", APP_WORKERS)
 
     def test_l96_configuration_and_retry_contract(self) -> None:
         for token in (
@@ -67,9 +84,15 @@ class GpsPolicyTests(unittest.TestCase):
         self.assertNotIn("ble_vario_notify_lk8ex1", BLE_PLATFORM)
         self.assertNotIn("ble_vario_notify_gps_pair", BLE_PLATFORM)
 
-    def test_gps_does_not_change_led_policy(self) -> None:
-        self.assertNotIn("gps", SYSTEM_POLICY.casefold())
-        self.assertNotIn("gps", SYSTEM_POLICY_HEADER.casefold())
+    def test_gps_fix_only_gates_led_for_installed_model(self) -> None:
+        self.assertIn("bool gps_installed;", SYSTEM_POLICY_HEADER)
+        self.assertIn("bool gps_fix_valid;", SYSTEM_POLICY_HEADER)
+        self.assertIn(
+            "(!input->gps_installed || input->gps_fix_valid)", SYSTEM_POLICY
+        )
+        self.assertIn(".gps_installed = identity != NULL", APP_WORKERS)
+        self.assertIn(".gps_fix_valid = (bits & APP_EVENT_GPS_FIX_VALID)", APP_WORKERS)
+        self.assertIn("APP_EVENT_GPS_FIX_VALID", GPS_WORKER)
 
     def test_gps_monitor_record_is_independent_from_baro(self) -> None:
         self.assertIn('"GPS installed=%d identified=%d', APP_WORKERS)

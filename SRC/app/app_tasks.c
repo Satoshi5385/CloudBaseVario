@@ -88,6 +88,16 @@ static esp_err_t create_worker(const app_task_descriptor_t *descriptor) {
     return ESP_OK;
 }
 
+static bool gps_is_installed(void) {
+    const board_identity_t *identity = board_active_identity();
+
+    return identity != NULL && identity->gps_installed == 1U;
+}
+
+static bool worker_is_enabled(const app_task_descriptor_t *descriptor) {
+    return descriptor->worker != APP_TASK_WORKER_GPS || gps_is_installed();
+}
+
 void app_tasks_set_imu_accel_calibration(
     const imu_accel_calibration_t *calibration,
     const imu_calibration_storage_diagnostics_t *diagnostics) {
@@ -113,7 +123,12 @@ esp_err_t app_tasks_start(void) {
     for (size_t index = 0U;
          index < sizeof(task_descriptors) / sizeof(task_descriptors[0]);
          index++) {
-        result = create_worker(&task_descriptors[index]);
+        const app_task_descriptor_t *descriptor = &task_descriptors[index];
+
+        if (!worker_is_enabled(descriptor)) {
+            continue;
+        }
+        result = create_worker(descriptor);
         if (result != ESP_OK) {
             break;
         }
@@ -163,8 +178,13 @@ bool app_tasks_system_started(void) {
 }
 
 bool app_tasks_required_workers_started(void) {
-    for (size_t index = 0U; index < APP_TASK_WORKER_COUNT; index++) {
-        if (worker_handles[index] == NULL) {
+    for (size_t index = 0U;
+         index < sizeof(task_descriptors) / sizeof(task_descriptors[0]);
+         index++) {
+        const app_task_descriptor_t *descriptor = &task_descriptors[index];
+
+        if (worker_is_enabled(descriptor) &&
+            worker_handles[descriptor->worker] == NULL) {
             return false;
         }
     }

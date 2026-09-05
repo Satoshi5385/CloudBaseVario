@@ -71,6 +71,8 @@ typedef struct {
     bool external_power_present;
     bool battery_valid;
     bool ble_notify_active;
+    bool gps_installed;
+    bool gps_fix_valid;
 } system_led_policy_input_t;
 
 typedef struct {

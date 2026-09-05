@@ -28,6 +28,8 @@ class StartupLedPolicyTests(unittest.TestCase):
             ".external_power_present",
             ".battery_valid",
             ".ble_notify_active",
+            ".gps_installed",
+            ".gps_fix_valid",
         ):
             self.assertIn(field, WORKER_SOURCE)
 
@@ -67,6 +69,7 @@ class StartupLedPolicyTests(unittest.TestCase):
         self.assertIn("表の上から順に優先度が高い", SW_SPEC)
         self.assertIn("低電池残量", SW_SPEC)
         self.assertIn("BLE", SW_SPEC)
+        self.assertIn("GPS搭載機", SW_SPEC)
 
 
 if __name__ == "__main__":

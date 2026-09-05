@@ -227,7 +227,8 @@ void system_policy_select_leds(const system_led_policy_input_t *input,
                     UINT32_C(2);
         }
 
-        if (!invalid_or_stale && input->ble_notify_active) {
+        if (!invalid_or_stale && input->ble_notify_active &&
+            (!input->gps_installed || input->gps_fix_valid)) {
             output->yellow_on =
                 input->elapsed_ms % UINT32_C(1000) < UINT32_C(100);
         }

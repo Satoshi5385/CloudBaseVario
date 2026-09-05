@@ -324,6 +324,7 @@ static void set_imu_lifecycle_state(bool calibrating, bool degraded) {
 static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms,
                                bool external_power_present,
                                bool battery_valid, float battery_voltage_v) {
+    const board_identity_t *identity = board_active_identity();
     EventBits_t bits = app_event_bits();
     vario_result_t result = {0};
     system_led_policy_input_t input = {
@@ -344,6 +345,8 @@ static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms,
         .external_power_present = external_power_present,
         .battery_valid = battery_valid,
         .ble_notify_active = ble_vario_notify_active(),
+        .gps_installed = identity != NULL && identity->gps_installed == 1U,
+        .gps_fix_valid = (bits & APP_EVENT_GPS_FIX_VALID) != 0U,
     };
     system_led_policy_output_t output = {0};
 
@@ -2681,6 +2684,15 @@ static bool gps_monitor_changed(
     return false;
 }
 
+static UBaseType_t worker_stack_watermark(app_task_worker_t worker) {
+    TaskHandle_t handle = app_tasks_worker_handle(worker);
+
+    if (handle == NULL) {
+        return 0U;
+    }
+    return uxTaskGetStackHighWaterMark(handle);
+}
+
 static void console_print_board_info(void) {
     const board_identity_t *identity = board_active_identity();
     const board_descriptor_t *descriptor = board_active_descriptor();
@@ -2991,18 +3003,12 @@ static void console_diag_status(void) {
         power.observed_frequency_switch_count, power.lock_error_count);
     console_writef(
         "STACK words sensor=%u audio=%u system=%u console=%u ble=%u gps=%u\r\n",
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_SENSOR)),
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_AUDIO)),
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_SYSTEM)),
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_CONSOLE)),
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_BLE_TX)),
-        (unsigned int) uxTaskGetStackHighWaterMark(
-            app_tasks_worker_handle(APP_TASK_WORKER_GPS)));
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_SENSOR),
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_AUDIO),
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_SYSTEM),
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_CONSOLE),
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_BLE_TX),
+        (unsigned int) worker_stack_watermark(APP_TASK_WORKER_GPS));
     console_writef("OK\r\n");
 }
 

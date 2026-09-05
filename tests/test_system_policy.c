@@ -53,7 +53,7 @@ static void test_startup_press_is_not_power_off(void) {
     }
 }
 
-static void test_sw1_short_and_two_second_hold(void) {
+static void test_sw1_short_and_one_second_hold(void) {
     system_policy_state_t state = {0};
     system_policy_actions_t actions = {0};
     bool power_off_seen = false;
@@ -160,18 +160,35 @@ static void test_led_priority_table(void) {
           .ble_notify_active = true},
          100U, true},
         {{.elapsed_ms = 0U, .bmp581_startup_complete = true,
+          .vario_available = true, .pressure_valid = true,
+          .climb_rate_valid = true, .ble_notify_active = true,
+          .gps_installed = true},
+         100U, false},
+        {{.elapsed_ms = 0U, .bmp581_startup_complete = true,
+          .vario_available = true, .pressure_valid = true,
+          .climb_rate_valid = true, .ble_notify_active = true,
+          .gps_installed = true, .gps_fix_valid = true},
+         100U, true},
+        {{.elapsed_ms = 100U, .bmp581_startup_complete = true,
+          .vario_available = true, .pressure_valid = true,
+          .climb_rate_valid = true, .ble_notify_active = true,
+          .gps_installed = true, .gps_fix_valid = true},
+         100U, false},
+        {{.elapsed_ms = 0U, .bmp581_startup_complete = true,
           .storage_mode_active = true},
          20U, true},
         {{.elapsed_ms = 100U, .bmp581_startup_complete = true,
           .storage_mode_active = true},
          20U, false},
-        {{.elapsed_ms = 0U, .sw1_hold_ms = 1000U,
+        {{.elapsed_ms = 0U,
+          .sw1_hold_ms = SYSTEM_POLICY_POWER_OFF_HOLD_MS,
           .bmp581_startup_complete = true, .storage_mode_active = true},
-         50U, true},
-        {{.elapsed_ms = 0U, .sw1_hold_ms = 1000U,
+         0U, true},
+        {{.elapsed_ms = 0U,
+          .sw1_hold_ms = SYSTEM_POLICY_POWER_OFF_HOLD_MS,
           .bmp581_startup_complete = true, .vario_available = true,
           .pressure_valid = true, .climb_rate_valid = true},
-         50U, false},
+         0U, false},
     };
 
     for (size_t index = 0U; index < sizeof(cases) / sizeof(cases[0]);
@@ -193,12 +210,15 @@ static void test_shutdown_deadline_policy(void) {
     assert(system_policy_can_start_shutdown_sound(true, 381U, 380U));
     assert(!system_policy_can_start_shutdown_sound(false, 1000U, 380U));
     assert(system_policy_power_on_brightness(1000U, 2000U) == 50U);
-    assert(system_policy_power_off_brightness(1000U) == 50U);
+    assert(system_policy_power_off_brightness(
+               SYSTEM_POLICY_POWER_OFF_HOLD_MS / 2U) == 50U);
+    assert(system_policy_power_off_brightness(
+               SYSTEM_POLICY_POWER_OFF_HOLD_MS) == 0U);
 }
 
 int main(void) {
     test_startup_press_is_not_power_off();
-    test_sw1_short_and_two_second_hold();
+    test_sw1_short_and_one_second_hold();
     test_sw2_and_sw3_actions();
     test_calibration_short_press_and_skip();
     test_led_priority_table();
