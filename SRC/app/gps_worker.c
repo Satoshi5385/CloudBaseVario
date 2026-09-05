@@ -36,6 +36,16 @@ static void publish(const gps_snapshot_t *snapshot) {
     (void) app_resources_publish_gps(snapshot);
 }
 
+static bool is_rmc_sentence(const char *line) {
+    return strncmp(line, "$GPRMC,", 7U) == 0 ||
+           strncmp(line, "$GNRMC,", 7U) == 0;
+}
+
+static bool is_gga_sentence(const char *line) {
+    return strncmp(line, "$GPGGA,", 7U) == 0 ||
+           strncmp(line, "$GNGGA,", 7U) == 0;
+}
+
 static void apply_fix(gps_snapshot_t *snapshot,
                       const gps_nmea_fix_t *fix) {
     snapshot->fix_valid = fix->fix_valid;
@@ -109,7 +119,7 @@ void gps_worker_task(void *context) {
         gps_nmea_pairer_t pairer = {0};
         uint32_t active_interval_ms = 1000U;
         uint32_t baud_rate = 0U;
-        int64_t last_pair_us = 0;
+        int64_t last_sentence_us = 0;
         esp_err_t ret = ESP_OK;
 
         if (app_resources_copy_config_with_revision(&config,
@@ -139,7 +149,7 @@ void gps_worker_task(void *context) {
         snapshot.baud_rate = baud_rate;
         snapshot.last_error = ESP_OK;
         publish(&snapshot);
-        last_pair_us = esp_timer_get_time();
+        last_sentence_us = esp_timer_get_time();
         ESP_LOGI(TAG, "L96 configured at %" PRIu32 " bps, period=%" PRIu32
                       " ms", baud_rate, active_interval_ms);
 
@@ -161,7 +171,7 @@ void gps_worker_task(void *context) {
                         break;
                     }
                     active_interval_ms = config.gps_send_interval_ms;
-                    last_pair_us = esp_timer_get_time();
+                    last_sentence_us = esp_timer_get_time();
                 }
             }
 
@@ -170,8 +180,13 @@ void gps_worker_task(void *context) {
             if (ret == ESP_OK) {
                 gps_nmea_result_t nmea_result = GPS_NMEA_IGNORED;
                 bool fix_valid = false;
+                bool target_sentence = is_rmc_sentence(line) ||
+                                       is_gga_sentence(line);
 
                 increment_counter(&snapshot.received_sentence_count);
+                if (target_sentence && gps_nmea_checksum_valid(line)) {
+                    last_sentence_us = now_us;
+                }
                 nmea_result = gps_nmea_pairer_consume(
                     &pairer, line, snapshot.rmc, snapshot.gga, &fix_valid);
                 if (nmea_result == GPS_NMEA_INVALID) {
@@ -193,7 +208,6 @@ void gps_worker_task(void *context) {
                     increment_counter(&snapshot.sequence);
                     increment_counter(&snapshot.paired_update_count);
                     snapshot.last_error = ESP_OK;
-                    last_pair_us = now_us;
                     publish(&snapshot);
                 }
             } else if (ret == ESP_ERR_INVALID_SIZE) {
@@ -203,7 +217,7 @@ void gps_worker_task(void *context) {
                 break;
             }
 
-            if (now_us - last_pair_us >
+            if (now_us - last_sentence_us >
                 (int64_t) stale_timeout_ms(active_interval_ms) * 1000) {
                 snapshot.last_error = ESP_ERR_TIMEOUT;
                 break;

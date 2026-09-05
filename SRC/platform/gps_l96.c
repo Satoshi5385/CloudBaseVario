@@ -180,8 +180,8 @@ static bool is_restart_notice(const char *line) {
 }
 
 static bool is_restart_ready(const char *line) {
-    return strncmp(line, "$PMTK011,", 9U) == 0 ||
-           strncmp(line, "$PMTK010,002*", 13U) == 0;
+    return strncmp(line, "$PMTK010,002*", 13U) == 0 ||
+           strncmp(line, "$PMTK010,003*", 13U) == 0;
 }
 
 static esp_err_t wait_for_search_mode(void) {
@@ -205,10 +205,10 @@ static esp_err_t wait_for_search_mode(void) {
                 return identify_l96();
             }
         }
-        if (ret == ESP_ERR_TIMEOUT && restart_seen) {
-            vTaskDelay(pdMS_TO_TICKS(GPS_BAUD_SETTLE_MS));
-            return identify_l96();
-        }
+    }
+    if (restart_seen) {
+        vTaskDelay(pdMS_TO_TICKS(GPS_BAUD_SETTLE_MS));
+        return identify_l96();
     }
     return ESP_ERR_TIMEOUT;
 }
@@ -275,7 +275,7 @@ esp_err_t gps_l96_connect(uint32_t interval_ms, uint32_t *baud_rate) {
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        .source_clk = UART_SCLK_XTAL,
     };
     uint32_t detected_baud = 0U;
     esp_err_t ret = ESP_OK;
@@ -340,6 +340,10 @@ esp_err_t gps_l96_connect(uint32_t interval_ms, uint32_t *baud_rate) {
             receive_length = 0U;
             receive_overflow = false;
             ret = identify_l96();
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "PMTK251 baud switch verification failed: %s",
+                     esp_err_to_name(ret));
         }
     }
     if (ret == ESP_OK) {

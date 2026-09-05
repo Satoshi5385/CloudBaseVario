@@ -27,6 +27,9 @@ jobs:
       - name: Check Python tools
         run: python -m compileall -q tools tests
 
+      - name: Configure ESP32-S3 target
+        run: /opt/esp/entrypoint.sh idf.py set-target esp32s3
+
       - name: Build and run host C tests
         shell: bash
         run: |
@@ -57,9 +60,6 @@ jobs:
           /tmp/test_watchdog_recovery_policy
           /tmp/test_board_identity
           /tmp/test_config_json
-
-      - name: Configure ESP32-S3 target
-        run: /opt/esp/entrypoint.sh idf.py set-target esp32s3
 
       - name: Build firmware
         run: /opt/esp/entrypoint.sh idf.py build

@@ -291,10 +291,10 @@ TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Sele
 - XCTrackでは、`vario_cm_s`を昇降率表示に使用し、`pressure_pa`をバリオ音の生成に使用するものとする。両フィールドを同じセンテンスで送信し、どちらか一方から他方を代用生成しないこと。
 - センテンス末尾をCRLFとし、規定範囲のXORチェックサムを付加すること。
 - GPS搭載有無は製造時に固定し、`setting.json`および`PARAM`操作から変更できないこと。GPSなしの場合はUART1、GPS用GPIOおよびPMTK通信を初期化しないこと。
-- GPS搭載時だけL96-M33を対応baud rateで探索し、`PMTK605`／`PMTK705`の応答で機種を識別すること。115200 bpsへ正規化後、GPS+GLONASS、RMC/GGAだけ、共有設定`gps_send_interval_ms`（200～10000 ms、既定1000 ms）の周期へ設定し、設定commandの成功ACKを確認すること。
+- GPS搭載時だけL96-M33を対応baud rateで探索し、`PMTK605`／`PMTK705`の応答で機種を識別すること。GPS UARTはDFSによるAPB 40/80 MHz切替の影響を受けないXTAL clockを使用すること。115200 bpsへ正規化後、GPS+GLONASS、RMC/GGAだけ、共有設定`gps_send_interval_ms`（200～10000 ms、既定1000 ms）の周期へ設定すること。`PMTK251`はbaud rate変更後の再識別で確認し、`PMTK353`は成功ACKまたは再起動通知後の再識別で確認し、`PMTK314`および`PMTK220`は成功ACKを確認すること。
 - checksumが正常で同一UTC時刻の`GPRMC`／`GNRMC`と`GPGGA`／`GNGGA`を最新ペアとして保持し、NUS TXからRMC、GGAの順にXCTrackへ送信すること。各センテンスを`ATT_MTU - 3`で分割し、1センテンスのfragment間およびRMC/GGA間へLK8EX1を割り込ませないこと。
 - BLE混雑時は履歴を蓄積せず、LK8EX1とGPSそれぞれの最新未送信データ1件だけを保持すること。両方が待機している場合はトランザクション単位で交互に選択し、GPSはRMC、GGAを不可分の1トランザクションとして扱うこと。BLE切断・Notify失敗とGPS通信異常は別に診断すること。
-- 識別・設定失敗後は5秒間隔で再試行すること。通信確立後に`max(3000 ms, 3 × gps_send_interval_ms)`以内で正常なRMC/GGAペアを受信できない場合は通信異常へ戻すこと。GPS異常は非致命的とし、気圧、推定、音およびLK8EX1を継続すること。
+- 識別・設定失敗後は5秒間隔で再試行すること。通信確立後に`max(3000 ms, 3 × gps_send_interval_ms)`以内でchecksumが正常なRMCまたはGGAを受信できない場合は通信異常へ戻すこと。RMC/GGAペア不成立は測位データ更新停止として扱い、UART通信断とは判定しないこと。GPS異常は非致命的とし、気圧、推定、音およびLK8EX1を継続すること。
 - `DIAG STATUS`にはGPSの搭載、識別、通信、fix、最終error、baud rate、受信・不正・更新・再試行・送信・drop counterを含めること。GPS状態を`system_policy`またはLED入力へ追加しないこと。
 - 接続していない場合、Notifyが許可されていない場合、または気圧と昇降率の両方が無効な場合は送信しないこと。
 - センテンスが `ATT_MTU - 3` を超える場合は、NUSのbyte streamとして必ず分割送信すること。MTU negotiationの成功を送信条件にしてはならない。

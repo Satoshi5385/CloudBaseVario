@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -37,6 +38,20 @@ class GpsPolicyTests(unittest.TestCase):
         self.assertIn("GPS_MIN_STALE_TIMEOUT_MS UINT32_C(3000)", GPS_WORKER)
         self.assertIn("gps_pmtk_ack_parse(line, &ack)", GPS_PLATFORM)
         self.assertIn("is_restart_notice(line)", GPS_PLATFORM)
+        self.assertIn('strncmp(line, "$PMTK010,003*", 13U)', GPS_PLATFORM)
+        restart_ready = GPS_PLATFORM.split(
+            "static bool is_restart_ready", 1
+        )[1].split("static esp_err_t wait_for_search_mode", 1)[0]
+        self.assertNotIn("PMTK011", restart_ready)
+        self.assertIn("last_sentence_us", GPS_WORKER)
+        self.assertIn(
+            "target_sentence && gps_nmea_checksum_valid(line)", GPS_WORKER
+        )
+        pmtk314 = re.search(r'"(PMTK314,[0-9,]+)"', GPS_PLATFORM)
+        self.assertIsNotNone(pmtk314)
+        self.assertEqual(len(pmtk314.group(1).split(",")) - 1, 19)
+        self.assertIn(".source_clk = UART_SCLK_XTAL", GPS_PLATFORM)
+        self.assertNotIn(".source_clk = UART_SCLK_DEFAULT", GPS_PLATFORM)
         self.assertNotIn('"$PMTK001,%u,3*"', GPS_PLATFORM)
 
     def test_gps_pair_is_serialized_rmc_then_gga(self) -> None:
