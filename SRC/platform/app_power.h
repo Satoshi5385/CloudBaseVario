@@ -25,13 +25,13 @@ typedef struct {
 esp_err_t app_power_init(void);
 
 /**
- * @brief Request the configured maximum CPU frequency for one sensor processing burst.
+ * @brief Request the configured maximum CPU frequency for one due IMU/BMP sample burst.
  * @return ESP_OK when the request is active, or when the fixed-80-MHz fallback is active.
  */
 esp_err_t app_power_sensor_work_begin(void);
 
 /**
- * @brief Release the sensor processing maximum-frequency request before blocking.
+ * @brief Release the sample-processing maximum-frequency request before maintenance work.
  * @return ESP_OK when the request was released, or when the fixed-frequency fallback is active.
  */
 esp_err_t app_power_sensor_work_end(void);

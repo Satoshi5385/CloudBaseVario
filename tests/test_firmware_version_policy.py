@@ -79,6 +79,15 @@ class FirmwareVersionPolicyTests(unittest.TestCase):
         self.assertIn('return "firmware authentication failed";', UPDATE_SOURCE)
         self.assertNotIn('"auth_failure=', UPDATE_SOURCE)
 
+    def test_authentication_hash_buffers_do_not_consume_task_stack(self) -> None:
+        self.assertIn("heap_caps_malloc(", AUTH_SOURCE)
+        self.assertIn("MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT", AUTH_SOURCE)
+        self.assertNotIn(
+            "uint8_t buffer[FIRMWARE_AUTH_IO_BUFFER_SIZE]", AUTH_SOURCE
+        )
+        self.assertIn("firmware_auth_progress_cb_t", AUTH_HEADER)
+        self.assertIn("report_progress(progress_cb, progress_arg);", AUTH_SOURCE)
+
     def test_board_and_diag_report_hash_without_removing_fingerprint(self) -> None:
         self.assertIn("firmware_hash=%s", WORKER_SOURCE)
         self.assertIn("version=%s hash=%s fingerprint=%s", WORKER_SOURCE)

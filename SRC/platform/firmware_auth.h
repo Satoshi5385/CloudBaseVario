@@ -34,13 +34,18 @@ typedef enum {
     FIRMWARE_AUTH_FAILURE_OTHER,
 } firmware_auth_failure_t;
 
+typedef void (*firmware_auth_progress_cb_t)(void *arg);
+
 /** Validate an UPDATE.BIN container at its current file position. */
 esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
                                        const char *expected_project,
                                        firmware_auth_header_t *header,
-                                       firmware_auth_failure_t *failure);
+                                       firmware_auth_failure_t *failure,
+                                       firmware_auth_progress_cb_t progress_cb,
+                                       void *progress_arg);
 
 /** Hash raw application bytes and verify their final-sector auth record. */
 esp_err_t firmware_authenticate_partition(
     const esp_partition_t *partition, const char *expected_project,
-    firmware_authentication_t *authentication);
+    firmware_authentication_t *authentication,
+    firmware_auth_progress_cb_t progress_cb, void *progress_arg);

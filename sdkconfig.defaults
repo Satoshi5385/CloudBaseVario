@@ -1,6 +1,11 @@
 # CloudBaseVario baseline for ESP32-S3-WROOM-1-N16R8.
 CONFIG_IDF_TARGET="esp32s3"
 
+# Minimize active CPU time for the product firmware.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# Keep FAT and PSA authentication startup calls clear of the main-task limit.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
 # 16 MB Quad SPI flash and 8 MB Octal PSRAM.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y

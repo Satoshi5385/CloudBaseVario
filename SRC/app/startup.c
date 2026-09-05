@@ -549,13 +549,11 @@ void app_startup_run(void) {
         watchdog_service_mark_stage(WATCHDOG_STAGE_FATAL);
         app_tasks_run_fatal_fallback();
     }
-    if (!ota_confirmation_boot) {
-        boot_gesture = startup_recovery_gesture();
-        if (boot_gesture == STARTUP_BOOT_GESTURE_RECOVERY) {
-            ESP_LOGW(TAG, "SW2+SW3 startup request: entering MSC recovery");
-            watchdog_service_mark_user_confirmed();
-            run_recovery_mode();
-        }
+    boot_gesture = startup_recovery_gesture();
+    if (boot_gesture == STARTUP_BOOT_GESTURE_RECOVERY) {
+        ESP_LOGW(TAG, "SW2+SW3 startup request: entering MSC recovery");
+        watchdog_service_mark_user_confirmed();
+        run_recovery_mode();
     }
 
     if (board_identity_storage_load(

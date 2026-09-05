@@ -504,7 +504,8 @@ static esp_err_t write_info_file(wl_handle_t wl_handle,
     if (running_partition == NULL ||
         firmware_authenticate_partition(running_partition,
                                         "CloudBaseVario-Aohazuku",
-                                        &authentication) != ESP_OK) {
+                                        &authentication, progress_cb,
+                                        progress_arg) != ESP_OK) {
         authentication.authenticity = FIRMWARE_AUTH_UNKNOWN;
     }
     if (!board_info_format(identity, descriptor, &firmware, &authentication,

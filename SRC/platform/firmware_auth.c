@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "esp_app_format.h"
+#include "esp_heap_caps.h"
 #include "psa/crypto.h"
 #include "domain/firmware_auth_key.h"
 #include "domain/firmware_authentication.h"
@@ -11,12 +12,20 @@
 #define FIRMWARE_AUTH_PUBLIC_KEY_LENGTH 65U
 #define FIRMWARE_AUTH_SIGNATURE_PREFIX_SIZE 100U
 #define FIRMWARE_AUTH_IO_BUFFER_SIZE 1024U
+#define FIRMWARE_AUTH_PROGRESS_INTERVAL_BYTES (32U * 1024U)
 
 static const uint8_t k_magic[8] = {'C', 'B', 'V', 'O', 'T', 'A', '0', '1'};
 static const uint8_t k_signature_domain[] =
     "CloudBaseVario OTA authentication v1";
 static const uint8_t k_public_key[FIRMWARE_AUTH_PUBLIC_KEY_LENGTH] =
     CBV_FIRMWARE_AUTH_PUBLIC_KEY;
+
+static void report_progress(firmware_auth_progress_cb_t progress_cb,
+                            void *progress_arg) {
+    if (progress_cb != NULL) {
+        progress_cb(progress_arg);
+    }
+}
 
 _Static_assert(sizeof(firmware_auth_header_t) == FIRMWARE_AUTH_HEADER_SIZE,
                "firmware auth header format drift");
@@ -151,39 +160,64 @@ static esp_err_t verify_signature(const firmware_auth_header_t *header,
     return ret;
 }
 
-static esp_err_t hash_file_payload(FILE *file, const firmware_auth_header_t *header,
-                                   uint8_t output[FIRMWARE_AUTH_SHA256_LENGTH]) {
-    uint8_t buffer[FIRMWARE_AUTH_IO_BUFFER_SIZE];
+static esp_err_t hash_file_payload(
+    FILE *file, const firmware_auth_header_t *header,
+    uint8_t output[FIRMWARE_AUTH_SHA256_LENGTH],
+    firmware_auth_progress_cb_t progress_cb, void *progress_arg) {
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: authentication is serialized and the
+     * fixed-size internal buffer is released before every return.
+     */
+    uint8_t *buffer = heap_caps_malloc(
+        FIRMWARE_AUTH_IO_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     psa_hash_operation_t context;
     size_t remaining = header->payload_size;
-    esp_err_t ret = sha256_begin(&context);
+    size_t bytes_since_progress = 0U;
+    esp_err_t ret;
 
+    if (buffer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    ret = sha256_begin(&context);
     if (ret != ESP_OK || fseek(file, header->header_size, SEEK_SET) != 0) {
         if (ret == ESP_OK) {
             (void) psa_hash_abort(&context);
         }
+        heap_caps_free(buffer);
         return ESP_FAIL;
     }
+    report_progress(progress_cb, progress_arg);
     while (remaining > 0U) {
         size_t wanted = remaining;
 
-        if (wanted > sizeof(buffer)) {
-            wanted = sizeof(buffer);
+        if (wanted > FIRMWARE_AUTH_IO_BUFFER_SIZE) {
+            wanted = FIRMWARE_AUTH_IO_BUFFER_SIZE;
         }
         if (fread(buffer, 1, wanted, file) != wanted ||
             psa_hash_update(&context, buffer, wanted) != PSA_SUCCESS) {
             (void) psa_hash_abort(&context);
+            heap_caps_free(buffer);
             return ESP_FAIL;
         }
         remaining -= wanted;
+        bytes_since_progress += wanted;
+        if (bytes_since_progress >= FIRMWARE_AUTH_PROGRESS_INTERVAL_BYTES) {
+            report_progress(progress_cb, progress_arg);
+            bytes_since_progress = 0U;
+        }
     }
-    return sha256_finish(&context, output);
+    ret = sha256_finish(&context, output);
+    report_progress(progress_cb, progress_arg);
+    heap_caps_free(buffer);
+    return ret;
 }
 
 esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
                                        const char *expected_project,
                                        firmware_auth_header_t *header,
-                                       firmware_auth_failure_t *failure) {
+                                       firmware_auth_failure_t *failure,
+                                       firmware_auth_progress_cb_t progress_cb,
+                                       void *progress_arg) {
     uint8_t payload_hash[FIRMWARE_AUTH_SHA256_LENGTH];
     esp_err_t ret;
 
@@ -197,7 +231,8 @@ esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
         !header_is_structurally_valid(header, file_size, expected_project)) {
         return ESP_ERR_INVALID_RESPONSE;
     }
-    ret = hash_file_payload(file, header, payload_hash);
+    ret = hash_file_payload(file, header, payload_hash, progress_cb,
+                            progress_arg);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -206,38 +241,63 @@ esp_err_t firmware_auth_verify_package(FILE *file, size_t file_size,
         *failure = FIRMWARE_AUTH_FAILURE_PAYLOAD_HASH_MISMATCH;
         return ESP_ERR_INVALID_CRC;
     }
-    return verify_signature(header, failure);
+    ret = verify_signature(header, failure);
+    report_progress(progress_cb, progress_arg);
+    return ret;
 }
 
 static esp_err_t hash_partition_payload(
     const esp_partition_t *partition, uint32_t payload_size,
-    uint8_t output[FIRMWARE_AUTH_SHA256_LENGTH]) {
-    uint8_t buffer[FIRMWARE_AUTH_IO_BUFFER_SIZE];
+    uint8_t output[FIRMWARE_AUTH_SHA256_LENGTH],
+    firmware_auth_progress_cb_t progress_cb, void *progress_arg) {
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: authentication is serialized and the
+     * fixed-size internal buffer is released before every return.
+     */
+    uint8_t *buffer = heap_caps_malloc(
+        FIRMWARE_AUTH_IO_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     psa_hash_operation_t context;
     uint32_t offset = 0U;
-    esp_err_t ret = sha256_begin(&context);
+    uint32_t bytes_since_progress = 0U;
+    esp_err_t ret;
 
+    if (buffer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    ret = sha256_begin(&context);
     if (ret != ESP_OK) {
+        heap_caps_free(buffer);
         return ret;
     }
+    report_progress(progress_cb, progress_arg);
     while (offset < payload_size) {
         size_t length = payload_size - offset;
-        if (length > sizeof(buffer)) {
-            length = sizeof(buffer);
+        if (length > FIRMWARE_AUTH_IO_BUFFER_SIZE) {
+            length = FIRMWARE_AUTH_IO_BUFFER_SIZE;
         }
         if (esp_partition_read(partition, offset, buffer, length) != ESP_OK ||
             psa_hash_update(&context, buffer, length) != PSA_SUCCESS) {
             (void) psa_hash_abort(&context);
+            heap_caps_free(buffer);
             return ESP_FAIL;
         }
         offset += (uint32_t) length;
+        bytes_since_progress += (uint32_t) length;
+        if (bytes_since_progress >= FIRMWARE_AUTH_PROGRESS_INTERVAL_BYTES) {
+            report_progress(progress_cb, progress_arg);
+            bytes_since_progress = 0U;
+        }
     }
-    return sha256_finish(&context, output);
+    ret = sha256_finish(&context, output);
+    report_progress(progress_cb, progress_arg);
+    heap_caps_free(buffer);
+    return ret;
 }
 
 esp_err_t firmware_authenticate_partition(
     const esp_partition_t *partition, const char *expected_project,
-    firmware_authentication_t *authentication) {
+    firmware_authentication_t *authentication,
+    firmware_auth_progress_cb_t progress_cb, void *progress_arg) {
     firmware_auth_header_t header;
     firmware_auth_failure_t failure = FIRMWARE_AUTH_FAILURE_OTHER;
     uint8_t payload_hash[FIRMWARE_AUTH_SHA256_LENGTH];
@@ -262,15 +322,18 @@ esp_err_t firmware_authenticate_partition(
         authentication->authenticity = FIRMWARE_AUTH_NON_OFFICIAL;
         return ESP_OK;
     }
-    ret = hash_partition_payload(partition, header.payload_size, payload_hash);
+    ret = hash_partition_payload(partition, header.payload_size, payload_hash,
+                                 progress_cb, progress_arg);
     if (ret != ESP_OK) {
         return ret;
     }
     if (memcmp(payload_hash, header.payload_sha256, sizeof(payload_hash)) != 0 ||
         verify_signature(&header, &failure) != ESP_OK) {
+        report_progress(progress_cb, progress_arg);
         authentication->authenticity = FIRMWARE_AUTH_NON_OFFICIAL;
         return ESP_OK;
     }
+    report_progress(progress_cb, progress_arg);
     authentication->authenticity = FIRMWARE_AUTH_OFFICIAL;
     memcpy(authentication->key_id, header.key_id, sizeof(header.key_id));
     authentication->key_id[sizeof(header.key_id)] = '\0';

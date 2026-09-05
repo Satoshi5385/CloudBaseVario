@@ -56,6 +56,11 @@ static firmware_update_diagnostics_t update_diagnostics = {
     .last_error = ESP_OK,
 };
 
+static void report_authentication_progress(void *arg) {
+    (void) arg;
+    (void) watchdog_service_feed(WATCHDOG_ACTOR_STARTUP);
+}
+
 typedef struct {
     size_t size;
     size_t payload_offset;
@@ -221,7 +226,8 @@ static esp_err_t inspect_image(const char *name, update_image_info_t *info,
     ret = firmware_auth_verify_package(file, (size_t) file_info.st_size,
                                        CBV_FIRMWARE_PROJECT_NAME,
                                        &info->authentication,
-                                       &info->auth_failure);
+                                       &info->auth_failure,
+                                       report_authentication_progress, NULL);
     if (ret == ESP_OK) {
         info->size = info->authentication.payload_size;
         info->payload_offset = info->authentication.header_size;

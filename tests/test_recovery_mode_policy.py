@@ -21,7 +21,7 @@ def body(source: str, start_text: str, end_text: str) -> str:
 
 
 class RecoveryModePolicyTests(unittest.TestCase):
-    def test_recovery_gesture_is_early_bounded_and_pending_verify_wins(self) -> None:
+    def test_recovery_gesture_is_early_bounded_and_manual_recovery_wins(self) -> None:
         gesture = body(
             STARTUP,
             "static startup_boot_gesture_t startup_recovery_gesture(void)",
@@ -39,7 +39,7 @@ class RecoveryModePolicyTests(unittest.TestCase):
         self.assertIn("STARTUP_RECOVERY_HOLD_MS", gesture)
         self.assertIn("feed_startup_watchdog();", gesture)
         self.assertIn("#define STARTUP_MODE_HOLD_MS UINT32_C(2000)", STARTUP)
-        self.assertIn("if (!ota_confirmation_boot)", startup)
+        self.assertNotIn("if (!ota_confirmation_boot)", startup)
         self.assertLess(safe_gpio, pending)
         self.assertLess(pending, recovery)
         self.assertLess(recovery, identity)

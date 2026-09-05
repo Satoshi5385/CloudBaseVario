@@ -460,7 +460,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 - config FAT直下の`setting_editor.html`は、ファームウェアBINへ組み込んだ`DOC/setting_editor.html`と同一内容の読み取り専用設定エディターとする。通常起動時にFATをAPP側へmountした後、`setting.json`読込みおよびMSC公開前に組込み内容と比較し、同一なら再書込みせずread-only属性だけを保証する。欠落または不一致では4 KiB単位で復元し、flush/sync後に読み取り専用属性を設定する。生成または属性設定に失敗した場合はMSCを公開しない。
 - MSCリカバリーモードはUSB VBUSを必須とし、電源保持、安全GPIO、5秒Task Watchdog、既存config FATのAPP mount、TinyUSB CDC+MSC、署名検証およびinactive OTA書込みだけを開始する。製造用board identityがなくてもeFuse MACから`REC-`で始まるUSB serialを生成し、NVS、設定読込み、生成ファイル更新、較正、音声、表示、SD、センサー、BLEおよび通常workerを開始しない。config FATを自動formatせず、mount失敗時はMSCを公開しない。
 - リカバリー開始時にAPP所有の`UPDATE.BIN`があればMSC公開前に処理する。ない場合はMSCを公開し、一度`HOST_OWNED`になった後、SYNCHRONIZE CACHE、安全な取り外し、受理済みWRITEの完了を経て`APP_OWNED`へ戻った回数を確認してからファイルを処理する。初期APP mountを取り外し完了として扱わず、待機中は100 ms以下の周期で起動Watchdogを給餌する。ファイルなしまたは拒否時はboot partitionを変更せずMSCを再公開し、成功時は既存の`UPDATE.PND`、再起動、PENDING_VERIFYおよびrollback手順へ接続する。
-- リカバリー更新の初回bootでは`ESP_OTA_IMG_PENDING_VERIFY`をSW2+SW3より優先し、ボタンが押されたままでも通常workerを起動して10秒確認を行う。bootloader、partition table、現在のapplication自体、config FAT、USBまたはリカバリー経路が実行不能な場合は復旧できず、GPIO0を使うROM Download Modeが必要である。mask ROM自体は書換対象ではなく、更新対象はinactive OTA partitionである。
+- リカバリー更新の初回bootを含む`ESP_OTA_IMG_PENDING_VERIFY`中でも、手動のSW2+SW3を通常workerによる10秒確認より優先してMSCリカバリーへ入る。bootloader、partition table、現在のapplication自体、config FAT、USBまたはリカバリー経路が実行不能な場合は復旧できず、GPIO0を使うROM Download Modeが必要である。mask ROM自体は書換対象ではなく、更新対象はinactive OTA partitionである。
 - 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
@@ -540,7 +540,7 @@ SW2を押さずSW3だけを押したまま電源ONして2秒間継続した場�
 
 ## 非機能要件
 
-- BMP581の目標取得周期を10 ms、ICM-42688P-HXYの目標取得周期を2.5 ms、音声評価周期を10 ms以下とすること。IMUのData Ready通知が複数回蓄積した場合は最新frameを優先し、取りこぼし数を計数すること。未検出時は約2秒間隔で再初期化すること。
+- BMP581の目標取得周期を10 ms、ICM-42688P-HXYの目標取得周期を2.5 ms、音声評価周期を10 ms以下とすること。姿勢推定と融合フィルタのIMU更新は2.5 ms周期を維持するが、正常なIMUサンプルだけを理由にvario snapshot、音声キューまたはIMU診断snapshotを更新せず、通常計測中の公開頻度は最大100 Hzに制限すること。IMUのData Ready通知が複数回蓄積した場合は最新frameを優先し、取りこぼし数を計数すること。未検出時は約2秒間隔で再初期化すること。
 - BMP581の周期超過とI2Cエラーは別々に計数すること。
 - 周期処理は単調増加時刻と絶対期限を使用し、処理時間を次周期へ累積させないこと。
 - 最新値だけが必要な経路では、キュー満杯時に古い値を破棄し、高優先度タスクを待たせないこと。
@@ -561,6 +561,7 @@ SW2を押さずSW3だけを押したまま電源ONして2秒間継続した場�
 - BluetoothはBLE + NimBLE Hostだけを有効にし、Classic BluetoothとWi-Fiを無効にすること。
 - アプリケーションのstandard I/OをTinyUSB CDCへ接続し、同じTinyUSB deviceでMSCを提供すること。TinyUSBと競合する `CONFIG_ESP_CONSOLE_USB_CDC`、アプリ稼働中の `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`およびUART consoleは使用せず、GPIO19/20をUSB OTG以外の通常GPIOとして再設定しないこと。
 - CPU既定・最大周波数を80 MHz、DFS最小周波数を40 MHzとし、アプリケーションが `esp_pm_configure()` で明示的に設定すること。通常計測中はLight-sleep禁止ロックを保持し、全worker停止後の安全停止状態だけで解放すること。
+- applicationはperformance optimization（GCCでは `-O2`）でbuildし、400 Hzのセンサー演算後にCPUが速やかにidleへ戻れるようにすること。センサー用80 MHz lockは実際にIMUまたはBMP581のサンプル処理が必要なburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
 - tickless idle、Bluetooth modem sleepおよびBluetooth low-power clockのmain XTALを有効にすること。通常動作中にTinyUSB CDCまたはMSCがUSB hostへ接続している間は自動Light-sleepを禁止すること。明示的な電源OFFではpending MSC writeがない状態でアプリケーション側TinyUSBを停止し、停止成功後はVBUSが残っていてもSAFE_STOPの自動Light-sleepを許可すること。
 - Wi-Fi/Bluetoothソフトウェア共存制御、NimBLEの未使用role・標準service・BLE 5.x追加機能・DTM testを無効にし、NimBLEはPeripheral/GATT Server、接続数1、Preferred ATT MTU 247とすること。交渉済みATT MTUは23～247を許容すること。
 - factory、4 MiB共有FAT、OTA dataおよび2個の3.5 MiB OTA slotを持つcustom partition tableを使用し、bootloader rollbackを有効にすること。
@@ -594,9 +595,9 @@ flowchart LR
     SENSOR --> ATTITUDE[axis map / gyro calibration<br/>6DoF attitude]
     ATTITUDE --> FUSION[vertical acceleration<br/>baro / IMU fusion]
     SENSOR --> FUSION
-    FUSION -->|最新値で上書き| AUDIO[audio_task]
-    FUSION -->|mutex下で最新値を置換| VARIO_SNAPSHOT[vario snapshot]
-    SENSOR -->|mutex下で最新値を置換| IMU_DIAGNOSTICS[imu diagnostics]
+    FUSION -->|最大100 Hzで最新値を上書き| AUDIO[audio_task]
+    FUSION -->|最大100 Hzでmutex下の最新値を置換| VARIO_SNAPSHOT[vario snapshot]
+    SENSOR -->|最大100 Hzでmutex下の最新値を置換| IMU_DIAGNOSTICS[imu diagnostics]
     VARIO_SNAPSHOT --> BLE[ble_tx_task / NimBLE]
     VARIO_SNAPSHOT --> CONSOLE[console_task]
     IMU_DIAGNOSTICS --> CONSOLE
@@ -685,7 +686,7 @@ typedef struct {
 
 `pressure_valid`はBMP581の気圧値が範囲内かつfreshであること、`climb_rate_valid`は選択中の昇降率推定値が範囲内かつfreshであることを個別に表す。`estimate_valid`は高度および昇降率の推定結果を音声処理へ使用できることを表し、BLE送信可否を単独では決定しない。`imu_fusion_active`は現在の出力が融合フィルタ由来であること、`vertical_accel_valid`は直近の姿勢補正済み鉛直加速度を融合へ入力できることを表す。`kalman_accel_bias_mps2`は4状態フィルタが推定した加速度バイアス、`kalman_*_innovation*`は各観測更新直前の残差とその有効性、`kalman_*_r_*`は現在の実効観測分散を表す。`raw_temperature`、`raw_pressure`、`temperature_c_x100`および`pressure_pa_x100`は同一のBMP581サンプル由来とする。BMP581の温度はLK8EX1へ送信せず、温度フィールドを `99` とする。ICM-42688P-HXYの温度は取得しない。system snapshotには少なくとも、timestamp、外部電源状態、実測電池電圧とそのvalid flag、BLE表示電圧とそのvalid flag、debounce後のSW1～SW3、電源OFF要求を含める。
 
-センサーから音声へのキューは長さ1とし、常に最新値で上書きする。`sensor_task`だけがvario snapshot、`system_task`だけがsystem snapshotを書き、BLEとコンソールはそれぞれをmutexまたは短いcritical sectionの下で構造体ごとコピーする。複数writerが古い構造体コピーで互いのフィールドを上書きしてはならない。ロックを保持したまま文字列整形、BLE送信またはUSB出力を行わない。状態変化イベントは最新snapshotと別の固定長診断キューへ置き、通常サンプルによって重要イベントが上書きされないようにする。
+センサーから音声へのキューは長さ1とし、最大100 Hzで常に最新値へ上書きする。vario snapshotとIMU診断snapshotも同じ最大100 Hzの公開境界で更新し、400 HzのIMU内部更新では共有mutexと音声キューを操作しない。`sensor_task`だけがvario snapshot、`system_task`だけがsystem snapshotを書き、BLEとコンソールはそれぞれをmutexまたは短いcritical sectionの下で構造体ごとコピーする。複数writerが古い構造体コピーで互いのフィールドを上書きしてはならない。ロックを保持したまま文字列整形、BLE送信またはUSB出力を行わない。状態変化イベントは最新snapshotと別の固定長診断キューへ置き、通常サンプルによって重要イベントが上書きされないようにする。
 
 ### モジュール分割
 
@@ -712,7 +713,7 @@ typedef struct {
 | `platform` | `config_json` | version 1 JSON codecと厳格validation |
 | `platform` | `config_storage` | wear levelling対応FAT、atomic保存、backup復旧 |
 | `platform` | `imu_calibration_storage` | `mc_data.json`の厳格検証、backup復旧、atomic保存 |
-| `platform` | `app_power` | 40/80 MHz DFS、センサーCPU lock、通常時Light-sleep禁止、安全停止時の解放、PM診断 |
+| `platform` | `app_power` | 40/80 MHz DFS、実サンプル処理限定のセンサーCPU lock、通常時Light-sleep禁止、安全停止時の解放、PM診断 |
 | `domain` | `app_config` | 既定値、値域検証、実行時設定 |
 | `app` | `main` / `startup` | 薄いESP-IDF入口と段階化した起動コーディネート |
 | `app` | `app_tasks` | task生成、core・priority・stack・ACK、起動状態管理 |
@@ -728,12 +729,12 @@ typedef struct {
 ### 初期化順序
 
 1. `PIN_PWR_HOLD`をHighにし、安全GPIO、LEDおよびブザーを安全な初期状態へ設定する。
-2. 実行中partitionのPENDING_VERIFY判定と起動Watchdog登録後、PENDING_VERIFYでなければSW2+SW3を30 ms + 2秒確認する。成立時は通常初期化を開始せずMSCリカバリーへ入り、PENDING_VERIFYではボタン判定を省略する。成立しない場合にboard identityを読込み、CPU1に一回限りの`startup_prep` taskを開始してブザー用LEDCを無音状態で初期化し、専用NVSの音量設定を読み込む。
+2. 実行中partitionのPENDING_VERIFY判定と起動Watchdog登録後、PENDING_VERIFYを含む全bootでSW2+SW3を30 ms + 2秒確認する。成立時は通常初期化やOTA確認を開始せずMSCリカバリーへ入り、成立しない場合にboard identityを読込み、CPU1に一回限りの`startup_prep` taskを開始してブザー用LEDCを無音状態で初期化し、専用NVSの音量設定を読み込む。
 3. 実行中partitionが`ESP_OTA_IMG_PENDING_VERIFY`の場合、またはRTC記録が正常な最初のTask/Interrupt WDT再起動の場合は`POWER_ON_WAIT`を省略して緑LEDを100 %にする。それ以外はCPU0でSW1を10 ms周期、30 ms継続の条件で判定し、`POWER_ON_HOLD_MS`の連続押下成立まで緑LEDを0→100 %で増光する。起動時からSW2を離したままSW3だけを2秒継続した場合は設定FATの明示format要求とし、途中で入力が変化した場合はformatしない。規定時間前にSW1を離した場合は`startup_prep`完了後に電源保持を解除し、給電が残る場合は`SAFE_STOP`へ入る。SW1確認成立時はWatchdog復帰回数を解除する。
 4. `startup_prep`完了後、保存音量または既定小音量で起動サウンドを同期再生する。NVSが全消去を必要とする場合は起動サウンド後に消去して1回だけ再初期化し、SW3だけのformat要求時は専用スイッチ設定を消去する。緑LEDは100 %を維持する。
 5. ボード設定を検証し、診断カウンタと単一テーブルのパラメータ既定値を準備する。ADC分圧定数、ICM-42688P-HXYの固定アドレス、識別値、I2C速度、ODRおよびrangeが本書の確定値と一致しない場合は該当機能を無効として診断へ示す。
 6. 最大80 MHz、最小40 MHz、Light-sleep許可でPMを初期化し、通常動作用Light-sleep禁止lockを取得する。初期化またはlock生成に失敗した場合は80 MHz固定・Light-sleep無効へ戻し、主要機能を継続する。
-7. SW3だけの明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、syncおよびMSC生成の各処理間で起動Task Watchdogを給餌する。mount失敗時は自動formatせず既定値で継続する。
+7. SW3だけの明示format要求がある場合だけ共有FATをformatする。ESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、sync、実行partitionの署名検証用hashおよびMSC生成の処理中に起動Task Watchdogを定期給餌する。mount失敗時は自動formatせず既定値で継続する。
 8. 電池ADCを一度だけ初期化し、GPIO42 Lowの場合は100 ms間隔、最大5 sampleで起動時電池電圧を取得する。有効かつ有限な電圧が3.2 V以下なら、起動サウンドおよび以降の通常初期化へ進まず`SAFE_STOP`へ移る。同じ測定値をOTA電源判定にも再利用し、`UPDATE.PND/BAD/TXT`を整理した後、GPIO42 High、または電池電圧が3.4 Vを超え、かつ `UPDATE.BIN`がある場合はimageを検証してinactive OTA slotへ書き、成功時は再起動する。OTA pending-verify起動にも3.2 Vの起動禁止は適用するが、3.4 VのOTA適用条件は再適用せず10秒の確認taskを開始する。
 9. TinyUSB CDCを開始して起動中の診断を可能にする。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外しまたはdetachではESP32側へ戻す。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
 10. キュー、mutex、Event Groupを生成する。必須同期オブジェクトを生成できない場合はブザーを停止したfatal stateへ入り、電源OFF操作だけを受理する。

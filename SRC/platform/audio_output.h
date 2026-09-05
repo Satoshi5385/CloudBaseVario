@@ -15,6 +15,7 @@ esp_err_t audio_output_init(void);
  * @param frequency_hz PWM frequency in hertz.
  * @param duty_percent PWM duty in percent.
  * @param amplifier_mode PAM8904E 1x, 2x, or 3x mode.
+ * @note Repeating the active command leaves LEDC and GPIO state unchanged.
  * @return ESP_OK on success, otherwise the first LEDC/GPIO error.
  */
 esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
@@ -22,5 +23,6 @@ esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
 
 /**
  * @brief Immediately force zero duty, pause the LEDC timer, and shut down the PAM8904E.
+ * @note Repeated calls after shutdown do not write the LEDC or amplifier GPIOs again.
  */
 void audio_output_shutdown(void);

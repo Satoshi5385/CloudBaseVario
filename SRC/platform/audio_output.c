@@ -22,6 +22,9 @@
 
 static bool timer_initialized = false;
 static bool timer_running = false;
+static uint32_t active_frequency_hz = 0U;
+static uint32_t active_duty_percent = 0U;
+static uint32_t active_amplifier_mode = 0U;
 
 esp_err_t audio_output_init(void) {
     ledc_timer_config_t timer_config = {
@@ -75,6 +78,11 @@ esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
         amplifier_mode > AUDIO_MAX_AMPLIFIER_MODE) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (timer_running && frequency_hz == active_frequency_hz &&
+        duty_percent == active_duty_percent &&
+        amplifier_mode == active_amplifier_mode) {
+        return ESP_OK;
+    }
 
     if (!timer_running) {
         ret = ledc_timer_resume(AUDIO_LEDC_MODE, AUDIO_LEDC_TIMER);
@@ -114,18 +122,30 @@ esp_err_t audio_output_apply(uint32_t frequency_hz, uint32_t duty_percent,
     }
     if (ret != ESP_OK) {
         audio_output_shutdown();
+    } else {
+        active_frequency_hz = frequency_hz;
+        active_duty_percent = duty_percent;
+        active_amplifier_mode = amplifier_mode;
     }
     return ret;
 }
 
 void audio_output_shutdown(void) {
-    if (timer_initialized) {
-        (void) ledc_set_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL, AUDIO_SILENT_DUTY);
-        (void) ledc_update_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL);
-        if (timer_running) {
-            (void) ledc_timer_pause(AUDIO_LEDC_MODE, AUDIO_LEDC_TIMER);
-            timer_running = false;
-        }
+    if (!timer_initialized) {
+        board_set_audio_shutdown();
+        return;
     }
+    if (!timer_running) {
+        return;
+    }
+
+    (void) ledc_set_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL,
+                         AUDIO_SILENT_DUTY);
+    (void) ledc_update_duty(AUDIO_LEDC_MODE, AUDIO_LEDC_CHANNEL);
+    (void) ledc_timer_pause(AUDIO_LEDC_MODE, AUDIO_LEDC_TIMER);
+    timer_running = false;
+    active_frequency_hz = 0U;
+    active_duty_percent = 0U;
+    active_amplifier_mode = 0U;
     board_set_audio_shutdown();
 }
