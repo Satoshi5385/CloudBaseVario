@@ -346,7 +346,7 @@ static void set_lifecycle_leds(uint32_t elapsed_ms, uint32_t sw1_hold_ms,
         .battery_valid = battery_valid,
         .ble_notify_active = ble_vario_notify_active(),
         .gps_installed = identity != NULL && identity->gps_installed == 1U,
-        .gps_fix_valid = (bits & APP_EVENT_GPS_FIX_VALID) != 0U,
+        .gps_fix_valid = app_resources_gps_fix_valid(),
     };
     system_led_policy_output_t output = {0};
 
@@ -2910,6 +2910,14 @@ static void console_diag_status(void) {
         " quiesce_timeouts=%" PRIu32 " writes=%" PRIu32
         " write_errors=%" PRIu32 " written_bytes=%" PRIu64
         " last_write_us=%" PRIu32 " max_write_us=%" PRIu32
+        " recovery_medium=%s recovery_config=%d recovery_config_error=%s"
+        " recovery_bytes=%" PRIu32
+        " psram_free_before=%" PRIu32 " psram_largest_before=%" PRIu32
+        " psram_free_after=%" PRIu32 " psram_largest_after=%" PRIu32
+        " psram_alloc_error=%s psram_reads=%" PRIu32
+        " psram_read_errors=%" PRIu32 " psram_read_bytes=%" PRIu64
+        " psram_writes=%" PRIu32 " psram_write_errors=%" PRIu32
+        " psram_written_bytes=%" PRIu64
         " stream_drops=%" PRIu32 "\r\n",
         usb.driver_ready, usb.cdc_ready, usb.msc_driver_ready,
         usb.msc_enabled,
@@ -2930,16 +2938,29 @@ static void console_diag_status(void) {
         usb.storage_mode_quiesce_timeout_count, usb.msc_write_count,
         usb.msc_write_error_count, usb.msc_written_bytes,
         usb.last_msc_write_duration_us, usb.max_msc_write_duration_us,
+        usb_device_recovery_medium_name(usb.recovery_medium),
+        usb.recovery_config_ready,
+        esp_err_to_name(usb.recovery_config_error),
+        usb.recovery_disk_size_bytes,
+        usb.psram_free_before_bytes, usb.psram_largest_before_bytes,
+        usb.psram_free_after_bytes, usb.psram_largest_after_bytes,
+        esp_err_to_name(usb.psram_allocation_error),
+        usb.psram_read_count, usb.psram_read_error_count,
+        usb.psram_read_bytes, usb.psram_write_count,
+        usb.psram_write_error_count, usb.psram_written_bytes,
         serial_monitor_drop_count);
     console_writef(
         "UPDATE state=%s error=%s size=%" PRIu32
-        " written=%" PRIu32 " confirm=%d workers=%d"
+        " written=%" PRIu32 " source=%s digest_verified=%d"
+        " confirm=%d workers=%d"
         " power_allowed=%d ext_power=%d battery_valid=%d"
         " battery_v=%.2f threshold_v=%.2f target=%s"
         " version=%s hash=%s fingerprint=%s\r\n",
         firmware_update_state_name(update.state),
         esp_err_to_name(update.last_error), update.image_size_bytes,
-        update.bytes_written, update.confirmation_required,
+        update.bytes_written,
+        firmware_update_source_name(update.source),
+        update.transfer_digest_verified, update.confirmation_required,
         update.required_workers_started, update.update_power_allowed,
         update.external_power_present, update.battery_valid,
         (double) update.battery_voltage_v,

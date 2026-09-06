@@ -16,6 +16,7 @@ idf_component_register(
         "domain/firmware_update_policy.c"
         "domain/firmware_authentication.c"
         "domain/firmware_metadata.c"
+        "domain/firmware_pending_record.c"
         "domain/gps_nmea.c"
         "domain/imu_calibration_controller.c"
         "domain/imu_fusion.c"

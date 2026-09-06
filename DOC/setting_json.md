@@ -63,10 +63,10 @@ PARAM SAVE
 ### 2.3 初期化
 
 - `setting.json` が存在しない場合、組込み既定値で起動し、MSC 公開前に既定値ファイルを自動生成します。
-- SW2 と SW3 を同時に押したまま電源を入れると、起動時判定後に config FAT をフォーマットし、既定の `setting.json` を生成するとともに、NVSのスイッチ設定だけを消去します。BLEなどが使用するNVS領域は消去しません。
-- `idf.py -p <PORT> config-flash` でも config FAT を初期化できます。
+- 起動時のスイッチ操作ではconfig FATを初期化しません。SW2+SW3は揮発性のPSRAM-backed `CBVUPDATE`だけを公開するMSCリカバリーモード専用で、SW3単独に初期化機能はありません。
+- config FATを初期化する場合は、開発環境から`idf.py -p <PORT> config-flash`を明示的に実行します。この操作はNVSのスイッチ設定を変更しません。
 
-フォーマットと `config-flash` は、`setting.json`、`mc_data.json`、更新関連ファイルを含む config FAT の保存内容を消去します。必要な値を退避してから実行してください。
+`config-flash`は、`setting.json`、`mc_data.json`、更新関連ファイルを含むconfig FATの保存内容を消去します。必要な値を退避してから実行してください。
 
 ## 3. JSON 構造
 

@@ -10,6 +10,11 @@
 #include "platform/config_storage.h"
 #include "platform/imu_calibration_storage.h"
 
+typedef enum {
+    USB_RECOVERY_MEDIUM_NONE = 0,
+    USB_RECOVERY_MEDIUM_PSRAM,
+} usb_recovery_medium_t;
+
 typedef struct {
     bool driver_ready;
     bool cdc_ready;
@@ -42,6 +47,21 @@ typedef struct {
     uint64_t msc_written_bytes;
     uint32_t last_msc_write_duration_us;
     uint32_t max_msc_write_duration_us;
+    usb_recovery_medium_t recovery_medium;
+    bool recovery_config_ready;
+    esp_err_t recovery_config_error;
+    uint32_t recovery_disk_size_bytes;
+    uint32_t psram_free_before_bytes;
+    uint32_t psram_largest_before_bytes;
+    uint32_t psram_free_after_bytes;
+    uint32_t psram_largest_after_bytes;
+    esp_err_t psram_allocation_error;
+    uint32_t psram_read_count;
+    uint32_t psram_read_error_count;
+    uint32_t psram_write_count;
+    uint32_t psram_write_error_count;
+    uint64_t psram_read_bytes;
+    uint64_t psram_written_bytes;
 } usb_device_diagnostics_t;
 
 typedef bool (*usb_storage_mode_begin_cb_t)(uint32_t timeout_ms, void *arg);
@@ -51,23 +71,28 @@ typedef void (*usb_storage_progress_cb_t)(void *arg);
 /**
  * @brief Prepare the shared FAT volume and load parameters before USB starts.
  *
- * A blank or damaged volume is never formatted implicitly. Formatting occurs
- * only when @p format_config_storage is true (the SW3-only boot gesture).
+ * A blank or damaged volume is never formatted by runtime firmware.
  * @p progress_cb is called between bounded storage operations and may be NULL.
  */
 esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
-                                  bool format_config_storage,
                                   usb_storage_progress_cb_t progress_cb,
                                   void *progress_arg);
 
 /**
- * @brief Prepare only the existing FAT volume and MSC transport for recovery.
+ * @brief Prepare the private config state mount and PSRAM recovery MSC.
  *
- * This path never formats the volume, loads setting.json, or creates generated
- * files. It leaves the valid FAT volume mounted for application inspection.
+ * This path never formats or exposes config Flash. It requires VBUS, creates a
+ * zero-filled 4 MiB PSRAM FAT volume at /update, and leaves both volumes owned
+ * by the application until recovery explicitly exposes the PSRAM LUN.
  */
 esp_err_t usb_device_recovery_storage_init(
     usb_storage_progress_cb_t progress_cb, void *progress_arg);
+
+/** Release the recovery-only PSRAM disk and its private config mount. */
+esp_err_t usb_device_recovery_storage_deinit(void);
+
+/** Return true when recovery may persist status and pending state to config. */
+bool usb_device_recovery_storage_ready(void);
 
 /** Start the self-powered TinyUSB CDC + MSC composite device. */
 esp_err_t usb_device_start(void);
@@ -129,6 +154,9 @@ bool usb_device_cdc_connected(void);
 /** Return true while VBUS or an enumerated USB connection is present. */
 bool usb_device_bus_active(void);
 
+/** Return the raw USB VBUS GPIO state. */
+bool usb_device_vbus_present(void);
+
 /**
  * @brief Lock the application-owned FAT volume for a bounded operation.
  *
@@ -142,8 +170,14 @@ void usb_device_storage_end_app_io(void);
 /** Return the mounted application path. */
 const char *usb_device_storage_mount_path(void);
 
+/** Return the recovery-only PSRAM FAT mount path. */
+const char *usb_device_recovery_mount_path(void);
+
 /** Snapshot TinyUSB and shared-storage diagnostics. */
 void usb_device_get_diagnostics(usb_device_diagnostics_t *diagnostics);
 
 /** Return the diagnostic name of a shared-storage owner. */
 const char *usb_device_storage_owner_name(usb_storage_owner_t owner);
+
+/** Return the diagnostic name of the recovery storage medium. */
+const char *usb_device_recovery_medium_name(usb_recovery_medium_t medium);

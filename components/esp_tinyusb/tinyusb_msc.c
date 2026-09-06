@@ -21,6 +21,7 @@
 #include "class/msc/msc_device.h"
 
 #include "storage_spiflash.h"
+#include "storage_psram.h"
 #include "msc_storage.h"
 #include "tinyusb_msc.h"
 
@@ -216,6 +217,46 @@ static inline bool _msc_storage_map_to_lun(msc_storage_obj_t *storage)
     return true;
 }
 
+static bool msc_storage_range_valid(const msc_storage_obj_t *storage,
+                                    uint32_t lba, uint32_t offset,
+                                    size_t size)
+{
+    size_t address;
+    size_t end;
+    size_t capacity;
+
+    return storage != NULL && storage->sector_size != 0U &&
+           !__builtin_umul_overflow((size_t) lba,
+                                    (size_t) storage->sector_size,
+                                    &address) &&
+           !__builtin_uadd_overflow(address, (size_t) offset, &address) &&
+           !__builtin_uadd_overflow(address, size, &end) &&
+           !__builtin_umul_overflow((size_t) storage->sector_count,
+                                    (size_t) storage->sector_size,
+                                    &capacity) &&
+           end <= capacity;
+}
+
+static bool msc_psram_buffer_valid(
+    const tinyusb_msc_psram_config_t *config)
+{
+    uintptr_t start;
+    uintptr_t end;
+
+    if (config == NULL || config->buffer == NULL ||
+        config->size_bytes == 0U || config->sector_size == 0U ||
+        config->size_bytes % config->sector_size != 0U) {
+        return false;
+    }
+    start = (uintptr_t) config->buffer;
+    if (config->size_bytes - 1U > UINTPTR_MAX - start) {
+        return false;
+    }
+    end = start + config->size_bytes - 1U;
+    return esp_ptr_external_ram((const void *) start) &&
+           esp_ptr_external_ram((const void *) end);
+}
+
 /**
  * @brief Unmap a storage object from a specific LUN
  * This function disassociates a storage object from a logical unit number (LUN).
@@ -274,6 +315,9 @@ static inline esp_err_t msc_storage_read_sector(uint8_t lun, uint32_t lba, uint3
         ESP_LOGE(TAG, "Storage not found for LUN %d", lun);
         return ESP_ERR_NOT_FOUND;
     }
+    ESP_RETURN_ON_FALSE(msc_storage_range_valid(storage, lba, offset, size),
+                        ESP_ERR_INVALID_SIZE, TAG,
+                        "READ(10) range exceeds storage medium");
     // Otherwise, take the lock and proceed with the read
     xSemaphoreTake(storage->mux_lock, portMAX_DELAY);
     ret = storage->medium->read(lba, offset, size, dest);
@@ -500,15 +544,12 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
         return ESP_ERR_NOT_FOUND;
     }
 
-    // As we defer the write operation to the TinyUSB task, we need to ensure that
-    // the address does not overflow for SPI Flash storage medium
-    if (storage->medium->type == STORAGE_MEDIUM_TYPE_SPIFLASH) {
-        size_t addr = 0; // Address of the data to be read, relative to the beginning of the partition.
-        size_t temp = 0;
-        size_t sector_size = storage->sector_size;
-        ESP_RETURN_ON_FALSE(!__builtin_umul_overflow(lba, sector_size, &temp), ESP_ERR_INVALID_SIZE, TAG, "overflow lba %lu sector_size %u", lba, sector_size);
-        ESP_RETURN_ON_FALSE(!__builtin_uadd_overflow(temp, offset, &addr), ESP_ERR_INVALID_SIZE, TAG, "overflow addr %u offset %lu", temp, offset);
-    }
+    ESP_RETURN_ON_FALSE(msc_storage_range_valid(storage, lba, offset, size),
+                        ESP_ERR_INVALID_SIZE, TAG,
+                        "WRITE(10) range exceeds storage medium");
+    ESP_RETURN_ON_FALSE(size <= sizeof(storage->storage_buffer.data_buffer),
+                        ESP_ERR_INVALID_SIZE, TAG,
+                        "WRITE(10) exceeds internal transfer buffer");
 
     // Copy data to the buffer
     memcpy((void *)storage->storage_buffer.data_buffer, src, size);
@@ -535,10 +576,13 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
     return ESP_OK;
 }
 
-static esp_err_t vfs_fat_format(BYTE format_flags)
+static esp_err_t vfs_fat_format(const char *drv, BYTE format_flags)
 {
     esp_err_t ret;
     FRESULT fresult;
+
+    ESP_RETURN_ON_FALSE(drv != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Format drive is NULL");
     // Drive does not have a filesystem, try to format it
     const size_t workbuf_size = 4096;
     void *workbuf = ff_memalloc(workbuf_size);
@@ -551,7 +595,7 @@ static esp_err_t vfs_fat_format(BYTE format_flags)
     ESP_LOGD(TAG, "Format drive, allocation unit size=%d", alloc_unit_size);
 
     const MKFS_PARM opt = {format_flags, 0, 0, 0, alloc_unit_size};
-    fresult = f_mkfs("", &opt, workbuf, workbuf_size); // Use default volume
+    fresult = f_mkfs(drv, &opt, workbuf, workbuf_size);
     if (fresult != FR_OK) {
         ret = ESP_FAIL;
         ESP_LOGE(TAG, "Unable to create default volume, (%d)", fresult);
@@ -670,8 +714,8 @@ static esp_err_t msc_storage_mount(msc_storage_obj_t *storage)
         }
         ESP_LOGW(TAG, "Mount failed, trying to format the drive");
         BYTE format_flags = storage->fat_fs.format_flags;
-        ESP_GOTO_ON_ERROR(vfs_fat_format(format_flags), fail, TAG, "Failed to format the drive");
-        ESP_GOTO_ON_ERROR(vfs_fat_mount(drv, fs, false), fail, TAG, "Failed to mount FAT filesystem");
+        ESP_GOTO_ON_ERROR(vfs_fat_format(drv, format_flags), fail, TAG, "Failed to format the drive");
+        ESP_GOTO_ON_ERROR(vfs_fat_mount(drv, fs, true), fail, TAG, "Failed to mount FAT filesystem");
         ESP_LOGD(TAG, "Format completed, FAT mounted successfully");
     } else if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to mount drive, %s", esp_err_to_name(ret));
@@ -877,12 +921,19 @@ static esp_err_t msc_storage_new(const tinyusb_msc_storage_config_t *config,
 {
     esp_err_t ret;
     BaseType_t task_created;
+    uint32_t storage_caps = MALLOC_CAP_DMA;
+
+    if (medium->type == STORAGE_MEDIUM_TYPE_PSRAM) {
+        storage_caps |= MALLOC_CAP_INTERNAL;
+    }
 
     // Create mutex for storage operations
     SemaphoreHandle_t mux_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(mux_lock != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create mutex for storage operations");
     // Create storage object
-    msc_storage_obj_t *storage_obj = (msc_storage_obj_t *)heap_caps_aligned_calloc(MSC_STORAGE_MEM_ALIGN, 1, sizeof(msc_storage_obj_t), MALLOC_CAP_DMA);
+    msc_storage_obj_t *storage_obj = (msc_storage_obj_t *)
+        heap_caps_aligned_calloc(MSC_STORAGE_MEM_ALIGN, 1,
+                                 sizeof(msc_storage_obj_t), storage_caps);
     if (storage_obj == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for MSC storage");
         ret = ESP_ERR_NO_MEM;
@@ -1195,6 +1246,92 @@ driver_err:
     return ret;
 }
 
+esp_err_t tinyusb_msc_new_storage_psram(
+    const tinyusb_msc_storage_config_t *config,
+    const tinyusb_msc_psram_config_t *psram_config,
+    tinyusb_msc_storage_handle_t *handle)
+{
+    ESP_RETURN_ON_FALSE(config != NULL && psram_config != NULL,
+                        ESP_ERR_INVALID_ARG, TAG, "Invalid PSRAM storage config");
+    ESP_RETURN_ON_FALSE(msc_psram_buffer_valid(psram_config),
+                        ESP_ERR_INVALID_ARG, TAG,
+                        "PSRAM storage requires an external-RAM buffer");
+    ESP_RETURN_ON_FALSE(
+                            CONFIG_TINYUSB_MSC_BUFSIZE >=
+                                psram_config->sector_size,
+                        ESP_ERR_NOT_SUPPORTED, TAG,
+                        "TinyUSB buffer is smaller than PSRAM sector size");
+
+    bool need_to_install_driver = false;
+    const storage_medium_t *medium = NULL;
+    msc_storage_obj_t *storage = NULL;
+    esp_err_t ret;
+    bool mapped = false;
+
+    MSC_ENTER_CRITICAL();
+    if (p_msc_driver == NULL) {
+        need_to_install_driver = true;
+    }
+    MSC_EXIT_CRITICAL();
+    if (need_to_install_driver) {
+        tinyusb_msc_driver_config_t default_cfg = {
+            .callback = msc_storage_event_default_cb,
+        };
+        ret = msc_driver_install(&default_cfg, true);
+        if (ret != ESP_OK) {
+            goto driver_err;
+        }
+    }
+    ret = storage_psram_open_medium(psram_config, &medium);
+    if (ret != ESP_OK) {
+        goto medium_err;
+    }
+    ret = msc_storage_new(config, medium, &storage);
+    if (ret != ESP_OK) {
+        goto storage_err;
+    }
+    MSC_ENTER_CRITICAL();
+    if (!_msc_storage_map_to_lun(storage)) {
+        MSC_EXIT_CRITICAL();
+        ret = ESP_FAIL;
+        goto map_err;
+    }
+    mapped = true;
+    MSC_EXIT_CRITICAL();
+    if (config->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
+        ret = msc_storage_mount(storage);
+        if (ret != ESP_OK) {
+            goto map_err;
+        }
+    }
+    if (handle != NULL) {
+        *handle = (tinyusb_msc_storage_handle_t) storage;
+    }
+    return ESP_OK;
+
+map_err:
+    if (mapped) {
+        MSC_ENTER_CRITICAL();
+        (void) _msc_storage_unmap_from_lun(storage);
+        MSC_EXIT_CRITICAL();
+    }
+    msc_storage_delete(storage);
+storage_err:
+    medium->close();
+medium_err:
+    if (need_to_install_driver) {
+        (void) tinyusb_msc_uninstall_driver();
+    }
+driver_err:
+    return ret;
+}
+
+void tinyusb_msc_get_psram_diagnostics(
+    tinyusb_msc_psram_diagnostics_t *diagnostics)
+{
+    storage_psram_get_diagnostics(diagnostics);
+}
+
 #if (SOC_SDMMC_HOST_SUPPORTED)
 esp_err_t tinyusb_msc_new_storage_sdmmc(const tinyusb_msc_storage_config_t *config,
                                         tinyusb_msc_storage_handle_t *handle)
@@ -1450,8 +1587,8 @@ esp_err_t tinyusb_msc_format_storage(tinyusb_msc_storage_handle_t handle)
     // Mount the FAT FS
     ret = vfs_fat_mount(drv, fs, true);
     ESP_RETURN_ON_FALSE(ret == ESP_ERR_NOT_FOUND, ESP_ERR_NOT_FOUND, TAG, "Unexpected filesystem found on the drive");
-    ESP_RETURN_ON_ERROR(vfs_fat_format(storage->fat_fs.format_flags), TAG, "Failed to format the drive");
-    ESP_RETURN_ON_ERROR(vfs_fat_mount(drv, fs, false), TAG, "Failed to mount FAT filesystem");
+    ESP_RETURN_ON_ERROR(vfs_fat_format(drv, storage->fat_fs.format_flags), TAG, "Failed to format the drive");
+    ESP_RETURN_ON_ERROR(vfs_fat_mount(drv, fs, true), TAG, "Failed to mount FAT filesystem");
 
     ESP_LOGD(TAG, "Storage formatted successfully");
     return ESP_OK;

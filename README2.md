@@ -19,11 +19,13 @@ idf.py build
 7桁Git hashを組み合わせてimageへ埋め込みます。未コミット変更の有無はhashへ
 含めないため、実際のバイナリ内容を厳密に識別するときはSHA-256も併用します。
 
-SW2とSW3を同時に押したまま電源ONすると設定FATをformatできます。
-両スイッチは電源投入から1秒程度押し続けてください。format後は組込み既定値の
-`setting.json`が自動生成されます。
+USB外部給電を接続し、SW2とSW3を同時に押したまま電源ONして2秒間保持すると、
+PSRAM-backed MSCリカバリーモードへ入ります。このモードでは揮発性の4 MiB
+`CBVUPDATE`だけを公開し、設定Flashの`CBVARIO`や設定ファイルは公開・format
+しません。署名済み`UPDATE.BIN`をコピーして安全な取り外しを実行した後も、
+自動更新と再起動が完了するまではUSBを抜かないでください。
 
-以後の通常のファームウェア更新では `flash` だけを実行します。通常起動またはFAT mount失敗時に自動formatは行いません。FATをmountできない場合もバリオ、BLE、音声およびTinyUSB CDCは起動を継続し、MSCは「メディアなし」として安全に応答します。この状態は `DIAG STATUS` の `msc_driver=1 msc_media=0` と `storage_error` で確認できます。FATを復旧するには、SW2とSW3による起動時初期化または `config-flash` を実行してください。
+以後の通常のファームウェア更新では `flash` だけを実行します。通常起動、起動時のスイッチ操作またはFAT mount失敗時に設定FATの自動formatは行いません。FATをmountできない場合もバリオ、BLE、音声およびTinyUSB CDCは起動を継続し、MSCは「メディアなし」として安全に応答します。この状態は `DIAG STATUS` の `msc_driver=1 msc_media=0` と `storage_error` で確認できます。設定FATを再作成する場合は、開発環境から明示的に`idf.py -p <PORT> config-flash`を実行してください。SW3単独にも設定FATの初期化機能はありません。
 
 FATが正常な場合、TinyUSB CDCのCOMポートは起動処理の早い段階から利用できます。初回IMU校正、OTA確認および起動時ファイル処理が完了するまでは、config FATをESP32側の`APP_OWNED`に維持し、MSC媒体はhostへ公開しません。全ゲート完了後、同じUSB接続のMSCドライブを有効化して`HOST_OWNED`へ切り替えます。MSCをhostが所有している間、`PARAM SAVE`は `ERR SAVE BUSY`を返します。安全な取り外しまたはUSB切断後にESP32側へremountします。
 
@@ -35,7 +37,7 @@ SW1による明示的な電源OFFでは、USB給電が残っていてもMSC書�
 
 `mc_data.json`がない初回水平校正中にSW3を3秒長押しすると、その起動に限って校正をスキップします。未保存の校正候補は破棄され、IMUを停止して気圧単独で動作し、正式ビルドではMSC媒体を公開します。`mc_data.json`や設定ファイルへスキップ状態を保存しないため、次回起動では初回水平校正を再び要求します。校正中の3秒未満のSW3操作は、ボタンを離した時点で次のパラメータセットへ切り替えます。
 
-wear levelling Performance modeを使用していた旧ファームウェアから更新した実機では、Safety modeへの変更により既存FATをmountできない場合があります。その場合は必要な設定値を事前に控え、SW2とSW3による起動時初期化または `config-flash` を実行してください。
+wear levelling Performance modeを使用していた旧ファームウェアから更新した実機では、Safety modeへの変更により既存FATをmountできない場合があります。その場合は必要な設定値を事前に控え、開発環境から`idf.py -p <PORT> config-flash`を実行してください。
 
 TinyUSB CDCのCOMポートを指定してモニターを開始します。
 

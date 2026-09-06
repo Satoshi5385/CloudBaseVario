@@ -58,6 +58,9 @@ bool app_resources_publish_gps(const gps_snapshot_t *snapshot);
 /** Copy the latest complete GPS diagnostic and NMEA snapshot. */
 bool app_resources_copy_gps(gps_snapshot_t *snapshot);
 
+/** Read the latest published GPS-fix state without taking the GPS mutex. */
+bool app_resources_gps_fix_valid(void);
+
 /**
  * @brief Replace the complete HXY IMU diagnostic snapshot.
  * @param[in] diagnostics Complete diagnostic state to publish.

@@ -28,7 +28,8 @@
 #define APP_EVENT_IMU_ACCEL_CALIBRATION_REQUIRED BIT21
 #define APP_EVENT_IMU_ACCEL_CALIBRATION_SKIP_REQUEST BIT22
 #define APP_EVENT_IMU_ACCEL_CALIBRATION_SKIPPED BIT23
-#define APP_EVENT_GPS_FIX_VALID BIT24
+
+/* FreeRTOS reserves BIT24 through BIT31 for Event Group control data. */
 
 #define APP_EVENT_ALL_TASK_ACKS                                                   \
     (APP_EVENT_AUDIO_ACK | APP_EVENT_SENSOR_ACK | APP_EVENT_SYSTEM_ACK |          \

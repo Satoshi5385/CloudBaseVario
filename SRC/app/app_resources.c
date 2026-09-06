@@ -26,6 +26,7 @@ static EventGroupHandle_t app_event_group = NULL;
 /* Complete latest-value snapshots protected by their respective mutexes. */
 static vario_result_t latest_vario;
 static gps_snapshot_t latest_gps;
+static bool latest_gps_fix_valid;
 static imu_diagnostics_t latest_imu_diagnostics;
 static system_snapshot_t latest_system;
 static app_config_profiles_t latest_profiles;
@@ -83,6 +84,7 @@ static void app_resources_release_partial(void) {
 esp_err_t app_resources_init(void) {
     memset(&latest_vario, 0, sizeof(latest_vario));
     memset(&latest_gps, 0, sizeof(latest_gps));
+    __atomic_store_n(&latest_gps_fix_valid, false, __ATOMIC_RELAXED);
     memset(&latest_imu_diagnostics, 0, sizeof(latest_imu_diagnostics));
     memset(&latest_system, 0, sizeof(latest_system));
     app_config_profiles_set_defaults(&latest_profiles);
@@ -168,8 +170,15 @@ bool app_resources_publish_gps(const gps_snapshot_t *snapshot) {
         return false;
     }
     latest_gps = *snapshot;
+    __atomic_store_n(&latest_gps_fix_valid,
+                     snapshot->installed && snapshot->fix_valid,
+                     __ATOMIC_RELEASE);
     (void) xSemaphoreGive(gps_mutex);
     return true;
+}
+
+bool app_resources_gps_fix_valid(void) {
+    return __atomic_load_n(&latest_gps_fix_valid, __ATOMIC_ACQUIRE);
 }
 
 bool app_resources_copy_gps(gps_snapshot_t *snapshot) {

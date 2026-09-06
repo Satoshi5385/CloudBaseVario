@@ -36,6 +36,8 @@ if(CONFIG_TINYUSB_MSC_ENABLED)
     list(APPEND srcs
         "tinyusb_msc.c"
         "storage_spiflash.c"
+        "storage_psram.c"
+        "storage_psram_buffer.c"
         )
     if(CONFIG_SOC_SDMMC_HOST_SUPPORTED)
         list(APPEND srcs

@@ -91,7 +91,7 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
         start = MAIN_SOURCE.index(
             "static startup_power_on_result_t startup_power_on_confirmed("
         )
-        end = MAIN_SOURCE.index("static bool startup_config_format_requested", start)
+        end = MAIN_SOURCE.index("void app_startup_run(void)", start)
         wait_function = MAIN_SOURCE[start:end]
 
         self.assertIn("SYSTEM_POLICY_SAMPLE_PERIOD_MS UINT32_C(10)", SYSTEM_POLICY_HEADER)
@@ -114,7 +114,7 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
         self.assertIn("board_set_status_leds_brightness(", wait_function)
         self.assertIn("system_policy_power_on_brightness(", wait_function)
         self.assertIn("result.confirmed = true;", wait_function)
-        self.assertIn("result.config_format_requested", wait_function)
+        self.assertNotIn("config_format", wait_function)
         self.assertGreaterEqual(wait_function.count("return result;"), 2)
 
     def test_startup_preparation_runs_on_core_one_without_early_nvs_erase(self) -> None:

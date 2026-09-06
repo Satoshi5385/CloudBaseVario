@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 #include "soc/soc_caps.h"
 #include "esp_err.h"
 #include "wear_levelling.h"
@@ -23,6 +24,24 @@ extern "C" {
  * @brief Opaque handle for a TinyUSB MSC storage instance.
  */
 typedef struct tinyusb_msc_storage_s *tinyusb_msc_storage_handle_t;
+
+#define TINYUSB_MSC_PDRV_INVALID UINT8_MAX
+
+typedef struct {
+    uint8_t *buffer;
+    size_t size_bytes;
+    uint32_t sector_size;
+} tinyusb_msc_psram_config_t;
+
+typedef struct {
+    uint8_t drive_number;
+    uint32_t read_count;
+    uint32_t read_error_count;
+    uint32_t write_count;
+    uint32_t write_error_count;
+    uint64_t read_bytes;
+    uint64_t written_bytes;
+} tinyusb_msc_psram_diagnostics_t;
 
 /**
  * @brief TinyUSB MSC storage mount point.
@@ -171,6 +190,30 @@ esp_err_t tinyusb_msc_uninstall_driver(void);
  */
 esp_err_t tinyusb_msc_new_storage_spiflash(const tinyusb_msc_storage_config_t *config,
                                            tinyusb_msc_storage_handle_t *handle);
+
+/**
+ * @brief Create a TinyUSB MSC storage instance backed by a PSRAM buffer.
+ *
+ * The caller owns the buffer and must keep it allocated until the storage is
+ * deleted. The buffer size must be an exact multiple of the sector size.
+ *
+ * @param[in] config Common FAT and mount configuration.
+ * @param[in] psram_config PSRAM buffer and geometry.
+ * @param[out] handle Optional output for the created storage handle.
+ * @return ESP_OK on success, or an argument, state, memory, or mount error.
+ */
+esp_err_t tinyusb_msc_new_storage_psram(
+    const tinyusb_msc_storage_config_t *config,
+    const tinyusb_msc_psram_config_t *psram_config,
+    tinyusb_msc_storage_handle_t *handle);
+
+/**
+ * @brief Snapshot PSRAM medium read/write counters.
+ *
+ * @param[out] diagnostics Destination diagnostics structure.
+ */
+void tinyusb_msc_get_psram_diagnostics(
+    tinyusb_msc_psram_diagnostics_t *diagnostics);
 
 #if (SOC_SDMMC_HOST_SUPPORTED)
 /**

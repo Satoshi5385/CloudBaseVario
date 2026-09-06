@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "app/app_resources.h"
 #include "app/app_tasks.h"
@@ -111,12 +113,14 @@
 
 #define EXPECTED_FLASH_SIZE_BYTES UINT32_C(16777216)
 #define EXPECTED_PSRAM_SIZE_BYTES UINT32_C(8388608)
-#define STARTUP_FORMAT_SAMPLE_PERIOD_MS SYSTEM_POLICY_SAMPLE_PERIOD_MS
 #define STARTUP_POWER_SAMPLE_PERIOD_MS SYSTEM_POLICY_SAMPLE_PERIOD_MS
 #define STARTUP_MODE_HOLD_MS UINT32_C(2000)
 #define STARTUP_RECOVERY_HOLD_MS \
     (STARTUP_MODE_HOLD_MS + SYSTEM_POLICY_SWITCH_DEBOUNCE_MS)
 #define RECOVERY_STORAGE_RELEASE_WAIT_MS UINT32_C(100)
+#define RECOVERY_COMMAND_CAPACITY 32U
+#define RECOVERY_RX_CAPACITY 64U
+#define RECOVERY_DIAGNOSTIC_CAPACITY 768U
 #define STARTUP_PREP_TASK_STACK_BYTES UINT32_C(4096)
 #define STARTUP_PREP_TASK_PRIORITY ((UBaseType_t) 5U)
 #define STARTUP_PREP_TASK_CORE ((BaseType_t) 1)
@@ -127,7 +131,6 @@
 
 typedef struct {
     bool confirmed;
-    bool config_format_requested;
 } startup_power_on_result_t;
 
 typedef enum {
@@ -195,11 +198,103 @@ static startup_boot_gesture_t startup_recovery_gesture(void) {
     return STARTUP_BOOT_GESTURE_AMBIGUOUS;
 }
 
+static void recovery_write_diagnostics(void) {
+    usb_device_diagnostics_t usb = {0};
+    firmware_update_diagnostics_t update = {0};
+    char text[RECOVERY_DIAGNOSTIC_CAPACITY];
+    int length;
+
+    usb_device_get_diagnostics(&usb);
+    firmware_update_get_diagnostics(&update);
+    length = snprintf(
+        text, sizeof(text),
+        "RECOVERY medium=%s config_ready=%d config_error=%s"
+        " disk_bytes=%" PRIu32 " psram_free_before=%" PRIu32
+        " psram_largest_before=%" PRIu32
+        " psram_free_after=%" PRIu32
+        " psram_largest_after=%" PRIu32 " allocation_error=%s"
+        " reads=%" PRIu32 " read_bytes=%" PRIu64
+        " read_errors=%" PRIu32 " writes=%" PRIu32
+        " written_bytes=%" PRIu64 " write_errors=%" PRIu32 "\r\n"
+        "UPDATE state=%s error=%s source=%s size=%" PRIu32
+        " written=%" PRIu32 " digest_verified=%d target=%s"
+        " version=%s hash=%s fingerprint=%s\r\n",
+        usb_device_recovery_medium_name(usb.recovery_medium),
+        usb.recovery_config_ready,
+        esp_err_to_name(usb.recovery_config_error),
+        usb.recovery_disk_size_bytes, usb.psram_free_before_bytes,
+        usb.psram_largest_before_bytes, usb.psram_free_after_bytes,
+        usb.psram_largest_after_bytes,
+        esp_err_to_name(usb.psram_allocation_error),
+        usb.psram_read_count, usb.psram_read_bytes,
+        usb.psram_read_error_count, usb.psram_write_count,
+        usb.psram_written_bytes, usb.psram_write_error_count,
+        firmware_update_state_name(update.state),
+        esp_err_to_name(update.last_error),
+        firmware_update_source_name(update.source),
+        update.image_size_bytes, update.bytes_written,
+        update.transfer_digest_verified, update.target_partition,
+        update.image_version, update.image_hash,
+        update.image_fingerprint);
+    if (length > 0 && (size_t) length < sizeof(text)) {
+        (void) usb_device_write(text);
+    }
+}
+
+static void recovery_service_cdc(void) {
+    static char command[RECOVERY_COMMAND_CAPACITY];
+    static size_t command_length;
+    uint8_t input[RECOVERY_RX_CAPACITY];
+    size_t input_length;
+
+    while (usb_device_read(input, sizeof(input), &input_length)) {
+        for (size_t index = 0U; index < input_length; index++) {
+            uint8_t value = input[index];
+
+            if (value == '\r' || value == '\n') {
+                command[command_length] = '\0';
+                if (strcmp(command, "DIAG STATUS") == 0) {
+                    recovery_write_diagnostics();
+                }
+                command_length = 0U;
+            } else if (value >= UINT8_C(0x20) &&
+                       value <= UINT8_C(0x7e)) {
+                if (command_length + 1U < sizeof(command)) {
+                    command[command_length] = (char) value;
+                    command_length += 1U;
+                } else {
+                    command_length = 0U;
+                }
+            }
+        }
+    }
+}
+
 static void recovery_stop(esp_err_t error, const char *message) {
+    esp_err_t stop_result;
+    esp_err_t deinit_result;
+
     if (message != NULL) {
         ESP_LOGE(TAG, "%s: %s", message, esp_err_to_name(error));
     }
-    (void) usb_device_stop();
+    do {
+        stop_result = usb_device_stop();
+        if (stop_result != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(RECOVERY_STORAGE_RELEASE_WAIT_MS));
+            feed_startup_watchdog();
+        }
+    } while (stop_result == ESP_ERR_INVALID_STATE ||
+             stop_result == ESP_ERR_NOT_FINISHED);
+    if (stop_result == ESP_OK) {
+        deinit_result = usb_device_recovery_storage_deinit();
+        if (deinit_result != ESP_OK) {
+            ESP_LOGE(TAG, "recovery PSRAM release failed: %s",
+                     esp_err_to_name(deinit_result));
+        }
+    } else {
+        ESP_LOGE(TAG, "recovery USB stop failed: %s",
+                 esp_err_to_name(stop_result));
+    }
     board_set_status_leds(false, true);
     (void) board_set_power_hold(false);
     for (;;) {
@@ -223,14 +318,7 @@ static void run_recovery_mode(void) {
         report_startup_storage_progress, NULL);
     feed_startup_watchdog();
     if (ret != ESP_OK) {
-        recovery_stop(ret, "recovery config FAT initialization failed");
-    }
-
-    ret = firmware_update_process_recovery(true);
-    feed_startup_watchdog();
-    if (ret != ESP_ERR_NOT_FOUND && ret != ESP_OK) {
-        ESP_LOGW(TAG, "stored recovery update rejected: %s",
-                 esp_err_to_name(ret));
+        recovery_stop(ret, "recovery PSRAM MSC initialization failed");
     }
 
     ret = usb_device_start_recovery();
@@ -243,6 +331,10 @@ static void run_recovery_mode(void) {
     for (;;) {
         uint32_t release_count;
 
+        if (!system_io_external_power_present()) {
+            recovery_stop(ESP_ERR_INVALID_STATE,
+                          "USB VBUS lost during recovery");
+        }
         board_set_status_leds(false, true);
         usb_device_get_diagnostics(&diagnostics);
         release_count = diagnostics.host_release_count;
@@ -254,6 +346,7 @@ static void run_recovery_mode(void) {
         do {
             ret = usb_device_wait_for_host_release(
                 release_count, RECOVERY_STORAGE_RELEASE_WAIT_MS);
+            recovery_service_cdc();
             feed_startup_watchdog();
             if (!system_io_external_power_present()) {
                 recovery_stop(ESP_ERR_INVALID_STATE,
@@ -264,8 +357,17 @@ static void run_recovery_mode(void) {
             recovery_stop(ret, "recovery MSC ownership failed");
         }
 
+        if (!usb_device_recovery_storage_ready()) {
+            ESP_LOGW(TAG,
+                     "recovery update disabled because config state storage is unavailable");
+            continue;
+        }
         ret = firmware_update_process_recovery(true);
         feed_startup_watchdog();
+        if (!system_io_external_power_present()) {
+            recovery_stop(ESP_ERR_INVALID_STATE,
+                          "USB VBUS lost during recovery update");
+        }
         if (ret == ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "safe eject completed without UPDATE.BIN");
         } else if (ret != ESP_OK) {
@@ -399,15 +501,10 @@ static bool startup_read_battery(float *battery_voltage_v) {
     return false;
 }
 
-static startup_power_on_result_t startup_power_on_confirmed(
-    bool format_allowed) {
+static startup_power_on_result_t startup_power_on_confirmed(void) {
     system_policy_button_t sw1 = {0};
     startup_power_on_result_t result = {0};
     uint32_t hold_time_ms = 0U;
-    uint32_t format_hold_time_ms = 0U;
-    bool format_eligible = format_allowed &&
-                           !system_io_sw2_pressed() &&
-                           system_io_sw3_pressed();
 
     sw1.candidate_pressed = board_is_sw1_pressed();
     sw1.stable_pressed = sw1.candidate_pressed;
@@ -417,22 +514,6 @@ static startup_power_on_result_t startup_power_on_confirmed(
     for (;;) {
         bool pressed = system_policy_debounce(&sw1,
                                               board_is_sw1_pressed());
-        bool format_pressed =
-            !system_io_sw2_pressed() && system_io_sw3_pressed();
-
-        if (!format_pressed) {
-            format_eligible = false;
-        }
-        if (format_eligible) {
-            if (UINT32_MAX - format_hold_time_ms <
-                STARTUP_FORMAT_SAMPLE_PERIOD_MS) {
-                format_hold_time_ms = UINT32_MAX;
-            } else {
-                format_hold_time_ms += STARTUP_FORMAT_SAMPLE_PERIOD_MS;
-            }
-        } else {
-            format_hold_time_ms = 0U;
-        }
 
         if (sw1.stable_valid && !pressed) {
             board_set_status_leds(false, false);
@@ -448,13 +529,8 @@ static startup_power_on_result_t startup_power_on_confirmed(
                 system_policy_power_on_brightness(
                     hold_time_ms, POWER_ON_HOLD_MS),
                 false);
-            if (hold_time_ms >= POWER_ON_HOLD_MS &&
-                (!format_eligible ||
-                 format_hold_time_ms >= STARTUP_MODE_HOLD_MS)) {
+            if (hold_time_ms >= POWER_ON_HOLD_MS) {
                 result.confirmed = true;
-                result.config_format_requested =
-                    format_eligible &&
-                    format_hold_time_ms >= STARTUP_MODE_HOLD_MS;
                 return result;
             }
         } else {
@@ -465,32 +541,11 @@ static startup_power_on_result_t startup_power_on_confirmed(
     }
 }
 
-static bool startup_config_format_requested(bool format_allowed) {
-    uint32_t stable_time_ms = 0U;
-
-    if (!format_allowed || system_io_sw2_pressed() ||
-        !system_io_sw3_pressed()) {
-        return false;
-    }
-    for (;;) {
-        if (system_io_sw2_pressed() || !system_io_sw3_pressed()) {
-            return false;
-        }
-        if (stable_time_ms >= STARTUP_MODE_HOLD_MS) {
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(STARTUP_FORMAT_SAMPLE_PERIOD_MS));
-        feed_startup_watchdog();
-        stable_time_ms += STARTUP_FORMAT_SAMPLE_PERIOD_MS;
-    }
-}
-
 void app_startup_run(void) {
     esp_err_t ret = board_init_power_hold();
     board_identity_t board_identity = {0};
     board_identity_storage_diagnostics_t board_identity_diagnostics = {0};
     bool board_valid = false;
-    bool config_format_requested = false;
     bool nvs_ready = false;
     bool update_confirmation_required = false;
     bool usb_msc_gate_required = false;
@@ -513,7 +568,6 @@ void app_startup_run(void) {
     esp_err_t usb_result = ESP_OK;
     esp_err_t startup_gate_result = ESP_OK;
     esp_err_t startup_sound_result = ESP_OK;
-    esp_err_t switch_clear_result = ESP_OK;
     esp_err_t nvs_result = ESP_OK;
     esp_err_t system_io_result = ESP_ERR_INVALID_STATE;
     firmware_update_diagnostics_t update_diagnostics = {0};
@@ -568,14 +622,9 @@ void app_startup_run(void) {
         board_set_status_leds_brightness(100U, false);
     } else if (watchdog_boot_action != WATCHDOG_BOOT_REQUIRE_SW1) {
         board_set_status_leds_brightness(100U, false);
-        config_format_requested = startup_config_format_requested(
-            boot_gesture == STARTUP_BOOT_GESTURE_NONE);
     } else {
         watchdog_service_mark_stage(WATCHDOG_STAGE_POWER_ON_WAIT);
-        power_on_result = startup_power_on_confirmed(
-            boot_gesture == STARTUP_BOOT_GESTURE_NONE);
-        config_format_requested =
-            power_on_result.config_format_requested;
+        power_on_result = startup_power_on_confirmed();
         if (!power_on_result.confirmed) {
             wait_for_startup_preparation(startup_preparation_started);
             app_tasks_run_safe_stop();
@@ -593,10 +642,6 @@ void app_startup_run(void) {
         startup_preparation_result.switch_preferences;
     switch_load_result =
         startup_preparation_result.switch_load_result;
-    if (config_format_requested) {
-        switch_preferences_set_defaults(&switch_preferences);
-        switch_load_result = SWITCH_PREFERENCES_LOAD_NOT_FOUND;
-    }
 
     board_valid = board_config_is_valid();
     if (!board_valid) {
@@ -644,17 +689,6 @@ void app_startup_run(void) {
             switch_load_result = SWITCH_PREFERENCES_LOAD_NOT_FOUND;
         }
     }
-    if (nvs_ready && config_format_requested) {
-        switch_clear_result = switch_preferences_clear();
-        if (switch_clear_result != ESP_OK) {
-            switch_preferences_dirty = true;
-        }
-    }
-
-    if (config_format_requested) {
-        ESP_LOGW(TAG, "SW3 startup request: config FAT will be formatted");
-    }
-
     ret = app_power_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "power management entered safe fallback: %s", esp_err_to_name(ret));
@@ -662,7 +696,6 @@ void app_startup_run(void) {
 
     storage_result =
         usb_device_storage_init(&startup_runtime_profiles,
-                                config_format_requested,
                                 report_startup_storage_progress, NULL);
     feed_startup_watchdog();
     if (storage_result != ESP_OK) {
@@ -743,12 +776,7 @@ void app_startup_run(void) {
                  esp_err_to_name(nvs_result));
         post_peripheral_failure(nvs_result);
     }
-    if (switch_clear_result != ESP_OK) {
-            ESP_LOGW(TAG, "switch preferences could not be cleared: %s",
-                     esp_err_to_name(switch_clear_result));
-            post_peripheral_failure(switch_clear_result);
-    }
-    if (nvs_ready && !config_format_requested) {
+    if (nvs_ready) {
         if (switch_load_result != SWITCH_PREFERENCES_LOAD_OK &&
             switch_load_result != SWITCH_PREFERENCES_LOAD_LEGACY &&
             switch_load_result != SWITCH_PREFERENCES_LOAD_NOT_FOUND) {

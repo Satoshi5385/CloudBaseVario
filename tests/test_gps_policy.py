@@ -8,6 +8,11 @@ GPS_WORKER = (ROOT / "SRC/app/gps_worker.c").read_text(encoding="utf-8")
 GPS_PLATFORM = (ROOT / "SRC/platform/gps_l96.c").read_text(encoding="utf-8")
 APP_WORKERS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
 APP_TASKS = (ROOT / "SRC/app/app_tasks.c").read_text(encoding="utf-8")
+APP_EVENTS = (ROOT / "SRC/app/app_events.h").read_text(encoding="utf-8")
+APP_RESOURCES = (ROOT / "SRC/app/app_resources.c").read_text(encoding="utf-8")
+APP_RESOURCES_HEADER = (ROOT / "SRC/app/app_resources.h").read_text(
+    encoding="utf-8"
+)
 BLE_PLATFORM = (ROOT / "SRC/platform/ble_vario.c").read_text(encoding="utf-8")
 BLE_WORKER = (ROOT / "SRC/app/ble_tx_worker.c").read_text(encoding="utf-8")
 BLE_NUS_TX = (ROOT / "SRC/domain/ble_nus_tx.c").read_text(encoding="utf-8")
@@ -91,8 +96,19 @@ class GpsPolicyTests(unittest.TestCase):
             "(!input->gps_installed || input->gps_fix_valid)", SYSTEM_POLICY
         )
         self.assertIn(".gps_installed = identity != NULL", APP_WORKERS)
-        self.assertIn(".gps_fix_valid = (bits & APP_EVENT_GPS_FIX_VALID)", APP_WORKERS)
-        self.assertIn("APP_EVENT_GPS_FIX_VALID", GPS_WORKER)
+        self.assertIn(".gps_fix_valid = app_resources_gps_fix_valid()", APP_WORKERS)
+        self.assertIn("bool app_resources_gps_fix_valid(void);", APP_RESOURCES_HEADER)
+        self.assertIn("__atomic_store_n(&latest_gps_fix_valid", APP_RESOURCES)
+        self.assertIn("__atomic_load_n(&latest_gps_fix_valid", APP_RESOURCES)
+        self.assertNotIn("APP_EVENT_GPS_FIX_VALID", GPS_WORKER)
+
+    def test_event_group_uses_only_freertos_user_bits(self) -> None:
+        event_bits = re.findall(r"#define APP_EVENT_[A-Z0-9_]+ BIT(\d+)", APP_EVENTS)
+
+        self.assertTrue(event_bits)
+        self.assertEqual(len(event_bits), len(set(event_bits)))
+        self.assertLessEqual(max(map(int, event_bits)), 23)
+        self.assertIn("reserves BIT24 through BIT31", APP_EVENTS)
 
     def test_gps_monitor_record_is_independent_from_baro(self) -> None:
         self.assertIn('"GPS installed=%d identified=%d', APP_WORKERS)

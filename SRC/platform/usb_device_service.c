@@ -11,16 +11,19 @@
 #include "domain/board_info.h"
 #include "domain/firmware_metadata.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_psram.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/platform_util.h"
 #include "platform/board.h"
 #include "platform/imu_calibration_storage.h"
 #include "platform/firmware_auth.h"
@@ -35,6 +38,13 @@
 #define CONFIG_PARTITION_LABEL "config"
 #define CONFIG_MOUNT_PATH "/config"
 #define CONFIG_VOLUME_LABEL "CBVARIO"
+#define RECOVERY_MOUNT_PATH "/update"
+#define RECOVERY_VOLUME_LABEL "CBVUPDATE"
+#define RECOVERY_README_FILENAME "README.TXT"
+#define RECOVERY_RESULT_FILENAME "UPDATE_RESULT.TXT"
+#define RECOVERY_RESULT_TEMP_FILENAME "UPDATE.TMP"
+#define RECOVERY_DISK_BYTES UINT32_C(4194304)
+#define RECOVERY_SECTOR_BYTES UINT32_C(512)
 #define INFO_FILENAME "INFO.TXT"
 #define SETTING_EDITOR_FILENAME "setting_editor.html"
 #define GENERATED_FILE_PATH_CAPACITY 32U
@@ -63,6 +73,9 @@ static bool usb_stopping;
 static bool console_redirect_ready;
 static wl_handle_t wear_levelling_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t msc_storage;
+static uint8_t *recovery_psram_buffer;
+static bool recovery_config_mounted;
+static bool recovery_storage_active;
 static esp_timer_handle_t storage_mode_idle_timer;
 static usb_storage_mode_begin_cb_t storage_mode_begin_cb;
 static usb_storage_mode_end_cb_t storage_mode_end_cb;
@@ -91,7 +104,16 @@ static usb_device_diagnostics_t usb_diagnostics = {
     },
     .last_storage_error = ESP_ERR_INVALID_STATE,
     .last_save_result = ESP_ERR_INVALID_STATE,
+    .recovery_config_error = ESP_ERR_INVALID_STATE,
+    .psram_allocation_error = ESP_ERR_INVALID_STATE,
 };
+
+static const char recovery_readme[] =
+    "CloudBaseVario PSRAM recovery volume\r\n"
+    "\r\n"
+    "Copy the signed UPDATE.BIN to this drive, then use the operating\r\n"
+    "system's safe-eject action. Keep USB connected until the device\r\n"
+    "restarts. Files on this volume are lost when USB power is removed.\r\n";
 
 static const tusb_desc_device_t usb_device_descriptor = {
     .bLength = sizeof(tusb_desc_device_t),
@@ -301,6 +323,127 @@ static void report_storage_progress(usb_storage_progress_cb_t progress_cb,
     if (progress_cb != NULL) {
         progress_cb(progress_arg);
     }
+}
+
+static esp_err_t write_recovery_text_file_at(const char *mount_path,
+                                             const char *filename,
+                                             const char *contents) {
+    char path[GENERATED_FILE_PATH_CAPACITY];
+    FILE *file;
+    size_t length;
+    int path_length;
+    esp_err_t ret = ESP_OK;
+
+    if (mount_path == NULL || filename == NULL || contents == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    path_length = snprintf(path, sizeof(path), "%s/%s",
+                           mount_path, filename);
+    if (path_length <= 0 || (size_t) path_length >= sizeof(path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return ESP_FAIL;
+    }
+    length = strlen(contents);
+    if (fwrite(contents, 1U, length, file) != length ||
+        fflush(file) != 0 || fsync(fileno(file)) != 0) {
+        ret = ESP_FAIL;
+    }
+    if (fclose(file) != 0 && ret == ESP_OK) {
+        ret = ESP_FAIL;
+    }
+    return ret;
+}
+
+static esp_err_t write_recovery_text_file(const char *filename,
+                                          const char *contents) {
+    return write_recovery_text_file_at(RECOVERY_MOUNT_PATH, filename,
+                                       contents);
+}
+
+static esp_err_t write_recovery_init_failure_status(esp_err_t error) {
+    char status[160];
+    char result_path[GENERATED_FILE_PATH_CAPACITY];
+    char temp_path[GENERATED_FILE_PATH_CAPACITY];
+    int status_length;
+    int result_path_length;
+    int temp_path_length;
+    esp_err_t ret;
+
+    status_length = snprintf(
+        status, sizeof(status),
+        "state=REJECTED\r\n"
+        "reason=recovery storage initialization failed\r\n"
+        "error=%s\r\nsource=PSRAM\r\n",
+        esp_err_to_name(error));
+    result_path_length = snprintf(
+        result_path, sizeof(result_path), "%s/%s", CONFIG_MOUNT_PATH,
+        RECOVERY_RESULT_FILENAME);
+    temp_path_length = snprintf(
+        temp_path, sizeof(temp_path), "%s/%s", CONFIG_MOUNT_PATH,
+        RECOVERY_RESULT_TEMP_FILENAME);
+    if (status_length <= 0 || (size_t) status_length >= sizeof(status) ||
+        result_path_length <= 0 ||
+        (size_t) result_path_length >= sizeof(result_path) ||
+        temp_path_length <= 0 ||
+        (size_t) temp_path_length >= sizeof(temp_path)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    ret = write_recovery_text_file_at(
+        CONFIG_MOUNT_PATH, RECOVERY_RESULT_TEMP_FILENAME, status);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    (void) unlink(result_path);
+    if (rename(temp_path, result_path) != 0) {
+        (void) unlink(temp_path);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t seed_recovery_volume(void) {
+    const esp_app_desc_t *app = esp_app_get_description();
+    firmware_metadata_t metadata = {0};
+    tinyusb_msc_psram_diagnostics_t psram = {0};
+    char label[16];
+    char info[192];
+    int length;
+    esp_err_t ret;
+
+    tinyusb_msc_get_psram_diagnostics(&psram);
+    if (psram.drive_number == TINYUSB_MSC_PDRV_INVALID) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    length = snprintf(label, sizeof(label), "%u:%s",
+                      (unsigned int) psram.drive_number,
+                      RECOVERY_VOLUME_LABEL);
+    if (length <= 0 || (size_t) length >= sizeof(label) ||
+        f_setlabel(label) != FR_OK) {
+        return ESP_FAIL;
+    }
+    if (app != NULL) {
+        (void) firmware_metadata_parse(app->version, sizeof(app->version),
+                                       &metadata);
+    } else {
+        (void) firmware_metadata_parse(NULL, 0U, &metadata);
+    }
+    length = snprintf(
+        info, sizeof(info),
+        "CloudBaseVario recovery\r\nmedium=PSRAM\r\nvolatile=1\r\n"
+        "version=%s\r\nhash=%s\r\n",
+        metadata.version, metadata.git_hash);
+    if (length <= 0 || (size_t) length >= sizeof(info)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    ret = write_recovery_text_file(INFO_FILENAME, info);
+    if (ret == ESP_OK) {
+        ret = write_recovery_text_file(RECOVERY_README_FILENAME,
+                                       recovery_readme);
+    }
+    return ret;
 }
 
 static esp_err_t generated_file_matches(
@@ -830,7 +973,6 @@ static esp_err_t create_msc_storage(
 }
 
 esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
-                                  bool format_config_storage,
                                   usb_storage_progress_cb_t progress_cb,
                                   void *progress_arg) {
     esp_vfs_fat_mount_config_t mount_config = {
@@ -850,22 +992,6 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
     ret = initialize_storage_service();
     if (ret != ESP_OK) {
         return ret;
-    }
-
-    if (format_config_storage) {
-        esp_vfs_fat_mount_config_t format_config = mount_config;
-        format_config.format_if_mount_failed = true;
-        report_storage_progress(progress_cb, progress_arg);
-        ret = esp_vfs_fat_spiflash_format_cfg_rw_wl(
-            CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &format_config);
-        report_storage_progress(progress_cb, progress_arg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "explicit config FAT format failed: %s",
-                     esp_err_to_name(ret));
-            set_storage_unavailable(ret);
-            return ret;
-        }
-        ESP_LOGW(TAG, "config FAT formatted by SW3 startup request");
     }
 
     report_storage_progress(progress_cb, progress_arg);
@@ -936,14 +1062,202 @@ esp_err_t usb_device_storage_init(app_config_profiles_t *profiles,
 
 esp_err_t usb_device_recovery_storage_init(
     usb_storage_progress_cb_t progress_cb, void *progress_arg) {
+    esp_vfs_fat_mount_config_t config_mount = {
+        .format_if_mount_failed = false,
+        .max_files = 6,
+        .allocation_unit_size = 4096,
+        .use_one_fat = false,
+    };
+    tinyusb_msc_storage_config_t storage_config = {
+        .fat_fs = {
+            .base_path = RECOVERY_MOUNT_PATH,
+            .config = {
+                .format_if_mount_failed = true,
+                .max_files = 4,
+                .allocation_unit_size = 4096,
+                .use_one_fat = false,
+            },
+            .do_not_format = false,
+            .format_flags = FM_ANY,
+        },
+        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
+    };
+    tinyusb_msc_psram_config_t psram_config = {
+        .buffer = NULL,
+        .size_bytes = RECOVERY_DISK_BYTES,
+        .sector_size = RECOVERY_SECTOR_BYTES,
+    };
+    char config_error_status[160];
+    int status_length;
     esp_err_t ret;
 
+    if (gpio_get_level(PIN_PWR_EXT) == 0 || recovery_storage_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
     report_storage_progress(progress_cb, progress_arg);
     ret = initialize_storage_service();
     if (ret != ESP_OK) {
         return ret;
     }
-    return create_msc_storage(progress_cb, progress_arg);
+
+    report_storage_progress(progress_cb, progress_arg);
+    ret = esp_vfs_fat_spiflash_mount_rw_wl(
+        CONFIG_MOUNT_PATH, CONFIG_PARTITION_LABEL, &config_mount,
+        &wear_levelling_handle);
+    recovery_config_mounted = ret == ESP_OK;
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.recovery_config_ready = recovery_config_mounted;
+    usb_diagnostics.recovery_config_error = ret;
+    if (!recovery_config_mounted) {
+        usb_diagnostics.last_storage_error = ret;
+    }
+    usb_diagnostics.psram_free_before_bytes = (uint32_t)
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    usb_diagnostics.psram_largest_before_bytes = (uint32_t)
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM |
+                                         MALLOC_CAP_8BIT);
+    portEXIT_CRITICAL(&state_lock);
+
+    if (!esp_psram_is_initialized() || gpio_get_level(PIN_PWR_EXT) == 0) {
+        ret = ESP_ERR_INVALID_STATE;
+        goto fail;
+    }
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) <
+            RECOVERY_DISK_BYTES ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM |
+                                         MALLOC_CAP_8BIT) <
+            RECOVERY_DISK_BYTES) {
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
+    /*
+     * CODING_RULES_DYNAMIC_MEMORY: recovery owns one bounded, short-lived
+     * four-MiB PSRAM disk. It is allocated only with USB VBUS present and is
+     * released when recovery stops or the device restarts.
+     */
+    recovery_psram_buffer = heap_caps_calloc(
+        1U, RECOVERY_DISK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (recovery_psram_buffer == NULL) {
+        ret = ESP_ERR_NO_MEM;
+        goto fail;
+    }
+    if (gpio_get_level(PIN_PWR_EXT) == 0) {
+        ret = ESP_ERR_INVALID_STATE;
+        goto fail;
+    }
+    psram_config.buffer = recovery_psram_buffer;
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.psram_free_after_bytes = (uint32_t)
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    usb_diagnostics.psram_largest_after_bytes = (uint32_t)
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM |
+                                         MALLOC_CAP_8BIT);
+    usb_diagnostics.psram_allocation_error = ESP_OK;
+    portEXIT_CRITICAL(&state_lock);
+
+    report_storage_progress(progress_cb, progress_arg);
+    ret = tinyusb_msc_new_storage_psram(&storage_config, &psram_config,
+                                        &msc_storage);
+    if (ret != ESP_OK) {
+        goto fail;
+    }
+    report_storage_progress(progress_cb, progress_arg);
+    ret = seed_recovery_volume();
+    if (ret != ESP_OK) {
+        goto fail;
+    }
+    if (gpio_get_level(PIN_PWR_EXT) == 0) {
+        ret = ESP_ERR_INVALID_STATE;
+        goto fail;
+    }
+    if (!recovery_config_mounted) {
+        status_length = snprintf(
+            config_error_status, sizeof(config_error_status),
+            "state=REJECTED\r\nreason=config storage unavailable\r\n"
+            "error=%s\r\nsource=PSRAM\r\n",
+            esp_err_to_name(usb_diagnostics.recovery_config_error));
+        if (status_length > 0 &&
+            (size_t) status_length < sizeof(config_error_status)) {
+            (void) write_recovery_text_file(
+                "UPDATE_RESULT.TXT", config_error_status);
+        }
+    }
+    recovery_storage_active = true;
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.recovery_medium = USB_RECOVERY_MEDIUM_PSRAM;
+    usb_diagnostics.recovery_disk_size_bytes = RECOVERY_DISK_BYTES;
+    portEXIT_CRITICAL(&state_lock);
+    return ESP_OK;
+
+fail:
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.psram_allocation_error = ret;
+    usb_diagnostics.last_storage_error = ret;
+    portEXIT_CRITICAL(&state_lock);
+    if (recovery_config_mounted) {
+        esp_err_t status_result =
+            write_recovery_init_failure_status(ret);
+
+        if (status_result != ESP_OK) {
+            ESP_LOGW(TAG, "recovery failure status write failed: %s",
+                     esp_err_to_name(status_result));
+        }
+    }
+    (void) usb_device_recovery_storage_deinit();
+    return ret;
+}
+
+esp_err_t usb_device_recovery_storage_deinit(void) {
+    esp_err_t first_error = ESP_OK;
+    esp_err_t ret;
+
+    if (msc_storage != NULL) {
+        ret = tinyusb_msc_delete_storage(msc_storage);
+        if (ret == ESP_OK) {
+            msc_storage = NULL;
+        } else {
+            first_error = ret;
+        }
+    }
+    if (msc_storage == NULL) {
+        ret = tinyusb_msc_uninstall_driver();
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED &&
+            first_error == ESP_OK) {
+            first_error = ret;
+        }
+    }
+    if (recovery_config_mounted) {
+        ret = esp_vfs_fat_spiflash_unmount_rw_wl(
+            CONFIG_MOUNT_PATH, wear_levelling_handle);
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;
+        }
+        if (ret == ESP_OK) {
+            recovery_config_mounted = false;
+            wear_levelling_handle = WL_INVALID_HANDLE;
+        }
+    }
+    if (recovery_psram_buffer != NULL && msc_storage == NULL) {
+        mbedtls_platform_zeroize(recovery_psram_buffer,
+                                 RECOVERY_DISK_BYTES);
+        heap_caps_free(recovery_psram_buffer);
+        recovery_psram_buffer = NULL;
+    }
+    recovery_storage_active = false;
+    portENTER_CRITICAL(&state_lock);
+    usb_diagnostics.msc_driver_ready = false;
+    usb_diagnostics.msc_media_ready = false;
+    usb_diagnostics.storage_ready = false;
+    usb_diagnostics.storage_owner = USB_STORAGE_UNAVAILABLE;
+    usb_diagnostics.recovery_medium = USB_RECOVERY_MEDIUM_NONE;
+    usb_diagnostics.recovery_config_ready = false;
+    usb_diagnostics.recovery_disk_size_bytes = 0U;
+    portEXIT_CRITICAL(&state_lock);
+    return first_error;
+}
+
+bool usb_device_recovery_storage_ready(void) {
+    return recovery_storage_active && recovery_config_mounted;
 }
 
 static esp_err_t start_usb_device(bool recovery_mode) {
@@ -1431,18 +1745,42 @@ bool usb_device_bus_active(void) {
     return attached || gpio_get_level(PIN_PWR_EXT) != 0;
 }
 
+bool usb_device_vbus_present(void) {
+    return gpio_get_level(PIN_PWR_EXT) != 0;
+}
+
 const char *usb_device_storage_mount_path(void) {
     return CONFIG_MOUNT_PATH;
 }
 
+const char *usb_device_recovery_mount_path(void) {
+    return RECOVERY_MOUNT_PATH;
+}
+
 void usb_device_get_diagnostics(usb_device_diagnostics_t *diagnostics) {
+    tinyusb_msc_psram_diagnostics_t psram = {0};
+
     if (diagnostics == NULL) {
         return;
     }
+    tinyusb_msc_get_psram_diagnostics(&psram);
     portENTER_CRITICAL(&state_lock);
     usb_diagnostics.vbus_present = gpio_get_level(PIN_PWR_EXT) != 0;
+    usb_diagnostics.psram_read_count = psram.read_count;
+    usb_diagnostics.psram_read_error_count = psram.read_error_count;
+    usb_diagnostics.psram_write_count = psram.write_count;
+    usb_diagnostics.psram_write_error_count = psram.write_error_count;
+    usb_diagnostics.psram_read_bytes = psram.read_bytes;
+    usb_diagnostics.psram_written_bytes = psram.written_bytes;
     *diagnostics = usb_diagnostics;
     portEXIT_CRITICAL(&state_lock);
+}
+
+const char *usb_device_recovery_medium_name(usb_recovery_medium_t medium) {
+    if (medium == USB_RECOVERY_MEDIUM_PSRAM) {
+        return "PSRAM";
+    }
+    return "NONE";
 }
 
 const char *usb_device_storage_owner_name(usb_storage_owner_t owner) {

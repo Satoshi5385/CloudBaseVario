@@ -18,6 +18,12 @@ typedef enum {
     FIRMWARE_UPDATE_STORAGE_BUSY,
 } firmware_update_state_t;
 
+typedef enum {
+    FIRMWARE_UPDATE_SOURCE_NONE = 0,
+    FIRMWARE_UPDATE_SOURCE_FLASH,
+    FIRMWARE_UPDATE_SOURCE_PSRAM,
+} firmware_update_source_t;
+
 typedef struct {
     firmware_update_state_t state;
     esp_err_t last_error;
@@ -28,6 +34,8 @@ typedef struct {
     bool external_power_present;
     bool battery_valid;
     bool update_power_allowed;
+    bool transfer_digest_verified;
+    firmware_update_source_t source;
     float battery_voltage_v;
     float minimum_battery_voltage_v;
     char target_partition[17];
@@ -85,3 +93,6 @@ void firmware_update_get_diagnostics(
 
 /** Return the diagnostic name of a firmware update state. */
 const char *firmware_update_state_name(firmware_update_state_t state);
+
+/** Return the diagnostic name of an update input medium. */
+const char *firmware_update_source_name(firmware_update_source_t source);

@@ -13,6 +13,9 @@ UPDATE_HEADER = (ROOT / "SRC/platform/firmware_update.h").read_text(
     encoding="utf-8"
 )
 SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+DEVELOPER_README = (ROOT / "README2.md").read_text(encoding="utf-8")
+SETTING_GUIDE = (ROOT / "DOC/setting_json.md").read_text(encoding="utf-8")
 
 
 def body(source: str, start_text: str, end_text: str) -> str:
@@ -45,25 +48,23 @@ class RecoveryModePolicyTests(unittest.TestCase):
         self.assertLess(recovery, identity)
         self.assertLess(identity, preparation)
 
-    def test_sw3_only_is_the_destructive_format_gesture(self) -> None:
+    def test_sw3_only_cannot_format_runtime_storage(self) -> None:
         power_wait = body(
             STARTUP,
             "static startup_power_on_result_t startup_power_on_confirmed(",
-            "static bool startup_config_format_requested",
-        )
-        automatic = body(
-            STARTUP,
-            "static bool startup_config_format_requested",
             "void app_startup_run(void)",
         )
+        normal_storage = body(
+            USB,
+            "esp_err_t usb_device_storage_init(",
+            "esp_err_t usb_device_recovery_storage_init(",
+        )
 
-        for helper in (power_wait, automatic):
-            self.assertIn("system_io_sw2_pressed()", helper)
-            self.assertIn("system_io_sw3_pressed()", helper)
-            self.assertIn("STARTUP_MODE_HOLD_MS", helper)
-        self.assertIn("!system_io_sw2_pressed()", power_wait)
-        self.assertIn("boot_gesture == STARTUP_BOOT_GESTURE_NONE", STARTUP)
-        self.assertIn("SW3 startup request: config FAT will be formatted", STARTUP)
+        self.assertNotIn("system_io_sw3_pressed()", power_wait)
+        self.assertNotIn("config_format_requested", STARTUP)
+        self.assertNotIn("esp_vfs_fat_spiflash_format_cfg_rw_wl", normal_storage)
+        self.assertNotIn("format_if_mount_failed = true", normal_storage)
+        self.assertNotIn("switch_preferences_clear()", STARTUP)
 
     def test_recovery_skips_normal_startup_services(self) -> None:
         recovery = body(
@@ -85,7 +86,7 @@ class RecoveryModePolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, recovery)
 
-    def test_recovery_storage_does_not_generate_or_format_files(self) -> None:
+    def test_recovery_storage_uses_only_zeroed_psram_for_the_lun(self) -> None:
         recovery_storage = body(
             USB,
             "esp_err_t usb_device_recovery_storage_init(",
@@ -93,14 +94,21 @@ class RecoveryModePolicyTests(unittest.TestCase):
         )
 
         self.assertIn("initialize_storage_service();", recovery_storage)
-        self.assertIn("create_msc_storage(progress_cb, progress_arg)", recovery_storage)
+        self.assertIn("tinyusb_msc_new_storage_psram", recovery_storage)
+        self.assertIn("heap_caps_calloc(", recovery_storage)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", recovery_storage)
+        self.assertIn("RECOVERY_DISK_BYTES", recovery_storage)
+        self.assertIn("RECOVERY_SECTOR_BYTES", recovery_storage)
+        self.assertIn("seed_recovery_volume();", recovery_storage)
+        self.assertIn("esp_vfs_fat_spiflash_mount_rw_wl(", recovery_storage)
+        self.assertNotIn("create_msc_storage(", recovery_storage)
+        self.assertNotIn("tinyusb_msc_new_storage_spiflash", recovery_storage)
         for forbidden in (
             "write_info_file",
             "write_setting_editor_file",
             "config_storage_load",
             "config_storage_save",
             "esp_vfs_fat_spiflash_format_cfg_rw_wl",
-            "f_setlabel",
         ):
             self.assertNotIn(forbidden, recovery_storage)
 
@@ -140,16 +148,13 @@ class RecoveryModePolicyTests(unittest.TestCase):
             "static void run_recovery_mode(void)",
             "static bool nvs_recovery_required",
         )
-        initial_update = recovery.index("firmware_update_process_recovery(true)")
         usb_start = recovery.index("usb_device_start_recovery();")
         release_wait = recovery.index("usb_device_wait_for_host_release(")
-        later_update = recovery.index(
-            "firmware_update_process_recovery(true)", initial_update + 1
-        )
+        update = recovery.index("firmware_update_process_recovery(true)")
 
-        self.assertLess(initial_update, usb_start)
         self.assertLess(usb_start, release_wait)
-        self.assertLess(release_wait, later_update)
+        self.assertLess(release_wait, update)
+        self.assertEqual(1, recovery.count("firmware_update_process_recovery(true)"))
         self.assertIn("RECOVERY_STORAGE_RELEASE_WAIT_MS UINT32_C(100)", STARTUP)
         self.assertIn("feed_startup_watchdog();", recovery)
         self.assertGreaterEqual(recovery.count("system_io_external_power_present()"), 2)
@@ -166,11 +171,15 @@ class RecoveryModePolicyTests(unittest.TestCase):
             "static void confirmation_task",
         )
 
-        self.assertIn("inspect_image(UPDATE_INPUT_NAME", process)
+        self.assertIn("inspect_input_image(UPDATE_INPUT_NAME", process)
         self.assertIn("apply_update(&image_info)", process)
         self.assertIn("report_missing_input", process)
         self.assertIn("return ESP_ERR_NOT_FOUND;", process)
-        self.assertIn("return process_update(true, false, 0.0f, true);", recovery_wrapper)
+        self.assertIn("usb_device_recovery_storage_ready()", recovery_wrapper)
+        self.assertIn(
+            "return process_update(&psram_source_context, true, false, 0.0f, true);",
+            recovery_wrapper,
+        )
         self.assertIn(
             "esp_err_t firmware_update_process_recovery(bool external_power_present);",
             UPDATE_HEADER,
@@ -181,6 +190,23 @@ class RecoveryModePolicyTests(unittest.TestCase):
         self.assertIn("SW3", SPEC)
         self.assertIn("RECOVERY", SPEC)
         self.assertIn("ROM Download Mode", SPEC)
+        self.assertIn("CBVUPDATE", SPEC)
+        self.assertIn("PSRAM-backed", SPEC)
+
+    def test_user_documents_do_not_offer_switch_formatting(self) -> None:
+        documents = (README, DEVELOPER_README, SETTING_GUIDE)
+
+        for document in documents:
+            self.assertIn("CBVUPDATE", document)
+            self.assertIn("PSRAM-backed", document)
+            self.assertNotIn("SW2とSW3による起動時初期化", document)
+            self.assertNotIn(
+                "SW2とSW3を同時に押したまま電源ONすると設定FATをformat",
+                document,
+            )
+        self.assertIn("SW3単独の起動操作では設定用ドライブを初期化しません", README)
+        self.assertIn("SW3単独にも設定FATの初期化機能はありません", DEVELOPER_README)
+        self.assertIn("SW3単独に初期化機能はありません", SETTING_GUIDE)
 
 
 if __name__ == "__main__":

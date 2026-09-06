@@ -72,10 +72,10 @@ class SwitchPreferencesPolicyTests(unittest.TestCase):
         self.assertIn("nvs_erase_key(handle, SWITCH_PREFERENCES_KEY)", clear)
         self.assertNotIn("nvs_flash_erase", clear)
 
-    def test_boot_loads_or_clears_only_switch_preferences(self) -> None:
+    def test_boot_loads_without_switch_triggered_preference_clear(self) -> None:
         self.assertIn("switch_preferences_set_defaults(&switch_preferences)", MAIN_SOURCE)
-        self.assertIn("nvs_ready && config_format_requested", MAIN_SOURCE)
-        self.assertIn("switch_preferences_clear()", MAIN_SOURCE)
+        self.assertNotIn("config_format_requested", MAIN_SOURCE)
+        self.assertNotIn("switch_preferences_clear()", MAIN_SOURCE)
         self.assertIn(
             "switch_preferences_load(\n                &startup_preparation_result.switch_preferences)",
             MAIN_SOURCE,

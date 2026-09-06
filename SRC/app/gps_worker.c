@@ -33,17 +33,7 @@ static void increment_counter(uint32_t *counter) {
 }
 
 static void publish(const gps_snapshot_t *snapshot) {
-    EventGroupHandle_t event_group = app_resources_event_group();
-
     (void) app_resources_publish_gps(snapshot);
-    if (event_group == NULL) {
-        return;
-    }
-    if (snapshot->installed && snapshot->fix_valid) {
-        (void) xEventGroupSetBits(event_group, APP_EVENT_GPS_FIX_VALID);
-    } else {
-        (void) xEventGroupClearBits(event_group, APP_EVENT_GPS_FIX_VALID);
-    }
 }
 
 static bool is_rmc_sentence(const char *line) {
