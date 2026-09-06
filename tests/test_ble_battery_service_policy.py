@@ -28,12 +28,10 @@ BLE_SPEC = (ROOT / "DOC/BLE_IF.md").read_text(encoding="utf-8")
 
 def battery_level_from_voltage(voltage: float) -> int:
     curve = (
-        (3.20, 0),
-        (3.50, 10),
-        (3.60, 20),
-        (3.70, 40),
-        (3.80, 60),
-        (3.90, 80),
+        (3.10, 0),
+        (3.20, 3),
+        (3.35, 10),
+        (3.70, 50),
         (4.10, 100),
     )
     if not math.isfinite(voltage) or voltage <= curve[0][0]:
@@ -72,23 +70,24 @@ def update_battery_level(previous: int, voltage: float, valid: bool) -> int:
 class BleBatteryServicePolicyTests(unittest.TestCase):
     def test_voltage_to_percent_contract(self) -> None:
         self.assertEqual(battery_level_from_voltage(2.9), 0)
-        self.assertEqual(battery_level_from_voltage(3.2), 0)
-        self.assertEqual(battery_level_from_voltage(3.5), 10)
-        self.assertEqual(battery_level_from_voltage(3.6), 20)
-        self.assertEqual(battery_level_from_voltage(3.7), 40)
-        self.assertEqual(battery_level_from_voltage(3.8), 60)
-        self.assertEqual(battery_level_from_voltage(3.9), 80)
-        self.assertEqual(battery_level_from_voltage(4.0), 90)
+        self.assertEqual(battery_level_from_voltage(3.1), 0)
+        self.assertEqual(battery_level_from_voltage(3.2), 3)
+        self.assertEqual(battery_level_from_voltage(3.35), 10)
+        self.assertEqual(battery_level_from_voltage(3.5), 27)
+        self.assertEqual(battery_level_from_voltage(3.6), 39)
+        self.assertEqual(battery_level_from_voltage(3.7), 50)
+        self.assertEqual(battery_level_from_voltage(3.8), 62)
+        self.assertEqual(battery_level_from_voltage(3.9), 75)
+        self.assertEqual(battery_level_from_voltage(4.0), 88)
         self.assertEqual(battery_level_from_voltage(4.1), 100)
         self.assertEqual(battery_level_from_voltage(4.2), 100)
         self.assertEqual(battery_level_from_voltage(4.3), 100)
         self.assertEqual(battery_level_from_voltage(float("nan")), 0)
-        self.assertEqual(update_battery_level(0, 3.55, True), 15)
+        self.assertEqual(update_battery_level(0, 3.55, True), 33)
         self.assertEqual(update_battery_level(50, float("nan"), True), 50)
         self.assertEqual(update_battery_level(50, 4.2, False), 50)
-        for point in ("{3.20f, 0U}", "{3.50f, 10U}", "{3.60f, 20U}",
-                      "{3.70f, 40U}", "{3.80f, 60U}", "{3.90f, 80U}",
-                      "{4.10f, 100U}"):
+        for point in ("{3.10f, 0U}", "{3.20f, 3U}", "{3.35f, 10U}",
+                      "{3.70f, 50U}", "{4.10f, 100U}"):
             self.assertIn(point, BLE_SOURCE)
         self.assertIn("lroundf(level)", BLE_SOURCE)
         self.assertIn(

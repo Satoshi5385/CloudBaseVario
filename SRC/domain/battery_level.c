@@ -9,12 +9,10 @@ typedef struct {
 } battery_level_point_t;
 
 static const battery_level_point_t battery_level_curve[] = {
-    {3.20f, 0U},
-    {3.50f, 10U},
-    {3.60f, 20U},
-    {3.70f, 40U},
-    {3.80f, 60U},
-    {3.90f, 80U},
+    {3.10f, 0U},
+    {3.20f, 3U},
+    {3.35f, 10U},
+    {3.70f, 50U},
     {4.10f, 100U},
 };
 

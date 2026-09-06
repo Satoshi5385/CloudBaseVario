@@ -287,7 +287,7 @@ TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Sele
 - ペアリング、ボンディング、暗号化を必須としないこと。NUS互換のためRX characteristicを公開するが、RXへ書き込まれたbyte列にはアプリケーション上の意味を持たせず、解釈せずに破棄すること。
 - Nordic UART Service互換のService、TX Notify、RX Write characteristicを公開すること。
 - Bluetooth SIG Battery Service `0x180F`をPrimary Serviceとして公開し、Battery Level `0x2A19`とBattery Level Status `0x2BED`をReadおよびNotifyとすること。ESP-IDF内蔵Battery Serviceとの重複登録を行わないこと。
-- Battery Levelは100 ms周期の5点中央値のうち有効な値だけを30秒間収集し、その区間の最低電圧で表示値を30秒ごとに更新すること。最初の有効値は即時に表示し、ADC値が一時的に無効な場合は前回表示値を保持すること。表示電圧から残量への換算は、3.20 V＝0 %、3.50 V＝10 %、3.60 V＝20 %、3.70 V＝40 %、3.80 V＝60 %、3.90 V＝80 %、4.10 V＝100 %を結ぶ区分線形近似とする。区間内は線形補間して最も近い整数へ丸め、3.2 V以下は0 %、4.1 V以上は100 %とすること。Readは最新の表示値を返し、有効な容量値が変化した場合だけNotifyすること。起動後に有効値を一度も取得していない場合は0 %とすること。
+- Battery Levelは100 ms周期の5点中央値のうち有効な値だけを30秒間収集し、その区間の最低電圧で表示値を30秒ごとに更新すること。最初の有効値は即時に表示し、ADC値が一時的に無効な場合は前回表示値を保持すること。表示電圧から残量への換算は、3.10 V＝0 %、3.20 V＝3 %、3.35 V＝10 %、3.70 V＝50 %、4.10 V＝100 %を結ぶ区分線形近似とする。区間内は線形補間して最も近い整数へ丸め、3.1 V以下は0 %、4.1 V以上は100 %とすること。Readは最新の表示値を返し、有効な容量値が変化した場合だけNotifyすること。起動後に有効値を一度も取得していない場合は0 %とすること。
 - `ble_tx_task`からBattery Serviceへ反映する周期は1秒とし、task開始後の最初の反映は即時に行うこと。NUS TXが未subscribeの間はLK8EX1期限を起床条件に含めず、GAPの接続、切断およびsubscribe変更ではtask notificationにより直ちに再評価すること。NUS TXがsubscribe済みの場合は`bluetooth_notify_rate_hz`に従う1～50 HzのLK8EX1周期を維持すること。
 - Battery Level StatusはGSSで定義されるFlags 1 byteとPower State 2 byteだけをlittle-endianで送信し、optional fieldを含めないこと。バッテリーは常にPresentとし、`PIN_PWR_EXT`がHighの場合はWired External Power Source ConnectedかつCharging、Lowの場合はDischarging: Activeとすること。Wireless External Power Source、Battery Charge LevelおよびCharging TypeはUnknownまたは未接続相当、Charging Fault Reasonはなしとすること。
 - Battery Level StatusのReadは最新値を返し、Power Stateが変化した場合だけNotifyすること。更新はNUS TXの購読状態、気圧および昇降率の有効性に依存させず、満充電や充電電流を推定しないこと。
@@ -321,7 +321,7 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 - 高度フィールドは、XCTrack側で気圧高度を算出させるため `99999` とする。
 - `vario_cm_s` は有効な昇降率をcm/s単位の整数へ丸めた値とし、昇降率が無効な場合は `9999` とする。
 - `temperature_c` は常に `99` とし、BMP581の測定温度は送信しない。
-- `battery` はBattery Serviceと共通の30秒最低表示値を使用する。共有設定`bluetooth_battery_mode`が`VOLTAGE`の場合、表示電圧をV単位・小数点以下2桁で表し、小数点には `.` を使用する。例えば3.95 Vは `3.95` とする。`PERCENT`の場合はBattery Levelと同じ3.2～4.1 Vの区分線形換算・四捨五入・0～100への制限による整数へ、LK8EX1規定どおり1000を加えて送信する。例えば0 %は`1000`、100 %は`1100`とする。最初の有効値を取得する前はどちらも`999`とし、その後の一時的なADC無効時は前回表示値を保持する。
+- `battery` はBattery Serviceと共通の30秒最低表示値を使用する。共有設定`bluetooth_battery_mode`が`VOLTAGE`の場合、表示電圧をV単位・小数点以下2桁で表し、小数点には `.` を使用する。例えば3.95 Vは `3.95` とする。`PERCENT`の場合はBattery Levelと同じ3.1～4.1 Vの区分線形換算・四捨五入・0～100への制限による整数へ、LK8EX1規定どおり1000を加えて送信する。例えば0 %は`1000`、100 %は`1100`とする。最初の有効値を取得する前はどちらも`999`とし、その後の一時的なADC無効時は前回表示値を保持する。
 - LK8EX1には充電状態を示す標準フィールドがないため独自フィールドを追加せず、充電状態はBattery Level Statusだけで公開する。
 - チェックサムは、`$` の次の文字から `*` の直前までを対象に、カンマを含む各ASCII byteをXORして求め、大文字2桁の16進数で出力する。
 - 1センテンスが `ATT_MTU - 3` を超える場合、CRLFまでのbyte列を複数Notifyへ順序どおり分割する。受信側が1行へ復元できるよう、別センテンスを途中へ割り込ませない。

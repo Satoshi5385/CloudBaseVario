@@ -21,7 +21,7 @@
 | **特性 (Char)** | TX Characteristic | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | **Notify** | デバイスからXCTrackへデータを送信 |
 | **特性 (Char)** | RX Characteristic | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Write / Write Without Response | NUS互換のため公開。受信byte列は解釈せず破棄する |
 | **サービス** | Battery Service | `0000180f-0000-1000-8000-00805f9b34fb` | - | デバイスのバッテリー残量と電源状態 |
-| **特性 (Char)** | Battery Level | `00002a19-0000-1000-8000-00805f9b34fb` | Read / Notify | 3.0～4.1 Vを0～100 %へ線形換算した残量 |
+| **特性 (Char)** | Battery Level | `00002a19-0000-1000-8000-00805f9b34fb` | Read / Notify | 3.10 V＝0 %、3.20 V＝3 %、3.35 V＝10 %、3.70 V＝50 %、4.10 V＝100 %の区分線形換算による残量 |
 | **特性 (Char)** | Battery Level Status | `00002bed-0000-1000-8000-00805f9b34fb` | Read / Notify | USB外部電源と充電状態をGSS形式で公開 |
 
 ### 1.3. Battery Service
@@ -66,7 +66,7 @@ $LK8EX1,raw_pressure,altitude,vario,temperature,battery,*checksum\r\n
 
 <br>・無効時は `9999` |
 | 4 | `temperature` | 整数 | °C | `99` | 常に `99` で固定。BMP581の測定温度は送信しない。 |
-| 5 | `battery` | 小数または整数 | Vまたは% | `999` | Battery Serviceと共通の30秒最低表示値を使用する。`bluetooth_battery_mode`が`VOLTAGE`ならV単位・小数点以下2桁で送信する。`PERCENT`なら3.0～4.1 Vの換算値へLK8EX1規定の1000を加え、0 %を`1000`、100 %を`1100`として送信する。最初の有効値を取得する前は `999`。 |
+| 5 | `battery` | 小数または整数 | Vまたは% | `999` | Battery Serviceと共通の30秒最低表示値を使用する。`bluetooth_battery_mode`が`VOLTAGE`ならV単位・小数点以下2桁で送信する。`PERCENT`ならBattery Levelと同じ区分線形換算値へLK8EX1規定の1000を加え、0 %を`1000`、100 %を`1100`として送信する。最初の有効値を取得する前は `999`。 |
 | 6 | `*checksum` | 16進数 | - | 必須 | `*`に続く2桁の16進数（大文字）。データの整合性検証用。 |
 
 LK8EX1には充電状態を示す標準フィールドがないため、独自フィールドは設けません。充電状態はBattery Level Statusだけで公開し、LK8EX1のbatteryフィールドの表記だけを`bluetooth_battery_mode`で選択します。

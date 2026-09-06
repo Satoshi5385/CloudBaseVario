@@ -209,7 +209,7 @@ PARAM SAVE
 | `flight_gps_speed_threshold_kmh` | float | 10.0 | 1.0～100.0 km/h | freshかつfix有効なGPS速度がこの値以上で連続2更新すると`FLYING`とします。静止候補では、利用可能なGPS速度がこの値の50 %以下であることを必要とします。 |
 | `stationary_confirm_seconds` | uint32 | 60 | 10～600 s | 起動後または`UNKNOWN`から、静止候補が継続して`STATIONARY`と確定するまでの時間です。`FLYING`成立後はこの値によらず120秒の静穏継続を必要とします。 |
 | `filter_mode` | enum | `AUTO` | `AUTO`, `BARO_ONLY` | `AUTO` は、有効な姿勢補正済み IMU 鉛直加速度がある間、気圧と IMU を融合します。IMU が無効・停止・stale の場合は自動的に気圧単独へ戻ります。`BARO_ONLY` は常に気圧単独で昇降率を推定します。IMU の取得や診断そのものを無効にする設定ではありません。 |
-| `bluetooth_battery_mode` | enum | `PERCENT` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
+| `bluetooth_battery_mode` | enum | `PERCENT` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.10 V＝0 %、3.20 V＝3 %、3.35 V＝10 %、3.70 V＝50 %、4.10 V＝100 %の区分線形換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
 | `bluetooth_tx_power` | enum | `LOW` | `MIN`, `LOW`, `NORMAL`, `HIGH` | BLE送信電力です。`MIN`は-24 dBm、`LOW`は-12 dBm、`NORMAL`は0 dBm、`HIGH`は+9 dBmです。起動時および設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。 |
 | `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz | LK8EX1センテンスのNotify試行頻度です。BLEがbusyの場合はその周期のセンテンスを破棄して再送しないため、成功Notify数は設定値を下回ることがあります。Battery Serviceの更新周期には影響しません。 |
 | `gps_send_interval_ms` | uint32 | 1000 | 200～10000 ms | GPS搭載モデルの測位データ更新・XCTrack送信周期です。変更はGPSモジュールへ再設定されます。GPS搭載有無は製造時に固定され、このファイルや`PARAM`操作では変更できません。 |

@@ -11,16 +11,15 @@
 
 static void test_battery_level_conversion(void) {
     assert(battery_level_percent_from_voltage(2.9f) == 0U);
-    assert(battery_level_percent_from_voltage(3.2f) == 0U);
-    assert(battery_level_percent_from_voltage(3.35f) == 5U);
-    assert(battery_level_percent_from_voltage(3.5f) == 10U);
-    assert(battery_level_percent_from_voltage(3.55f) == 15U);
-    assert(battery_level_percent_from_voltage(3.6f) == 20U);
-    assert(battery_level_percent_from_voltage(3.65f) == 30U);
-    assert(battery_level_percent_from_voltage(3.7f) == 40U);
-    assert(battery_level_percent_from_voltage(3.8f) == 60U);
-    assert(battery_level_percent_from_voltage(3.9f) == 80U);
-    assert(battery_level_percent_from_voltage(4.0f) == 90U);
+    assert(battery_level_percent_from_voltage(3.1f) == 0U);
+    assert(battery_level_percent_from_voltage(3.2f) == 3U);
+    assert(battery_level_percent_from_voltage(3.35f) == 10U);
+    assert(battery_level_percent_from_voltage(3.5f) == 27U);
+    assert(battery_level_percent_from_voltage(3.6f) == 39U);
+    assert(battery_level_percent_from_voltage(3.7f) == 50U);
+    assert(battery_level_percent_from_voltage(3.8f) == 62U);
+    assert(battery_level_percent_from_voltage(3.9f) == 75U);
+    assert(battery_level_percent_from_voltage(4.0f) == 88U);
     assert(battery_level_percent_from_voltage(4.1f) == 100U);
     assert(battery_level_percent_from_voltage(4.2f) == 100U);
     assert(battery_level_percent_from_voltage(4.3f) == 100U);
@@ -119,7 +118,7 @@ static void test_percent_wire_encoding(void) {
     system.battery_display_voltage_v = 4.06f;
     assert(lk8ex1_format_fields(
         &vario, &system, APP_BLUETOOTH_BATTERY_MODE_PERCENT, &fields));
-    assert(strcmp(fields.battery, "1096") == 0);
+    assert(strcmp(fields.battery, "1095") == 0);
 
     system.battery_display_voltage_v = 4.1f;
     assert(lk8ex1_format_fields(
@@ -163,7 +162,7 @@ int main(void) {
     test_invalid_sentinels();
     test_percent_wire_encoding();
     test_sentence_contract(APP_BLUETOOTH_BATTERY_MODE_VOLTAGE, "3.80");
-    test_sentence_contract(APP_BLUETOOTH_BATTERY_MODE_PERCENT, "1060");
+    test_sentence_contract(APP_BLUETOOTH_BATTERY_MODE_PERCENT, "1062");
     puts("lk8ex1 tests passed");
     return 0;
 }
