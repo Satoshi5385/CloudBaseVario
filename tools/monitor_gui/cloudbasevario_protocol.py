@@ -149,6 +149,18 @@ IMU_FIELD_SPECS = (
 )
 
 
+MOTION_FIELD_SPECS = (
+    TelemetryFieldSpec("motion_evidence", "Flight evidence mask", "", 0),
+    TelemetryFieldSpec("motion_state_elapsed_s", "State elapsed", "s", 0),
+    TelemetryFieldSpec("stationary_elapsed_s", "Stationary elapsed", "s", 0),
+    TelemetryFieldSpec("motion_altitude_range_m", "Altitude range", "m", 2),
+    TelemetryFieldSpec("imu_motion_accel_rms_g", "Motion accel RMS", "g", 4),
+    TelemetryFieldSpec(
+        "imu_motion_gyro_rms_dps", "Motion gyro RMS", "deg/s", 3
+    ),
+)
+
+
 BLE_FIELD_SPECS = (
     TelemetryFieldSpec("ble_pressure_pa", "LK8EX1 pressure", "Pa", 0),
     TelemetryFieldSpec("ble_altitude_m", "LK8EX1 altitude", "m", 0),
@@ -338,8 +350,27 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
             "stream", "STREAM", f"DROPS {drops}", DISPLAY_WARNING
         )
 
+    motion_state = sample.text("motion_state", "").upper()
+    if motion_state == "STATIONARY":
+        motion_status = _status_item(
+            "motion", "MOTION", motion_state, DISPLAY_NORMAL
+        )
+    elif motion_state == "FLYING":
+        motion_status = _status_item(
+            "motion", "MOTION", motion_state, DISPLAY_NORMAL
+        )
+    elif motion_state == "UNKNOWN":
+        motion_status = _status_item(
+            "motion", "MOTION", motion_state, DISPLAY_WARNING
+        )
+    else:
+        motion_status = _status_item(
+            "motion", "MOTION", "--", DISPLAY_UNAVAILABLE
+        )
+
     statuses = (
         baro_status,
+        motion_status,
         flag_status("estimate", "EST", estimate_valid, "VALID"),
         flag_status("imu", "IMU", imu_online),
         _calibration_status(sample),
@@ -422,11 +453,29 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
         _number_item(sample, BLE_FIELD_SPECS[7], warning_if_nonzero=True),
     )
 
+    motion = (
+        _number_item(sample, MOTION_FIELD_SPECS[0]),
+        _flag_item(sample, "motion_altitude_evidence", "Altitude evidence"),
+        _flag_item(sample, "motion_climb_evidence", "Climb-rate evidence"),
+        _flag_item(sample, "motion_gps_evidence", "GPS-speed evidence"),
+        _flag_item(sample, "motion_imu_evidence", "IMU-activity evidence"),
+        _number_item(sample, MOTION_FIELD_SPECS[1]),
+        _number_item(sample, MOTION_FIELD_SPECS[2]),
+        _number_item(sample, MOTION_FIELD_SPECS[3]),
+        _flag_item(sample, "motion_vario_used", "Vario used"),
+        _flag_item(sample, "motion_gps_used", "GPS speed used"),
+        _flag_item(sample, "motion_imu_used", "IMU activity used"),
+        _flag_item(sample, "imu_motion_valid", "IMU motion metrics"),
+        _number_item(sample, MOTION_FIELD_SPECS[4]),
+        _number_item(sample, MOTION_FIELD_SPECS[5]),
+    )
+
     return TelemetryViewModel(
         flight=flight,
         statuses=statuses,
         diagnostics=(
             TelemetryGroup("quality", "Sensor / estimator quality", quality),
+            TelemetryGroup("motion", "Flight / stationary state", motion),
             TelemetryGroup("imu", "IMU / calibration", imu),
             TelemetryGroup("ble", "BLE / stream health", ble),
         ),

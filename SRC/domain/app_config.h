@@ -24,6 +24,9 @@ typedef enum {
 typedef struct {
     float sea_level_pressure_pa;
     uint32_t auto_power_off_minutes;
+    float flight_climb_rate_threshold_mps;
+    float flight_gps_speed_threshold_kmh;
+    uint32_t stationary_confirm_seconds;
     app_filter_mode_t filter_mode;
     app_bluetooth_battery_mode_t bluetooth_battery_mode;
     app_bluetooth_tx_power_t bluetooth_tx_power;
@@ -32,6 +35,7 @@ typedef struct {
     uint32_t imu_gyro_calibration_samples;
     bool audio_enabled;
     bool sink_enabled;
+    bool audio_mute_when_stationary;
     bool predictive_buzzer_enabled;
     float audio_climb_rate_average_s;
     float lift_start_mps;

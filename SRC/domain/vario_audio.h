@@ -45,13 +45,15 @@ void vario_audio_reset(vario_audio_state_t *state);
 /**
  * Evaluate one pressure-only vario audio step.
  *
- * Invalid/stale data and disabled audio force immediate silence. The sound
- * model uses a configurable simple moving average without changing the
- * published estimator result. Hysteresis and the configured hold time apply
- * to ordinary state transitions; predictive/lift transitions are immediate.
+ * Invalid/stale data, disabled audio, and a configured stationary mute force
+ * immediate silence. The sound model uses a configurable simple moving
+ * average without changing the published estimator result. Hysteresis and the
+ * configured hold time apply to ordinary state transitions; predictive/lift
+ * transitions are immediate.
  */
 void vario_audio_step(vario_audio_state_t *state,
                       const app_config_t *config,
                       const vario_result_t *result,
                       int64_t now_us,
+                      bool stationary,
                       vario_audio_command_t *command);

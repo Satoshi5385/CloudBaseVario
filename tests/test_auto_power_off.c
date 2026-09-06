@@ -1,5 +1,4 @@
 #include <assert.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -8,92 +7,94 @@
 
 #define MINUTE_US INT64_C(60000000)
 
-static void test_disabled(void) {
+static void test_disabled_and_nonstationary_reset(void) {
     auto_power_off_state_t state = {0};
 
-    assert(!auto_power_off_update(&state, 0U, false, true, 100.0f, 0));
+    assert(!auto_power_off_update(&state, 0U, false, true, 1, MINUTE_US));
+    assert(!state.tracking);
+    assert(!auto_power_off_update(&state, 1U, false, false, 0, MINUTE_US));
     assert(!state.tracking);
 }
 
-static void test_boundary_and_single_trigger(void) {
+static void test_stationary_boundary_includes_confirmation_time(void) {
     auto_power_off_state_t state = {0};
+    int64_t stationary_since_us = INT64_C(1000000);
 
-    assert(!auto_power_off_update(&state, 1U, false, true, 100.0f, 0));
-    assert(!auto_power_off_update(&state, 1U, false, true, 110.0f,
-                                  MINUTE_US - 1));
-    assert(auto_power_off_update(&state, 1U, false, true, 105.0f,
-                                 MINUTE_US));
-    assert(!auto_power_off_update(&state, 1U, false, true, 105.0f,
-                                  MINUTE_US + 1));
+    assert(!auto_power_off_update(&state, 1U, false, true,
+                                  stationary_since_us,
+                                  stationary_since_us + MINUTE_US - 1));
+    assert(auto_power_off_update(&state, 1U, false, true,
+                                 stationary_since_us,
+                                 stationary_since_us + MINUTE_US));
+    assert(!auto_power_off_update(&state, 1U, false, true,
+                                  stationary_since_us,
+                                  stationary_since_us + MINUTE_US + 1));
 }
 
-static void test_range_exceeded_restarts_window(void) {
+static void test_external_power_and_candidate_change_reset(void) {
     auto_power_off_state_t state = {0};
 
-    assert(!auto_power_off_update(&state, 1U, false, true, 100.0f, 0));
-    assert(!auto_power_off_update(&state, 1U, false, true, 110.01f,
+    assert(!auto_power_off_update(&state, 1U, false, true, 1,
                                   MINUTE_US / 2));
-    assert(state.minimum_altitude_m == 110.01f);
-    assert(state.maximum_altitude_m == 110.01f);
-    assert(!auto_power_off_update(&state, 1U, false, true, 108.0f,
-                                  MINUTE_US + MINUTE_US / 2 - 1));
-    assert(auto_power_off_update(&state, 1U, false, true, 108.0f,
-                                 MINUTE_US + MINUTE_US / 2));
-}
-
-static void test_invalid_and_external_power_reset(void) {
-    auto_power_off_state_t state = {0};
-
-    assert(!auto_power_off_update(&state, 1U, false, true, 100.0f, 0));
-    assert(!auto_power_off_update(&state, 1U, false, false, 100.0f,
-                                  MINUTE_US / 2));
-    assert(!state.tracking);
-    assert(!auto_power_off_update(&state, 1U, false, true, 101.0f,
+    assert(!auto_power_off_update(&state, 1U, true, true, 1,
                                   MINUTE_US));
-    assert(!auto_power_off_update(&state, 1U, true, true, 101.0f,
+    assert(!state.tracking);
+    assert(!auto_power_off_update(&state, 1U, false, true, MINUTE_US,
                                   MINUTE_US + 1));
-    assert(!state.tracking);
-    assert(!auto_power_off_update(&state, 1U, false, true, 101.0f,
+    assert(state.started_us == MINUTE_US);
+    assert(!auto_power_off_update(&state, 1U, false, true,
+                                  MINUTE_US + 1,
                                   MINUTE_US * 2));
-    assert(!auto_power_off_update(&state, 1U, false, true, NAN,
-                                  MINUTE_US * 3));
-    assert(!state.tracking);
+    assert(state.started_us == MINUTE_US + 1);
 }
 
-static void test_setting_change_and_time_reversal_reset(void) {
+static void test_external_power_does_not_count_stationary_time(void) {
+    auto_power_off_state_t state = {0};
+    int64_t stationary_since_us = 1;
+
+    assert(!auto_power_off_update(&state, 1U, true, true,
+                                  stationary_since_us, MINUTE_US));
+    assert(!state.tracking);
+    assert(!auto_power_off_update(&state, 1U, false, true,
+                                  stationary_since_us, MINUTE_US + 1));
+    assert(state.started_us == MINUTE_US + 1);
+    assert(!auto_power_off_update(&state, 1U, false, true,
+                                  stationary_since_us,
+                                  2 * MINUTE_US));
+    assert(auto_power_off_update(&state, 1U, false, true,
+                                 stationary_since_us,
+                                 2 * MINUTE_US + 1));
+}
+
+static void test_setting_change_and_invalid_time_reset(void) {
     auto_power_off_state_t state = {0};
 
-    assert(!auto_power_off_update(&state, 1U, false, true, 100.0f,
-                                  MINUTE_US));
-    assert(!auto_power_off_update(&state, 2U, false, true, 100.0f,
-                                  MINUTE_US * 2));
-    assert(state.started_us == MINUTE_US * 2);
-    assert(!auto_power_off_update(&state, 2U, false, true, 100.0f,
+    assert(!auto_power_off_update(&state, 1U, false, true, 1,
+                                  MINUTE_US / 2));
+    assert(!auto_power_off_update(&state, 2U, false, true, MINUTE_US,
                                   MINUTE_US));
     assert(state.started_us == MINUTE_US);
-}
+    assert(!auto_power_off_update(&state, 2U, false, true,
+                                  MINUTE_US + 1, MINUTE_US - 1));
+    assert(!state.tracking);
+    assert(!auto_power_off_update(&state, 2U, false, true,
+                                  MINUTE_US + 2, MINUTE_US + 1));
+    assert(!state.tracking);
 
-static void test_multiple_movements_restart_each_time(void) {
-    auto_power_off_state_t state = {0};
-
-    assert(!auto_power_off_update(&state, 1U, false, true, 0.0f, 0));
-    assert(!auto_power_off_update(&state, 1U, false, true, 10.1f,
-                                  MINUTE_US / 4));
-    assert(!auto_power_off_update(&state, 1U, false, true, -0.1f,
-                                  MINUTE_US / 2));
-    assert(!auto_power_off_update(&state, 1U, false, true, -0.1f,
-                                  MINUTE_US + MINUTE_US / 2 - 1));
-    assert(auto_power_off_update(&state, 1U, false, true, -0.1f,
-                                 MINUTE_US + MINUTE_US / 2));
+    auto_power_off_reset(&state);
+    assert(!auto_power_off_update(&state, 1U, false, true, MINUTE_US,
+                                  MINUTE_US + MINUTE_US / 2));
+    assert(!auto_power_off_update(&state, 1U, false, true, MINUTE_US,
+                                  MINUTE_US + MINUTE_US / 4));
+    assert(state.started_us == MINUTE_US + MINUTE_US / 4);
 }
 
 int main(void) {
-    test_disabled();
-    test_boundary_and_single_trigger();
-    test_range_exceeded_restarts_window();
-    test_invalid_and_external_power_reset();
-    test_setting_change_and_time_reversal_reset();
-    test_multiple_movements_restart_each_time();
+    test_disabled_and_nonstationary_reset();
+    test_stationary_boundary_includes_confirmation_time();
+    test_external_power_and_candidate_change_reset();
+    test_external_power_does_not_count_stationary_time();
+    test_setting_change_and_invalid_time_reset();
     puts("auto_power_off tests passed");
     return 0;
 }

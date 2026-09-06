@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "domain/flight_state.h"
+
 #define GPS_NMEA_SENTENCE_CAPACITY 96U
 
 typedef struct {
@@ -88,6 +90,14 @@ typedef struct {
     uint8_t parameter_set_count;
     bool switch_preferences_dirty;
     bool power_off_requested;
+    flight_state_t motion_state;
+    uint32_t motion_evidence;
+    uint32_t motion_state_elapsed_s;
+    uint32_t stationary_elapsed_s;
+    float motion_altitude_range_m;
+    bool motion_vario_used;
+    bool motion_gps_used;
+    bool motion_imu_used;
 } system_snapshot_t;
 
 typedef struct {
@@ -158,9 +168,13 @@ typedef struct {
     float roll_deg;
     float pitch_deg;
     float yaw_deg;
+    int64_t motion_timestamp_us;
+    float motion_acceleration_rms_g;
+    float motion_gyro_rms_dps;
     int32_t accel_calibration_storage_result;
     int32_t accel_calibration_storage_error;
     bool ki_active;
+    bool motion_valid;
 } imu_diagnostics_t;
 
 typedef enum {

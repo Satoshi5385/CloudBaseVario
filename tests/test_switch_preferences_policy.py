@@ -136,8 +136,8 @@ class SwitchPreferencesPolicyTests(unittest.TestCase):
         document = json.loads(example)
         shared_parameters = document["mc_parameters"]
         profile_parameters = document["vario_parameter_sets"][0]["parameters"]
-        self.assertEqual(len(shared_parameters), 8)
-        self.assertEqual(len(profile_parameters), 22)
+        self.assertEqual(len(shared_parameters), 11)
+        self.assertEqual(len(profile_parameters), 23)
         for name in ("audio_enabled", "audio_amp_mode", "sink_enabled"):
             self.assertNotIn(name, shared_parameters)
             self.assertNotIn(name, profile_parameters)

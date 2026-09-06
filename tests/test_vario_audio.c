@@ -53,7 +53,21 @@ static vario_audio_command_t step_at(vario_audio_state_t *state,
     result.climb_rate_mps = climb_rate_mps;
     result.climb_rate_valid = valid;
     result.debug_input_active = debug_input_active;
-    vario_audio_step(state, config, &result, timestamp_us, &command);
+    vario_audio_step(state, config, &result, timestamp_us, false, &command);
+    return command;
+}
+
+static vario_audio_command_t step_at_stationary(
+    vario_audio_state_t *state, const app_config_t *config,
+    int64_t timestamp_us, float climb_rate_mps, bool stationary) {
+    vario_result_t result = {0};
+    vario_audio_command_t command = {0};
+
+    result.timestamp_us = timestamp_us;
+    result.climb_rate_mps = climb_rate_mps;
+    result.climb_rate_valid = true;
+    vario_audio_step(state, config, &result, timestamp_us, stationary,
+                     &command);
     return command;
 }
 
@@ -63,24 +77,32 @@ static void test_parameter_contract(void) {
     size_t profile_count = 0U;
 
     app_config_set_defaults(&config);
-    assert(app_config_parameter_count() == 30U);
+    assert(app_config_parameter_count() == 34U);
     assert(config.auto_power_off_minutes == 60U);
+    assert(fabsf(config.flight_climb_rate_threshold_mps - 0.5f) < 0.001f);
+    assert(fabsf(config.flight_gps_speed_threshold_kmh - 10.0f) < 0.001f);
+    assert(config.stationary_confirm_seconds == 60U);
     assert(config.bluetooth_battery_mode ==
            APP_BLUETOOTH_BATTERY_MODE_PERCENT);
     assert(config.bluetooth_tx_power == APP_BLUETOOTH_TX_POWER_LOW);
     assert(config.bluetooth_notify_rate_hz == 10U);
     assert(config.gps_send_interval_ms == 1000U);
     assert(config.audio_climb_rate_average_s == 1.0f);
+    assert(!config.audio_mute_when_stationary);
     assert(config.predictive_interval_ms == 1000U);
     assert(config.predictive_duration_ms == 150U);
     assert(config.predictive_min_mps == 0.01f);
     assert(has_parameter("audio_climb_rate_average_s"));
+    assert(has_parameter("audio_mute_when_stationary"));
     assert(has_parameter("predictive_interval_ms"));
     assert(has_parameter("predictive_duration_ms"));
     assert(has_parameter("bluetooth_battery_mode"));
     assert(has_parameter("bluetooth_tx_power"));
     assert(has_parameter("bluetooth_notify_rate_hz"));
     assert(has_parameter("gps_send_interval_ms"));
+    assert(has_parameter("flight_climb_rate_threshold_mps"));
+    assert(has_parameter("flight_gps_speed_threshold_kmh"));
+    assert(has_parameter("stationary_confirm_seconds"));
     assert(!has_parameter("i2c_reinit_error_count"));
     assert(!has_parameter("imu_mahony_kp"));
     assert(!has_parameter("imu_mahony_ki"));
@@ -98,9 +120,19 @@ static void test_parameter_contract(void) {
             profile_count++;
         }
     }
-    assert(shared_count == 8U);
-    assert(profile_count == 22U);
+    assert(shared_count == 11U);
+    assert(profile_count == 23U);
     assert(app_config_validate(&config));
+    assert(app_config_set_text(&config,
+                               "flight_climb_rate_threshold_mps", "0.1"));
+    assert(!app_config_set_text(&config,
+                                "flight_climb_rate_threshold_mps", "0.09"));
+    assert(app_config_set_text(&config,
+                               "flight_gps_speed_threshold_kmh", "100"));
+    assert(!app_config_set_text(&config,
+                                "flight_gps_speed_threshold_kmh", "100.1"));
+    assert(app_config_set_text(&config, "stationary_confirm_seconds", "10"));
+    assert(!app_config_set_text(&config, "stationary_confirm_seconds", "9"));
     assert(app_config_set_text(&config, "bluetooth_battery_mode", "PERCENT"));
     assert(config.bluetooth_battery_mode ==
            APP_BLUETOOTH_BATTERY_MODE_PERCENT);
@@ -132,6 +164,11 @@ static void test_parameter_contract(void) {
     assert(!app_config_set_text(&config, "gps_send_interval_ms", "199"));
     assert(!app_config_set_text(&config, "gps_send_interval_ms", "10001"));
     assert(!app_config_set_text(&config, "gps_module_installed", "1"));
+    assert(app_config_set_text(&config, "audio_mute_when_stationary", "true"));
+    assert(config.audio_mute_when_stationary);
+    assert(!app_config_set_text(&config, "audio_mute_when_stationary", "1"));
+    assert(app_config_reset(&config, 1U, "audio_mute_when_stationary"));
+    assert(!config.audio_mute_when_stationary);
 
     config.predictive_duration_ms = config.predictive_interval_ms + 1U;
     assert(!app_config_validate(&config));
@@ -206,6 +243,31 @@ static void test_average_bypass_and_partial_window(void) {
     (void) step_at(&state, &config, INT64_C(3000000), 20.0f, true, false);
     assert(fabsf(state.averaged_climb_rate_mps - 1.0f) < 0.0001f);
     assert(state.history_count == 3U);
+}
+
+static void test_stationary_mute_is_optional_and_resets_audio_state(void) {
+    app_config_t config = test_config();
+    static vario_audio_state_t state;
+    vario_audio_command_t command = {0};
+
+    vario_audio_reset(&state);
+    command = step_at_stationary(&state, &config, INT64_C(1000000),
+                                 1.0f, true);
+    assert(command.mode == VARIO_AUDIO_LIFT);
+    assert(command.sounding);
+
+    config.audio_mute_when_stationary = true;
+    command = step_at_stationary(&state, &config, INT64_C(1010000),
+                                 1.0f, true);
+    assert(command.mode == VARIO_AUDIO_SILENT);
+    assert(!command.sounding);
+    assert(state.mode == VARIO_AUDIO_SILENT);
+    assert(state.history_count == 0U);
+
+    command = step_at_stationary(&state, &config, INT64_C(1020000),
+                                 1.0f, false);
+    assert(command.mode == VARIO_AUDIO_LIFT);
+    assert(command.sounding);
 }
 
 static void test_average_window_expiry_and_resets(void) {
@@ -291,6 +353,7 @@ int main(void) {
     test_parameter_contract();
     test_parameter_profile_contract();
     test_average_bypass_and_partial_window();
+    test_stationary_mute_is_optional_and_resets_audio_state();
     test_average_window_expiry_and_resets();
     test_predictive_lift_direct_transitions();
     test_predictive_fixed_timing();

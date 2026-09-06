@@ -14,6 +14,9 @@
 #define SHARED_FIELDS                                                        \
     "\"sea_level_pressure_pa\":100000,"                                   \
     "\"auto_power_off_minutes\":60,"                                      \
+    "\"flight_climb_rate_threshold_mps\":0.5,"                         \
+    "\"flight_gps_speed_threshold_kmh\":10.0,"                          \
+    "\"stationary_confirm_seconds\":60,"                                 \
     "\"filter_mode\":\"AUTO\","                                        \
     "\"bluetooth_battery_mode\":\"PERCENT\","                          \
     "\"bluetooth_tx_power\":\"LOW\","                                  \
@@ -22,6 +25,7 @@
     "\"imu_gyro_calibration_samples\":200"
 
 #define PROFILE_FIELDS(lift_start, lift_end, sink_start, sink_end)            \
+    "\"audio_mute_when_stationary\":false,"                               \
     "\"predictive_buzzer_enabled\":false,"                                \
     "\"audio_climb_rate_average_s\":1.0,"                                 \
     "\"lift_start_mps\":" STRINGIFY_VALUE(lift_start) ","                \
@@ -88,7 +92,10 @@ static void test_unknown_items_are_ignored(void) {
 
 static void test_missing_shared_item_uses_defaults(void) {
     static const char document[] = DOCUMENT(
-        "\"auto_power_off_minutes\":60,\"filter_mode\":\"AUTO\","
+        "\"auto_power_off_minutes\":60,"
+        "\"flight_climb_rate_threshold_mps\":0.5,"
+        "\"flight_gps_speed_threshold_kmh\":10.0,"
+        "\"stationary_confirm_seconds\":60,\"filter_mode\":\"AUTO\","
         "\"bluetooth_battery_mode\":\"PERCENT\","
         "\"bluetooth_tx_power\":\"LOW\","
         "\"bluetooth_notify_rate_hz\":10,\"gps_send_interval_ms\":1000,"

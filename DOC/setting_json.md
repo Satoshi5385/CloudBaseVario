@@ -2,7 +2,7 @@
 
 ## 1. 概要
 
-`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ8項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは音の感度、判定、音程、テンポ、予測音および出力波形に関する22項目を保持します。基板実装に依存する IMU 軸変換、製造時に固定されるGPS搭載有無、ファームウェア固定のI2C再初期化閾値・Mahony gain、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
+`setting.json` は、CloudBaseVario の動作設定を、共通パラメータ11項目と番号1～5のバリオ音パラメータセットとして保存するファイルです。各セットは静止中の消音、音の感度、判定、音程、テンポ、予測音および出力波形に関する23項目を保持します。基板実装に依存する IMU 軸変換、製造時に固定されるGPS搭載有無、ファームウェア固定のI2C再初期化閾値・Mahony gain、およびSW1／SW2で操作する音量・シンク音設定は保持しません。
 
 | 項目 | 内容 |
 | --- | --- |
@@ -78,6 +78,9 @@ PARAM SAVE
   "mc_parameters": {
     "sea_level_pressure_pa": 101325.0,
     "auto_power_off_minutes": 60,
+    "flight_climb_rate_threshold_mps": 0.5,
+    "flight_gps_speed_threshold_kmh": 10.0,
+    "stationary_confirm_seconds": 60,
     "filter_mode": "AUTO",
     "bluetooth_battery_mode": "PERCENT",
     "bluetooth_tx_power": "LOW",
@@ -89,6 +92,7 @@ PARAM SAVE
     {
       "parameter_number": 1,
       "parameters": {
+        "audio_mute_when_stationary": false,
         "predictive_buzzer_enabled": false,
         "audio_climb_rate_average_s": 1.0,
         "lift_start_mps": 0.1,
@@ -116,6 +120,7 @@ PARAM SAVE
     {
       "parameter_number": 2,
       "parameters": {
+        "audio_mute_when_stationary": false,
         "predictive_buzzer_enabled": false,
         "audio_climb_rate_average_s": 1.0,
         "lift_start_mps": 0.2,
@@ -143,6 +148,7 @@ PARAM SAVE
     {
       "parameter_number": 3,
       "parameters": {
+        "audio_mute_when_stationary": false,
         "predictive_buzzer_enabled": false,
         "audio_climb_rate_average_s": 1.0,
         "lift_start_mps": 0.3,
@@ -175,13 +181,13 @@ PARAM SAVE
 
 - top-level では `format_version`、`mc_parameters`、`vario_parameter_sets` を使用します。それ以外の項目は読み飛ばされます。
 - `format_version` は整数で、現行形式では `1` です。それ以外のversionは読み込みません。
-- top-level `mc_parameters` は共通8項目すべてを持つobjectです。
+- top-level `mc_parameters` は共通11項目すべてを持つobjectです。
 - `vario_parameter_sets` は配列です。選別後に番号1～5の有効なセットを1～5件使用します。各要素では `parameter_number` と `parameters` を使用し、それ以外の項目は読み飛ばされます。
 - `parameter_number` は1～5の整数で重複できません。配列順は任意ですが、保存時は番号順に整列します。
 - `mc_parameters` と各セットの `parameters` は JSON object です。不完全または不正なセットは、そのセットだけを読み飛ばします。
 - parameter key は大文字・小文字を区別します。
 - 未知の top-level key、未知の parameter、各セット直下の未知のkeyは読み飛ばします。既知keyの重複は、top-levelまたは`mc_parameters`ではファイル全体、各セットではそのセットを無効にします。
-- 各セットの`parameters`には音関連22項目すべてが必要です。共通項目をセット内へ置く、または音関連項目をtop-level `mc_parameters`へ置いた場合、その誤配置項目は読み飛ばされます。正しい階層の必須項目が不足した結果として、共通部全体または該当セットが無効になります。
+- 各セットの`parameters`には音関連23項目すべてが必要です。共通項目をセット内へ置く、または音関連項目をtop-level `mc_parameters`へ置いた場合、その誤配置項目は読み飛ばされます。正しい階層の必須項目が不足した結果として、共通部全体または該当セットが無効になります。
 - boolean は引用符なしの `true` または `false`、整数は小数部なし、float は有限の JSON number として記述します。
 - `filter_mode` は文字列 `"AUTO"` または `"BARO_ONLY"` です。
 - `bluetooth_battery_mode` は文字列 `"VOLTAGE"` または `"PERCENT"` です。
@@ -191,19 +197,26 @@ PARAM SAVE
 ## 4. パラメータ詳細
 
 範囲の両端は、特記がない限り使用できます。
-4.1と4.2の8項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の22項目は各`vario_parameter_sets[].parameters`に保存します。
+4.1と4.2の11項目はtop-level `mc_parameters`に1組だけ保存し、4.4～4.8の23項目は各`vario_parameter_sets[].parameters`に保存します。
 
 ### 4.1 電源・気圧・推定・Bluetooth・GPS
 
 | パラメータ | 型 | 既定値 | 設定範囲 | 詳細 |
 | --- | --- | ---: | --- | --- |
 | `sea_level_pressure_pa` | float | 101325 | 80000～110000 Pa | 気圧から高度を求めるときの海面更正気圧です。値を大きくすると算出高度は高くなります。動作中に値が変わると高度・昇降率推定器をリセットします。 |
-| `auto_power_off_minutes` | uint32 | 60 | 0～1440 min | 外部給電がなく、有効な実センサー高度の期間内変動幅が10 m以下の状態が継続したときに自動電源OFFする時間です。`0`で無効にします。変動幅が10 mを超えた場合は現在高度から計時をやり直します。外部給電中、高度が無効・stale・非有限の場合、および設定変更時は計時状態をリセットします。デバッグ高度は判定に使用しません。 |
+| `auto_power_off_minutes` | uint32 | 60 | 0～1440 min | `STATIONARY`がこの時間継続した場合に自動電源OFFします。`0`で無効にします。外部給電中、MSC storage mode中、`FLYING`／`UNKNOWN`、設定変更時は計時をリセットします。デバッグ高度は判定に使用しません。 |
+| `flight_climb_rate_threshold_mps` | float | 0.5 | 0.1～5.0 m/s | 飛行証拠とする昇降率の絶対値です。この値以上が3秒継続すると`FLYING`とします。静止候補ではこの値の50 %以下を必要とします。 |
+| `flight_gps_speed_threshold_kmh` | float | 10.0 | 1.0～100.0 km/h | freshかつfix有効なGPS速度がこの値以上で連続2更新すると`FLYING`とします。静止候補では、利用可能なGPS速度がこの値の50 %以下であることを必要とします。 |
+| `stationary_confirm_seconds` | uint32 | 60 | 10～600 s | 起動後または`UNKNOWN`から、静止候補が継続して`STATIONARY`と確定するまでの時間です。`FLYING`成立後はこの値によらず120秒の静穏継続を必要とします。 |
 | `filter_mode` | enum | `AUTO` | `AUTO`, `BARO_ONLY` | `AUTO` は、有効な姿勢補正済み IMU 鉛直加速度がある間、気圧と IMU を融合します。IMU が無効・停止・stale の場合は自動的に気圧単独へ戻ります。`BARO_ONLY` は常に気圧単独で昇降率を推定します。IMU の取得や診断そのものを無効にする設定ではありません。 |
 | `bluetooth_battery_mode` | enum | `PERCENT` | `VOLTAGE`, `PERCENT` | LK8EX1のbatteryフィールドには、5点中央値から求めた30秒区間の最低表示値を使用します。`VOLTAGE`ではV単位の小数2桁、`PERCENT`ではBattery Serviceと同じ3.0～4.1 V換算値へLK8EX1規定の1000を加えた整数1000～1100で送信します。最初の有効値を取得する前は`999`とし、一時的なADC無効時は前回表示値を保持します。 |
 | `bluetooth_tx_power` | enum | `LOW` | `MIN`, `LOW`, `NORMAL`, `HIGH` | BLE送信電力です。`MIN`は-24 dBm、`LOW`は-12 dBm、`NORMAL`は0 dBm、`HIGH`は+9 dBmです。起動時および設定変更時に広告と接続へ反映します。`MAX`および+20 dBmは使用できません。 |
 | `bluetooth_notify_rate_hz` | uint32 | 10 | 1～50 Hz | LK8EX1センテンスのNotify試行頻度です。BLEがbusyの場合はその周期のセンテンスを破棄して再送しないため、成功Notify数は設定値を下回ることがあります。Battery Serviceの更新周期には影響しません。 |
 | `gps_send_interval_ms` | uint32 | 1000 | 200～10000 ms | GPS搭載モデルの測位データ更新・XCTrack送信周期です。変更はGPSモジュールへ再設定されます。GPS搭載有無は製造時に固定され、このファイルや`PARAM`操作では変更できません。 |
+
+飛行・静止判定は`UNKNOWN`、`STATIONARY`、`FLYING`の3状態です。高度の静止候補期間内変動幅が10 mを超えた場合、上記の昇降率継続条件、GPS速度条件、またはIMU活動量（0.5秒EMAの加速度RMS 0.03 g以上／角速度RMS 10 deg/s以上が1秒継続）のいずれかで`FLYING`になります。ちょうど10 mは飛行証拠にしません。歩行・車載などの明確な移動も、安全側として`FLYING`に含めます。
+
+静止候補はfreshで有効なバリオを必須とし、高度変動幅10 m以下、絶対昇降率が設定値の50 %以下、利用可能なGPS速度が設定値の50 %以下、利用可能なIMU活動量が加速度RMS 0.01 g以下かつ角速度RMS 3 deg/s以下のすべてを必要とします。GPS非搭載／未捕捉またはIMU故障／校正スキップでは、その補助入力を省略してバリオ単独へ縮退します。必須バリオが無効・stale、時刻逆行、設定変更、または開始／終了閾値の中間域にある場合は`UNKNOWN`へ戻して静止候補をリセットします。ただし、明確なGPSまたはIMU移動証拠はバリオ無効時にも`FLYING`を成立させます。
 
 ### 4.2 IMU 姿勢推定
 
@@ -230,6 +243,7 @@ version 1では、軸keyを含む未知のparameterは読み飛ばされ、設�
 
 | パラメータ | 型 | 既定値 | 設定範囲 | 詳細 |
 | --- | --- | ---: | --- | --- |
+| `audio_mute_when_stationary` | bool | `false` | `true`, `false` | `true`では、飛行・静止判定が`STATIONARY`の間だけリフト音、シンク音および予測ブザーを即時停止します。`UNKNOWN`／`FLYING`ではこの設定による停止を行いません。起動音、終了音およびSW1～SW3の通知音には影響しません。 |
 | `predictive_buzzer_enabled` | bool | `false` | `true`, `false` | ゼロ付近の指定範囲で鳴らす予測ブザーを有効にします。通常の無音域を補助します。 |
 | `audio_climb_rate_average_s` | float | 1.0 | 0～10 s | 音状態、音程、テンポに使う上昇率の単純移動平均窓です。起動直後は取得済みサンプルだけを平均し、`0`では平均せず最新値を使います。表示、BLE、ログの上昇率は変えません。 |
 | `audio_state_hold_ms` | uint32 | 200 | 0～1000 ms | 通常の音状態切替を抑制する最小保持時間です。しきい値付近の細かな往復によるチャタリングを減らします。入力無効、stale、SW1消音による強制無音は待ちません。 |
@@ -322,7 +336,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 | 状態 | 動作 |
 | --- | --- |
-| 正常な version 1 | 共通8項目と音関連22項目を持つ全セットを読込み |
+| 正常な version 1 | 共通11項目と音関連23項目を持つ全セットを読込み |
 | version 1以外 | 非対応versionとしてファイル全体を無効化 |
 | ファイルなし | 全項目を組込み既定値とし、既定ファイルを自動生成 |
 | JSON 構文、root、共通必須項目の型または範囲が不正 | ファイルの値を適用せず、全項目を組込み既定値として継続。不正ファイルは自動上書きしない |
@@ -351,7 +365,7 @@ predictive_duration_ms <= predictive_interval_ms
 
 ## 8. versionの扱い
 
-ファームウェアはversion 1の構造だけを読み込み、自動変換は行いません。未知のkeyと誤った階層の項目は読み飛ばします。top-levelまたは共通8項目の欠落、重複、型違い、値域違反は全体を無効にします。各セットの音関連22項目の欠落、重複、型違い、値域違反、相互関係違反はそのセットだけを無効にします。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`や、`gps_module_installed`などの搭載有無キーも読み飛ばされ、設定には使用されません。
+ファームウェアはversion 1の構造だけを読み込み、自動変換は行いません。未知のkeyと誤った階層の項目は読み飛ばします。top-levelまたは共通11項目の欠落、重複、型違い、値域違反は全体を無効にします。そのため、新しい3項目を持たない旧version 1ファイルも無効となり、組込み既定値へフォールバックします。各セットの音関連23項目の欠落、重複、型違い、値域違反、相互関係違反はそのセットだけを無効にします。`audio_mute_when_stationary`を持たないセットも、そのセットだけが無効になります。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`や、`gps_module_installed`などの搭載有無キーも読み飛ばされ、設定には使用されません。
 
 ## 9. 実装上の正本
 

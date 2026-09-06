@@ -282,12 +282,12 @@
   const MAX_FILE_BYTES = 32 * 1024;
   const GROUPS = {
     shared: [
-      ["基本動作", ["sea_level_pressure_pa", "auto_power_off_minutes", "filter_mode"]],
+      ["基本動作", ["sea_level_pressure_pa", "auto_power_off_minutes", "flight_climb_rate_threshold_mps", "flight_gps_speed_threshold_kmh", "stationary_confirm_seconds", "filter_mode"]],
       ["Bluetooth", ["bluetooth_battery_mode", "bluetooth_tx_power", "bluetooth_notify_rate_hz"]],
       ["GPS・センサー", ["gps_send_interval_ms", "imu_gyro_calibration_samples"]]
     ],
     profile: [
-      ["音状態", ["predictive_buzzer_enabled", "audio_climb_rate_average_s", "audio_state_hold_ms", "audio_stale_ms"]],
+      ["音状態", ["audio_mute_when_stationary", "predictive_buzzer_enabled", "audio_climb_rate_average_s", "audio_state_hold_ms", "audio_stale_ms"]],
       ["リフト・シンク判定", ["lift_start_mps", "lift_end_mps", "sink_start_mps", "sink_end_mps", "predictive_min_mps"]],
       ["リフト音", ["lift_freq_base_hz", "lift_freq_rate_hz_per_mps", "lift_freq_max_hz", "lift_time_ms_at_0p2", "lift_time_ms_at_1p0", "lift_time_ms_at_2p5", "lift_time_ms_at_5p0"]],
       ["シンク音", ["sink_freq_start_hz", "sink_freq_rate_hz_per_mps", "sink_freq_min_hz"]],
@@ -297,7 +297,10 @@
 
   const SPECS = {
     sea_level_pressure_pa: {scope:"shared", type:"float", min:80000, max:110000, unit:"Pa", label:"海面更正気圧", description:"気圧から高度を求める基準気圧です。"},
-    auto_power_off_minutes: {scope:"shared", type:"uint", min:0, max:1440, unit:"分", label:"自動電源OFF時間", description:"高度変化が小さい状態で自動的に電源を切るまでの時間です。0で無効です。"},
+    auto_power_off_minutes: {scope:"shared", type:"uint", min:0, max:1440, unit:"分", label:"自動電源OFF時間", description:"静止中と確定した状態で自動的に電源を切るまでの時間です。飛行・移動・判定不明時は計時せず、0で無効です。"},
+    flight_climb_rate_threshold_mps: {scope:"shared", type:"float", min:0.1, max:5.0, unit:"m/s", label:"飛行判定昇降率", description:"絶対昇降率がこの値以上で3秒継続すると飛行中と判定します。"},
+    flight_gps_speed_threshold_kmh: {scope:"shared", type:"float", min:1.0, max:100.0, unit:"km/h", label:"飛行判定GPS速度", description:"有効なGPS速度がこの値以上で連続2回観測されると飛行中と判定します。"},
+    stationary_confirm_seconds: {scope:"shared", type:"uint", min:10, max:600, unit:"秒", label:"静止確認時間", description:"静穏状態が継続して静止中と確定するまでの時間です。"},
     filter_mode: {scope:"shared", type:"enum", choices:["AUTO","BARO_ONLY"], label:"昇降率フィルター", description:"AUTOは気圧とIMUを融合し、BARO_ONLYは気圧だけを使用します。"},
     bluetooth_battery_mode: {scope:"shared", type:"enum", choices:["VOLTAGE","PERCENT"], label:"Bluetooth電池表示", description:"LK8EX1で電圧または残量率のどちらを送るか選びます。"},
     bluetooth_tx_power: {scope:"shared", type:"enum", choices:["MIN","LOW","NORMAL","HIGH"], choiceLabels:{MIN:"MIN (-24 dBm)",LOW:"LOW (-12 dBm)",NORMAL:"NORMAL (0 dBm)",HIGH:"HIGH (+9 dBm)"}, label:"Bluetooth送信電力", description:"通信距離と消費電力のバランスを選びます。"},
@@ -305,6 +308,7 @@
     gps_send_interval_ms: {scope:"shared", type:"uint", min:200, max:10000, unit:"ms", label:"GPS送信間隔", description:"GPS搭載モデルで測位データを更新・送信する間隔です。"},
     imu_gyro_calibration_samples: {scope:"shared", type:"uint", min:50, max:2000, unit:"samples", label:"ジャイロ校正サンプル数", description:"起動時の静止校正に使う連続サンプル数です。"},
 
+    audio_mute_when_stationary: {scope:"profile", type:"bool", label:"静止中のバリオ音停止", description:"飛行・静止判定がSTATIONARYの間だけ、リフト・シンク・予測音を停止します。通知音は停止しません。"},
     predictive_buzzer_enabled: {scope:"profile", type:"bool", label:"予測ブザー", description:"ゼロ付近の指定範囲で補助音を鳴らします。"},
     audio_climb_rate_average_s: {scope:"profile", type:"float", min:0, max:10, unit:"s", label:"音用上昇率平均時間", description:"音の判定・音程・テンポに使う移動平均時間です。0で平均しません。"},
     audio_state_hold_ms: {scope:"profile", type:"uint", min:0, max:1000, unit:"ms", label:"音状態の最小保持時間", description:"しきい値付近で音状態が頻繁に変わるのを抑えます。"},
@@ -333,13 +337,16 @@
   const PROFILE_KEYS = Object.keys(SPECS).filter(key => SPECS[key].scope === "profile");
   const EXPECTED_TOP_KEYS = ["format_version", "mc_parameters", "vario_parameter_sets"];
   const DEFAULT_SHARED = {
-    sea_level_pressure_pa:101325.0, auto_power_off_minutes:60, filter_mode:"AUTO",
+    sea_level_pressure_pa:101325.0, auto_power_off_minutes:60,
+    flight_climb_rate_threshold_mps:0.5, flight_gps_speed_threshold_kmh:10.0,
+    stationary_confirm_seconds:60, filter_mode:"AUTO",
     bluetooth_battery_mode:"PERCENT", bluetooth_tx_power:"LOW",
     bluetooth_notify_rate_hz:10, gps_send_interval_ms:1000,
     imu_gyro_calibration_samples:200
   };
   const DEFAULT_PROFILE = {
-    predictive_buzzer_enabled:false, audio_climb_rate_average_s:1.0,
+    audio_mute_when_stationary:false, predictive_buzzer_enabled:false,
+    audio_climb_rate_average_s:1.0,
     lift_start_mps:0.1, lift_end_mps:0.08, sink_start_mps:-1.8, sink_end_mps:-1.7,
     audio_state_hold_ms:200, audio_stale_ms:500, lift_freq_base_hz:1047,
     lift_freq_rate_hz_per_mps:100.0, lift_freq_max_hz:2600,

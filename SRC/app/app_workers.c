@@ -20,6 +20,7 @@
 #include "domain/firmware_metadata.h"
 #include "domain/imu_calibration_controller.h"
 #include "domain/imu_fusion.h"
+#include "domain/imu_motion.h"
 #include "domain/system_policy.h"
 #include "domain/vario_audio.h"
 #include "domain/vario_estimator.h"
@@ -112,6 +113,7 @@ typedef struct {
     uint32_t imu_consecutive_errors;
     imu_diagnostics_t imu_diagnostics;
     imu_fusion_t imu_fusion;
+    imu_motion_state_t imu_motion;
     imu_calibration_controller_t imu_calibration;
     app_config_t imu_config;
     vario_estimator_t estimator;
@@ -130,6 +132,9 @@ static app_config_profiles_t console_profile_snapshot;
 static auto_power_off_state_t system_auto_power_off_state;
 static app_config_t system_auto_power_off_config;
 static vario_result_t system_auto_power_off_vario;
+static gps_snapshot_t system_flight_state_gps;
+static imu_diagnostics_t system_flight_state_imu;
+static flight_state_detector_t system_flight_state_detector;
 static uint32_t system_auto_power_off_config_revision = 0U;
 static bool system_auto_power_off_config_revision_valid = false;
 static switch_preferences_t initial_switch_preferences = {
@@ -593,6 +598,17 @@ static void sensor_record_imu_error(sensor_task_state_t *state,
     }
 }
 
+static void sensor_reset_imu_motion(sensor_task_state_t *state) {
+    if (state == NULL) {
+        return;
+    }
+    imu_motion_reset(&state->imu_motion);
+    state->imu_diagnostics.motion_timestamp_us = 0;
+    state->imu_diagnostics.motion_acceleration_rms_g = 0.0f;
+    state->imu_diagnostics.motion_gyro_rms_dps = 0.0f;
+    state->imu_diagnostics.motion_valid = false;
+}
+
 static bool sensor_try_initialize_imu(sensor_task_state_t *state,
                                       i2c_master_bus_handle_t bus_handle,
                                       int64_t now_us) {
@@ -619,6 +635,7 @@ static bool sensor_try_initialize_imu(sensor_task_state_t *state,
         state->imu_diagnostics.configured = true;
         state->imu_diagnostics.stale = false;
         state->imu_diagnostics.address = identity.address;
+        sensor_reset_imu_motion(state);
         state->result.imu_online = true;
         state->result.imu_stale = false;
         imu_fusion_reset(&state->imu_fusion);
@@ -634,6 +651,7 @@ static bool sensor_try_initialize_imu(sensor_task_state_t *state,
         state->imu_diagnostics.fusion_active = false;
         state->imu_diagnostics.stale = true;
         state->imu_diagnostics.address = 0U;
+        sensor_reset_imu_motion(state);
         state->result.imu_online = false;
         state->result.imu_calibrated = false;
         state->result.imu_stale = true;
@@ -694,6 +712,7 @@ static void sensor_enter_storage_mode(sensor_task_state_t *state) {
     state->imu_diagnostics.fusion_active = false;
     state->imu_diagnostics.stale = false;
     state->imu_diagnostics.consecutive_error_count = 0U;
+    sensor_reset_imu_motion(state);
     set_bmp581_recovering(false);
     set_imu_lifecycle_state(false, false);
     (void) app_resources_publish_vario(&state->result);
@@ -756,6 +775,7 @@ static void sensor_invalidate_imu(sensor_task_state_t *state, bool stale) {
     state->imu_diagnostics.fusion_active = false;
     state->imu_diagnostics.stale = stale;
     state->imu_diagnostics.consecutive_error_count = 0U;
+    sensor_reset_imu_motion(state);
     memset(state->imu_diagnostics.quaternion, 0,
            sizeof(state->imu_diagnostics.quaternion));
     state->imu_diagnostics.roll_deg = 0.0f;
@@ -1045,6 +1065,7 @@ static bool sensor_handle_accel_calibration_skip(
     state->imu_diagnostics.attitude_valid = false;
     state->imu_diagnostics.fusion_active = false;
     state->imu_diagnostics.stale = true;
+    sensor_reset_imu_motion(state);
     sensor_sync_accel_calibration_diagnostics(state);
     set_imu_lifecycle_state(false, true);
 
@@ -1094,6 +1115,7 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     imu_sample_t sensor_sample = {0};
     imu_sample_t board_sample = {0};
     imu_fusion_output_t fusion_output = {0};
+    imu_motion_output_t motion_output = {0};
     uint32_t error_limit = SENSOR_CONSECUTIVE_ERROR_LIMIT;
     const imu_accel_calibration_t *accel_calibration = NULL;
     esp_err_t ret = ESP_OK;
@@ -1140,6 +1162,19 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
            sizeof(sensor_sample.gyro_radps));
     sensor_sample.timestamp_us = hxy_sample.timestamp_us;
     sensor_sample.valid = hxy_sample.valid;
+    if (imu_motion_update(&state->imu_motion, sensor_sample.accel_mps2,
+                          sensor_sample.gyro_radps,
+                          sensor_sample.timestamp_us, &motion_output)) {
+        state->imu_diagnostics.motion_timestamp_us =
+            sensor_sample.timestamp_us;
+        state->imu_diagnostics.motion_acceleration_rms_g =
+            motion_output.acceleration_rms_g;
+        state->imu_diagnostics.motion_gyro_rms_dps =
+            motion_output.gyro_rms_dps;
+        state->imu_diagnostics.motion_valid = motion_output.valid;
+    } else {
+        sensor_reset_imu_motion(state);
+    }
     accel_calibration = imu_calibration_controller_persisted(
         &state->imu_calibration);
     if (accel_calibration == NULL) {
@@ -1545,6 +1580,7 @@ void app_sensor_worker_task(void *context) {
         initial_imu_accel_calibration_diagnostics.io_error;
     sensor_sync_accel_calibration_diagnostics(&state);
     imu_fusion_reset(&state.imu_fusion);
+    imu_motion_reset(&state.imu_motion);
     state.publication_pending = true;
     {
         bool work_changed =
@@ -1931,8 +1967,9 @@ void app_audio_worker_task(void *context) {
         if (app_resources_copy_system(&system)) {
             apply_audio_overrides(&config, &system);
         }
-        vario_audio_step(&audio_state, &config, &result, esp_timer_get_time(),
-                         &command);
+        vario_audio_step(
+            &audio_state, &config, &result, esp_timer_get_time(),
+            system.motion_state == FLIGHT_STATE_STATIONARY, &command);
         if (command.sounding) {
             if (audio_output_apply(command.frequency_hz, command.duty_percent,
                                    command.amplifier_mode) != ESP_OK) {
@@ -2273,6 +2310,25 @@ static void request_power_off(system_snapshot_t *snapshot) {
     run_safe_stop_loop(safe_sleep_enabled, WATCHDOG_ACTOR_SYSTEM);
 }
 
+static bool system_gps_speed_available(const gps_snapshot_t *gps,
+                                       const app_config_t *config,
+                                       int64_t now_us) {
+    int64_t stale_timeout_us = 0;
+
+    if (gps == NULL || config == NULL || !gps->installed ||
+        !gps->communicating || !gps->fix_valid || !gps->speed_valid ||
+        !isfinite(gps->speed_kmh) || gps->speed_kmh < 0.0 ||
+        gps->last_receive_us <= 0 || now_us < gps->last_receive_us) {
+        return false;
+    }
+    stale_timeout_us =
+        (int64_t) config->gps_send_interval_ms * INT64_C(3000);
+    if (stale_timeout_us < INT64_C(3000000)) {
+        stale_timeout_us = INT64_C(3000000);
+    }
+    return now_us - gps->last_receive_us <= stale_timeout_us;
+}
+
 void app_system_worker_task(void *context) {
     EventGroupHandle_t event_group = app_resources_event_group();
     system_policy_state_t switch_policy = {0};
@@ -2293,6 +2349,8 @@ void app_system_worker_task(void *context) {
     ESP_LOGI(TAG, "system_task started on core %d", xPortGetCoreID());
     watchdog_registered = register_critical_watchdog(
         WATCHDOG_ACTOR_SYSTEM, "system_task");
+    auto_power_off_reset(&system_auto_power_off_state);
+    flight_state_reset(&system_flight_state_detector);
 
     switch_input.sw1_pressed = board_is_sw1_pressed();
     switch_input.sw2_pressed = system_io_sw2_pressed();
@@ -2321,10 +2379,13 @@ void app_system_worker_task(void *context) {
             (event_bits & APP_EVENT_STORAGE_MODE_REQUEST) != 0U;
         bool auto_power_off_issued = false;
         bool auto_power_off_config_valid = false;
-        bool auto_power_off_altitude_valid = false;
+        bool vario_copied = false;
+        bool gps_copied = false;
+        bool imu_copied = false;
         uint32_t auto_power_off_minutes = 0U;
         uint32_t auto_power_off_config_revision = 0U;
-        float auto_power_off_altitude_m = 0.0f;
+        flight_state_input_t motion_input = {0};
+        flight_state_output_t motion_output = {0};
 
         if ((event_bits & APP_EVENT_FATAL_STATE) != 0U) {
             watchdog_service_mark_stage(WATCHDOG_STAGE_FATAL);
@@ -2354,6 +2415,7 @@ void app_system_worker_task(void *context) {
                 auto_power_off_config_revision !=
                     system_auto_power_off_config_revision) {
                 auto_power_off_reset(&system_auto_power_off_state);
+                flight_state_reset(&system_flight_state_detector);
             }
             system_auto_power_off_config_revision =
                 auto_power_off_config_revision;
@@ -2363,21 +2425,79 @@ void app_system_worker_task(void *context) {
         } else {
             system_auto_power_off_config_revision_valid = false;
         }
-        if (app_resources_copy_vario(&system_auto_power_off_vario)) {
-            auto_power_off_altitude_valid =
-                system_auto_power_off_vario.estimate_valid;
-            auto_power_off_altitude_m =
-                system_auto_power_off_vario.altitude_m;
+        vario_copied =
+            app_resources_copy_vario(&system_auto_power_off_vario);
+        gps_copied = app_resources_copy_gps(&system_flight_state_gps);
+        imu_copied = app_resources_copy_imu_diagnostics(
+            &system_flight_state_imu);
+        if (!gps_copied) {
+            memset(&system_flight_state_gps, 0,
+                   sizeof(system_flight_state_gps));
         }
-        if (storage_mode_active) {
+        if (!imu_copied) {
+            memset(&system_flight_state_imu, 0,
+                   sizeof(system_flight_state_imu));
+        }
+        if (storage_mode_active || !auto_power_off_config_valid) {
             auto_power_off_reset(&system_auto_power_off_state);
+            flight_state_reset(&system_flight_state_detector);
         } else {
+            motion_input.now_us = snapshot.timestamp_us;
+            motion_input.climb_rate_threshold_mps =
+                system_auto_power_off_config
+                    .flight_climb_rate_threshold_mps;
+            motion_input.gps_speed_threshold_kmh =
+                system_auto_power_off_config
+                    .flight_gps_speed_threshold_kmh;
+            motion_input.stationary_confirm_seconds =
+                system_auto_power_off_config.stationary_confirm_seconds;
+            motion_input.vario_available =
+                vario_copied && system_auto_power_off_vario.estimate_valid &&
+                system_auto_power_off_vario.climb_rate_valid;
+            motion_input.vario_timestamp_us =
+                system_auto_power_off_vario.timestamp_us;
+            motion_input.altitude_m =
+                system_auto_power_off_vario.altitude_m;
+            motion_input.climb_rate_mps =
+                system_auto_power_off_vario.climb_rate_mps;
+            motion_input.gps_available = gps_copied &&
+                system_gps_speed_available(
+                    &system_flight_state_gps,
+                    &system_auto_power_off_config,
+                    snapshot.timestamp_us);
+            motion_input.gps_sequence = system_flight_state_gps.sequence;
+            motion_input.gps_speed_kmh =
+                (float) system_flight_state_gps.speed_kmh;
+            motion_input.imu_available =
+                imu_copied && system_flight_state_imu.online &&
+                !system_flight_state_imu.stale &&
+                system_flight_state_imu.motion_valid;
+            motion_input.imu_timestamp_us =
+                system_flight_state_imu.motion_timestamp_us;
+            motion_input.imu_acceleration_rms_g =
+                system_flight_state_imu.motion_acceleration_rms_g;
+            motion_input.imu_gyro_rms_dps =
+                system_flight_state_imu.motion_gyro_rms_dps;
+            flight_state_update(&system_flight_state_detector,
+                                &motion_input, &motion_output);
             auto_power_off_issued = auto_power_off_update(
                 &system_auto_power_off_state, auto_power_off_minutes,
                 snapshot.external_power_present,
-                auto_power_off_config_valid && auto_power_off_altitude_valid,
-                auto_power_off_altitude_m, snapshot.timestamp_us);
+                motion_output.state == FLIGHT_STATE_STATIONARY,
+                motion_output.stationary_since_us,
+                snapshot.timestamp_us);
         }
+        snapshot.motion_state = motion_output.state;
+        snapshot.motion_evidence = motion_output.evidence;
+        snapshot.motion_state_elapsed_s =
+            motion_output.state_elapsed_seconds;
+        snapshot.stationary_elapsed_s =
+            motion_output.stationary_elapsed_seconds;
+        snapshot.motion_altitude_range_m =
+            motion_output.altitude_range_m;
+        snapshot.motion_vario_used = motion_output.vario_used;
+        snapshot.motion_gps_used = motion_output.gps_used;
+        snapshot.motion_imu_used = motion_output.imu_used;
 
         if (switch_actions.advance_volume) {
             snapshot.volume_level =
@@ -2456,9 +2576,9 @@ void app_system_worker_task(void *context) {
         if (auto_power_off_issued) {
             ESP_LOGI(TAG,
                      "automatic power-off requested after %" PRIu32
-                     " minutes within %.1f m altitude range",
+                     " stationary minutes (motion_state=%s)",
                      auto_power_off_minutes,
-                     (double) AUTO_POWER_OFF_ALTITUDE_RANGE_M);
+                     flight_state_name(snapshot.motion_state));
         }
         if (storage_mode_active &&
             (switch_actions.request_power_off || auto_power_off_issued ||
@@ -2484,7 +2604,7 @@ void app_system_worker_task(void *context) {
 }
 
 static bool console_writef(const char *format, ...) {
-    char output[1280] = {0};
+    char output[2048] = {0};
     va_list arguments;
     int written = 0;
 
@@ -2585,11 +2705,20 @@ static bool console_write_monitor_line(void) {
         " imu_samples=%" PRIu32
         " imu_missed=%" PRIu32
         " imu_confidence=%.3f imu_vibration_rms_g=%.4f"
+        " imu_motion_valid=%d imu_motion_accel_rms_g=%.4f"
+        " imu_motion_gyro_rms_dps=%.3f"
         " imu_kp_effective=%.4f imu_ki_effective=%.4f"
         " imu_ki_active=%d"
         " imu_cal_samples=%" PRIu32
         " imu_cal_save_pending=%d imu_cal_storage=%s"
         " imu_cal_storage_error=%" PRId32
+        " motion_state=%s motion_evidence=%" PRIu32
+        " motion_altitude_evidence=%d motion_climb_evidence=%d"
+        " motion_gps_evidence=%d motion_imu_evidence=%d"
+        " motion_state_elapsed_s=%" PRIu32
+        " stationary_elapsed_s=%" PRIu32
+        " motion_altitude_range_m=%.2f motion_vario_used=%d"
+        " motion_gps_used=%d motion_imu_used=%d"
         " stream_drops=%" PRIu32 "\r\n",
         vario.sequence, vario.timestamp_us, vario.bmp581_online,
         vario.pressure_valid, vario.raw_temperature, vario.raw_pressure,
@@ -2619,6 +2748,8 @@ static bool console_write_monitor_line(void) {
         (double) vario.kalman_accel_r_m2_s4,
         imu.sample_count, vario.missed_imu_sample_count,
         (double) imu.confidence, (double) imu.vibration_rms_g,
+        imu.motion_valid, (double) imu.motion_acceleration_rms_g,
+        (double) imu.motion_gyro_rms_dps,
         (double) imu.kp_effective, (double) imu.ki_effective,
         imu.ki_active,
         imu.accel_calibration_sample_count,
@@ -2627,6 +2758,15 @@ static bool console_write_monitor_line(void) {
             (imu_calibration_storage_result_t)
                 imu.accel_calibration_storage_result),
         imu.accel_calibration_storage_error,
+        flight_state_name(system.motion_state), system.motion_evidence,
+        (system.motion_evidence & FLIGHT_EVIDENCE_ALTITUDE_RANGE) != 0U,
+        (system.motion_evidence & FLIGHT_EVIDENCE_CLIMB_RATE) != 0U,
+        (system.motion_evidence & FLIGHT_EVIDENCE_GPS_SPEED) != 0U,
+        (system.motion_evidence & FLIGHT_EVIDENCE_IMU_ACTIVITY) != 0U,
+        system.motion_state_elapsed_s, system.stationary_elapsed_s,
+        (double) system.motion_altitude_range_m,
+        system.motion_vario_used, system.motion_gps_used,
+        system.motion_imu_used,
         serial_monitor_drop_count);
 }
 
@@ -2748,6 +2888,7 @@ static void console_diag_status(void) {
     switch_preferences_diagnostics_t switch_diagnostics = {0};
     watchdog_diagnostics_t watchdog = {0};
     int64_t now_us = esp_timer_get_time();
+    int64_t gps_age_ms = -1;
     const char *config_key = usb.config.key;
     const char *update_target = update.target_partition;
     const char *update_version = update.image_version;
@@ -2767,6 +2908,9 @@ static void console_diag_status(void) {
     app_power_get_diagnostics(&power);
     switch_preferences_get_diagnostics(&switch_diagnostics);
     watchdog_service_get_diagnostics(&watchdog);
+    if (gps.last_receive_us > 0 && now_us >= gps.last_receive_us) {
+        gps_age_ms = (now_us - gps.last_receive_us) / INT64_C(1000);
+    }
     if (usb.config.key[0] == '\0') {
         config_key = "-";
     }
@@ -2823,6 +2967,8 @@ static void console_diag_status(void) {
         "accel_offset_mps2=%.5f,%.5f,%.5f "
         "gyro_bias_radps=%.5f,%.5f,%.5f "
         "confidence=%.3f vibration_rms_g=%.4f "
+        "motion_valid=%d motion_accel_rms_g=%.4f "
+        "motion_gyro_rms_dps=%.3f "
         "kp_effective=%.4f ki_effective=%.4f ki_active=%d "
         "mc_data=%s mc_error=%" PRId32 " "
         "q=%.5f,%.5f,%.5f,%.5f roll_deg=%.2f pitch_deg=%.2f "
@@ -2845,6 +2991,8 @@ static void console_diag_status(void) {
         (double) imu.gyro_bias_radps[1],
         (double) imu.gyro_bias_radps[2],
         (double) imu.confidence, (double) imu.vibration_rms_g,
+        imu.motion_valid, (double) imu.motion_acceleration_rms_g,
+        (double) imu.motion_gyro_rms_dps,
         (double) imu.kp_effective, (double) imu.ki_effective,
         imu.ki_active,
         imu_calibration_storage_result_name(
@@ -2866,7 +3014,12 @@ static void console_diag_status(void) {
         " sw3_hold_ms=%" PRIu32
         " volume_override=%d volume_level=%d sink_override=%d"
         " sink_enabled=%d parameter_number=%u vario_parameter_sets=%u"
-        " switch_dirty=%d power_off=%d\r\n",
+        " switch_dirty=%d power_off=%d motion_state=%s"
+        " motion_evidence=%" PRIu32
+        " motion_state_elapsed_s=%" PRIu32
+        " stationary_elapsed_s=%" PRIu32
+        " motion_altitude_range_m=%.2f motion_vario_used=%d"
+        " motion_gps_used=%d motion_imu_used=%d\r\n",
         system.battery_valid, (double) system.battery_voltage_v,
         system.battery_display_valid,
         (double) system.battery_display_voltage_v,
@@ -2881,7 +3034,12 @@ static void console_diag_status(void) {
         (unsigned int) system.parameter_number,
         (unsigned int) system.parameter_set_count,
         system.switch_preferences_dirty,
-        system.power_off_requested);
+        system.power_off_requested, flight_state_name(system.motion_state),
+        system.motion_evidence, system.motion_state_elapsed_s,
+        system.stationary_elapsed_s,
+        (double) system.motion_altitude_range_m,
+        system.motion_vario_used, system.motion_gps_used,
+        system.motion_imu_used);
     console_writef(
         "SWITCH source=%s load=%s load_error=%s save_result=%s"
         " clear_result=%s load_errors=%" PRIu32
@@ -2981,13 +3139,16 @@ static void console_diag_status(void) {
         watchdog.feed_failure_count, watchdog.recovery_record_valid);
     console_writef(
         "GPS installed=%d identified=%d communicating=%d fix=%d"
+        " speed_valid=%d speed_kmh=%.2f motion_speed_used=%d"
+        " age_ms=%" PRId64
         " baud=%" PRIu32 " sequence=%" PRIu32
         " received=%" PRIu32 " invalid=%" PRIu32
         " updates=%" PRIu32 " retries=%" PRIu32
         " sent=%" PRIu32 " dropped=%" PRIu32
         " last_receive_us=%" PRId64 " last_error=%s(%" PRId32 ")\r\n",
         gps.installed, gps.identified, gps.communicating, gps.fix_valid,
-        gps.baud_rate, gps.sequence, gps.received_sentence_count,
+        gps.speed_valid, gps.speed_kmh, system.motion_gps_used,
+        gps_age_ms, gps.baud_rate, gps.sequence, gps.received_sentence_count,
         gps.invalid_sentence_count, gps.paired_update_count, gps.retry_count,
         ble.gps_pair_count, ble.gps_dropped_pair_count, gps.last_receive_us,
         esp_err_to_name((esp_err_t) gps.last_error), gps.last_error);

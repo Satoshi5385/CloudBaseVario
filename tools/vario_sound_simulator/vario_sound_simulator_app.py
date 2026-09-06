@@ -80,6 +80,7 @@ PARAMETER_GROUPS = (
         "General",
         (
             "audio_enabled",
+            "audio_mute_when_stationary",
             "audio_climb_rate_average_s",
             "audio_state_hold_ms",
             "audio_stale_ms",
@@ -166,6 +167,7 @@ class VarioSoundSimulatorApp:
         self.validation_var = tk.StringVar(value="Configuration is valid")
         self.rate_entry_var = tk.StringVar(value="0.00")
         self.rate_scale_var = tk.DoubleVar(value=0.0)
+        self.stationary_var = tk.BooleanVar(value=False)
         self.volume_var = tk.DoubleVar(value=35.0)
         self.volume_text_var = tk.StringVar(value="35 %")
         self.run_status_var = tk.StringVar(value="Stopped")
@@ -372,8 +374,14 @@ class VarioSoundSimulatorApp:
             row=2, column=3, sticky="e", padx=(0, 10), pady=(6, 4)
         )
 
+        ttk.Checkbutton(
+            controls,
+            text="Flight state: STATIONARY",
+            variable=self.stationary_var,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=10, pady=(6, 4))
+
         buttons = ttk.Frame(controls, style="Panel.TFrame")
-        buttons.grid(row=3, column=0, columnspan=4, sticky="ew", padx=10, pady=(8, 12))
+        buttons.grid(row=4, column=0, columnspan=4, sticky="ew", padx=10, pady=(8, 12))
         self.start_button = ttk.Button(
             buttons, text="Start", style="Accent.TButton", command=self._start
         )
@@ -695,7 +703,8 @@ class VarioSoundSimulatorApp:
                 climb_rate_mps=self.climb_rate_mps,
             )
             self.command = vario_audio_step(
-                self.audio_state, self.values, sample, now_s
+                self.audio_state, self.values, sample, now_s,
+                stationary=self.stationary_var.get(),
             )
         else:
             self.last_tick_s = now_s

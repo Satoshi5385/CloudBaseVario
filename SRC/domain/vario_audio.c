@@ -191,6 +191,7 @@ void vario_audio_step(vario_audio_state_t *state,
                       const app_config_t *config,
                       const vario_result_t *result,
                       int64_t now_us,
+                      bool stationary,
                       vario_audio_command_t *command) {
     vario_audio_mode_t requested = VARIO_AUDIO_SILENT;
     float climb_rate_mps = 0.0f;
@@ -205,7 +206,9 @@ void vario_audio_step(vario_audio_state_t *state,
 
     sample_age_us = now_us - result->timestamp_us;
     force_silent =
-        !config->audio_enabled || !result->climb_rate_valid ||
+        !config->audio_enabled ||
+        (config->audio_mute_when_stationary && stationary) ||
+        !result->climb_rate_valid ||
         !isfinite(result->climb_rate_mps) || sample_age_us < 0 ||
         sample_age_us > (int64_t) config->audio_stale_ms * INT64_C(1000);
     if (force_silent) {

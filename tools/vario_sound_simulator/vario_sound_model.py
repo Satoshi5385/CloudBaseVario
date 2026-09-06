@@ -250,10 +250,12 @@ def vario_audio_step(
     config: Mapping[str, Any],
     sample: VarioSample,
     now_s: float,
+    stationary: bool = False,
 ) -> VarioAudioCommand:
     sample_age_s = now_s - sample.timestamp_s
     force_silent = (
         not config["audio_enabled"]
+        or (config["audio_mute_when_stationary"] and stationary)
         or not sample.climb_rate_valid
         or not math.isfinite(sample.climb_rate_mps)
         or sample_age_s < 0.0

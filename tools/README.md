@@ -18,8 +18,8 @@
 - 気圧、高度、昇降率、鉛直加速度、温度の飛行値表示
 - 気圧、昇降率、鉛直加速度の直近60秒グラフ
 - IMUのroll／pitch人工水平儀、yaw、クォータニオン表示
-- BARO、推定、IMU、較正、姿勢、融合、BLE Notify、GPS、シリアルストリームの状態表示
-- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、LK8EX1/BLE、GPS測位値と通信状態、ストリーム状態を表示
+- BARO、推定、IMU、較正、姿勢、融合、移動状態、BLE Notify、GPS、シリアルストリームの状態表示
+- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、IMU活動量、飛行証拠、静止経過時間、GPS速度の採否・鮮度、LK8EX1/BLE、GPS測位値と通信状態、ストリーム状態を表示
 - 全テレメトリーフィールドの一覧表示
 - `PARAM LIST`によるパラメーター一覧取得
 - `PARAM SET`、`PARAM RESET`、`PARAM SAVE`操作
@@ -90,14 +90,14 @@ python -m venv .venv
 
 `Audio enabled`、`Sink enabled`、`Amplifier mode`は、実機のSW1／SW2操作を試す保存されないシミュレーション操作です。ファイルを開いた直後は小音量・シンク音ON相当のruntime既定値を使用し、編集してもJSONのdirty判定や保存結果には含めません。
 
-仮想高度は、設定した昇降率と実経過時間を10 ms周期で積分します。音判定には`audio_climb_rate_average_s`で指定した単純移動平均を使い、右側には現在の状態、発音位相、周波数、仮想高度、入力上昇率および音響用平均上昇率を表示します。
+仮想高度は、設定した昇降率と実経過時間を10 ms周期で積分します。音判定には`audio_climb_rate_average_s`で指定した単純移動平均を使い、右側には現在の状態、発音位相、周波数、仮想高度、入力上昇率および音響用平均上昇率を表示します。`Flight state: STATIONARY`を選ぶと、`audio_mute_when_stationary`による停止動作を再現できます。
 
 ## JSONの読込みと保存
 
-- `New`は共通8項目と番号1の音関連22項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
+- `New`は共通11項目と番号1の音関連23項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
 - `Open...`はfirmwareと同じversion 1の共通／セット分離構造、全項目、型、範囲および項目間関係を検証します。`Parameter set`から編集対象番号を選択できます。旧ファイル名、旧version、旧キーおよび全項目を各セットへ格納する旧ドラフトは読み込みません。
 - `Save`は確認後に現在のファイルを上書きし、`Save As...`は任意のJSONファイルへ保存します。
-- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通8項目と未選択セットを維持し、選択セットの音関連22項目だけをGUIの値で置き換えます。
+- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通11項目と未選択セットを維持し、選択セットの音関連23項目だけをGUIの値で置き換えます。
 - version 1～6、旧ボード軸項目、旧 `i2c_reinit_error_count`／`imu_mahony_kp`／`imu_mahony_ki`、および旧 `audio_enabled`／`audio_amp_mode`／`sink_enabled` を含むファイルは現行firmwareと同様に拒否し、自動移行しません。
 - 一時ファイルを書いて再読込み検証してから置換するため、書込みまたは検証に失敗した場合は既存ファイルを変更しません。
 

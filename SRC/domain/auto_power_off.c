@@ -1,6 +1,5 @@
 #include "domain/auto_power_off.h"
 
-#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -13,12 +12,13 @@ void auto_power_off_reset(auto_power_off_state_t *state) {
     memset(state, 0, sizeof(*state));
 }
 
-static void start_tracking(auto_power_off_state_t *state, float altitude_m,
+static void start_tracking(auto_power_off_state_t *state,
+                           int64_t candidate_since_us,
+                           int64_t started_us,
                            int64_t now_us) {
-    state->started_us = now_us;
+    state->started_us = started_us;
+    state->candidate_since_us = candidate_since_us;
     state->last_update_us = now_us;
-    state->minimum_altitude_m = altitude_m;
-    state->maximum_altitude_m = altitude_m;
     state->tracking = true;
     state->triggered = false;
 }
@@ -33,10 +33,11 @@ static void reset_tracking(auto_power_off_state_t *state) {
 bool auto_power_off_update(auto_power_off_state_t *state,
                            uint32_t configured_minutes,
                            bool external_power_present,
-                           bool altitude_valid,
-                           float altitude_m,
+                           bool stationary,
+                           int64_t stationary_since_us,
                            int64_t now_us) {
     int64_t required_us = 0;
+    int64_t effective_stationary_since_us = stationary_since_us;
 
     if (state == NULL) {
         return false;
@@ -45,31 +46,38 @@ bool auto_power_off_update(auto_power_off_state_t *state,
         auto_power_off_reset(state);
         state->configured_minutes = configured_minutes;
     }
-    if (configured_minutes == 0U || external_power_present ||
-        !altitude_valid || !isfinite(altitude_m) || now_us < 0) {
+    if (external_power_present) {
         reset_tracking(state);
+        if (stationary) {
+            state->blocked_stationary_since_us = stationary_since_us;
+        }
+        return false;
+    }
+    if (configured_minutes == 0U || !stationary ||
+        stationary_since_us < 0 || stationary_since_us > now_us ||
+        now_us < 0) {
+        reset_tracking(state);
+        state->blocked_stationary_since_us = 0;
         return false;
     }
     if (state->tracking && now_us < state->last_update_us) {
         reset_tracking(state);
+        start_tracking(state, stationary_since_us, now_us, now_us);
+        return false;
     }
     if (!state->tracking) {
-        start_tracking(state, altitude_m, now_us);
-        return false;
+        if (state->blocked_stationary_since_us == stationary_since_us) {
+            effective_stationary_since_us = now_us;
+        }
+        start_tracking(state, stationary_since_us,
+                       effective_stationary_since_us, now_us);
+        state->blocked_stationary_since_us = 0;
+    } else if (state->candidate_since_us != stationary_since_us) {
+        start_tracking(state, stationary_since_us,
+                       stationary_since_us, now_us);
     }
 
     state->last_update_us = now_us;
-    if (altitude_m < state->minimum_altitude_m) {
-        state->minimum_altitude_m = altitude_m;
-    }
-    if (altitude_m > state->maximum_altitude_m) {
-        state->maximum_altitude_m = altitude_m;
-    }
-    if (state->maximum_altitude_m - state->minimum_altitude_m >
-        AUTO_POWER_OFF_ALTITUDE_RANGE_M) {
-        start_tracking(state, altitude_m, now_us);
-        return false;
-    }
     if (state->triggered) {
         return false;
     }

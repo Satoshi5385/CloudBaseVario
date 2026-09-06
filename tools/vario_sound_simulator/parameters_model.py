@@ -60,6 +60,9 @@ class ConfigDocument:
 PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "sea_level_pressure_pa": ParameterSpec("float", 101325.0, 80000.0, 110000.0),
     "auto_power_off_minutes": ParameterSpec("uint", 60, 0.0, 1440.0),
+    "flight_climb_rate_threshold_mps": ParameterSpec("float", 0.5, 0.1, 5.0),
+    "flight_gps_speed_threshold_kmh": ParameterSpec("float", 10.0, 1.0, 100.0),
+    "stationary_confirm_seconds": ParameterSpec("uint", 60, 10.0, 600.0),
     "filter_mode": ParameterSpec(
         "enum", "AUTO", choices=("AUTO", "BARO_ONLY")
     ),
@@ -72,6 +75,7 @@ PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "bluetooth_notify_rate_hz": ParameterSpec("uint", 10, 1.0, 50.0),
     "gps_send_interval_ms": ParameterSpec("uint", 1000, 200.0, 10000.0),
     "imu_gyro_calibration_samples": ParameterSpec("uint", 200, 50.0, 2000.0),
+    "audio_mute_when_stationary": ParameterSpec("bool", False, audio=True),
     "predictive_buzzer_enabled": ParameterSpec("bool", False, audio=True),
     "audio_climb_rate_average_s": ParameterSpec("float", 1.0, 0.0, 10.0, True),
     "lift_start_mps": ParameterSpec("float", 0.10, -1.0, 5.0, True),
