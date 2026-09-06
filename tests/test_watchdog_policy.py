@@ -14,7 +14,12 @@ POLICY = (ROOT / "SRC/domain/watchdog_recovery_policy.c").read_text(
     encoding="utf-8"
 )
 SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
-WORKFLOW = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+WORKFLOW = "\n".join(
+    (
+        (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8"),
+        (ROOT / "ci/run_ci.sh").read_text(encoding="utf-8"),
+    )
+)
 
 
 class WatchdogPolicyTests(unittest.TestCase):

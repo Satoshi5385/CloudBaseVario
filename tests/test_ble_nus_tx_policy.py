@@ -9,7 +9,12 @@ PLATFORM = (ROOT / "SRC/platform/ble_vario.c").read_text(encoding="utf-8")
 PLATFORM_HEADER = (ROOT / "SRC/platform/ble_vario.h").read_text(encoding="utf-8")
 WORKER = (ROOT / "SRC/app/ble_tx_worker.c").read_text(encoding="utf-8")
 DIAGNOSTICS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
-CI = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+CI = "\n".join(
+    (
+        (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8"),
+        (ROOT / "ci/run_ci.sh").read_text(encoding="utf-8"),
+    )
+)
 SDKCONFIG_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
 
 

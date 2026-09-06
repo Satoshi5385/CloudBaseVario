@@ -14,6 +14,27 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
+### GitHub Actionsのローカル検証
+
+WindowsではDocker DesktopをLinux containersモードで起動し、リポジトリの
+ルートから次を実行します。
+
+```powershell
+.\tools\run_ci.ps1
+```
+
+GitHub Actionsと同じ`espressif/idf:v6.0.2` image内で、Python回帰テスト、
+Python compile check、SDK非依存Cテスト、ESP32-S3 firmware build、および
+生成済みwatchdog/Bluetooth設定の確認を順番に実行します。初回はDocker image
+の取得に時間がかかります。現在の作業ツリーをそのままmountするため、未コミット
+変更も検証対象となります。ローカルの通常buildと干渉しないよう、firmwareの
+生成物は`build-ci/`、生成済み設定は`sdkconfig.ci`へ分離します。特定の段階だけを
+再実行する場合は、例として`.\tools\run_ci.ps1 -Stage host-c`を使用できます。
+
+このローカル実行はbuild jobのコマンドを共有して検証するもので、GitHub側の
+trigger、repository permission、`actions/checkout`およびrunner障害までは
+再現しません。それらはpush後のGitHub Actionsで確認します。
+
 ファームウェアのリリース版番号は `SRC/firmware_version.h` の
 `CBV_FIRMWARE_VERSION`を手動で更新します。ビルド時にはこの版番号とHEADの
 7桁Git hashを組み合わせてimageへ埋め込みます。未コミット変更の有無はhashへ
@@ -71,6 +92,7 @@ VS CodeではESP-IDF拡張機能を使用してください。共有設定では
 - `tools/`: Monitor GUI、Sound Simulator
 - `tests/`: Python回帰テスト、SDK非依存Cテスト、およびテスト支援モジュール
 - `components/esp_tinyusb/`: MSC書込み完了保証の修正を含むローカル`esp_tinyusb` component
+- `ci/run_ci.sh`: GitHub ActionsとローカルDockerで共有するCIコマンド
 - `DOC/SW_spec.md`: ソフトウェア要件と簡易設計
 - `DOC/HW_spec.md`: ESP32-S3 GPIO・周辺インターフェース仕様
 - `DOC/BLE_IF.md`: XCTrack連携用BLEインターフェース仕様

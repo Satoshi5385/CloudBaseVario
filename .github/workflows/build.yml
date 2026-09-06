@@ -22,63 +22,19 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Run Python tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+        run: bash ci/run_ci.sh python-tests
 
       - name: Check Python tools
-        run: python -m compileall -q tools tests
+        run: bash ci/run_ci.sh python-compile
 
       - name: Configure ESP32-S3 target
-        run: /opt/esp/entrypoint.sh idf.py set-target esp32s3
+        run: bash ci/run_ci.sh configure
 
       - name: Build and run host C tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_auto_power_off.c SRC/domain/auto_power_off.c -lm -o /tmp/test_auto_power_off
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_update_policy.c SRC/domain/firmware_update_policy.c -lm -o /tmp/test_firmware_update_policy
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_pending_record.c SRC/domain/firmware_pending_record.c -o /tmp/test_firmware_pending_record
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_firmware_metadata.c SRC/domain/firmware_metadata.c -o /tmp/test_firmware_metadata
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_info.c SRC/domain/board_identity.c SRC/domain/board_info.c SRC/domain/firmware_metadata.c SRC/domain/firmware_authentication.c -o /tmp/test_board_info
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_vario_audio.c SRC/domain/app_config.c SRC/domain/vario_audio.c -lm -o /tmp/test_vario_audio
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_system_policy.c SRC/domain/system_policy.c -o /tmp/test_system_policy
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_imu_calibration_controller.c SRC/domain/imu_calibration_controller.c SRC/domain/imu_fusion.c SRC/domain/app_config.c -lm -o /tmp/test_imu_calibration_controller
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_lk8ex1.c SRC/domain/lk8ex1.c SRC/domain/battery_level.c -lm -o /tmp/test_lk8ex1
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_ble_nus_tx.c SRC/domain/ble_nus_tx.c -o /tmp/test_ble_nus_tx
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_usb_storage_policy.c SRC/domain/usb_storage_policy.c -o /tmp/test_usb_storage_policy
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_watchdog_recovery_policy.c SRC/domain/watchdog_recovery_policy.c -o /tmp/test_watchdog_recovery_policy
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I SRC tests/test_board_identity.c SRC/domain/board_identity.c -o /tmp/test_board_identity
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I components/esp_tinyusb/include_private tests/test_storage_psram_buffer.c components/esp_tinyusb/storage_psram_buffer.c -o /tmp/test_storage_psram_buffer
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -I tests/host_stubs -I SRC -I managed_components/espressif__cjson/cJSON tests/test_config_json.c SRC/platform/config_json.c SRC/domain/app_config.c managed_components/espressif__cjson/cJSON/cJSON.c -lm -o /tmp/test_config_json
-          /tmp/test_auto_power_off
-          /tmp/test_firmware_update_policy
-          /tmp/test_firmware_pending_record
-          /tmp/test_firmware_metadata
-          /tmp/test_board_info
-          /tmp/test_vario_audio
-          /tmp/test_system_policy
-          /tmp/test_imu_calibration_controller
-          /tmp/test_lk8ex1
-          /tmp/test_ble_nus_tx
-          /tmp/test_usb_storage_policy
-          /tmp/test_watchdog_recovery_policy
-          /tmp/test_board_identity
-          /tmp/test_storage_psram_buffer
-          /tmp/test_config_json
+        run: bash ci/run_ci.sh host-c
 
       - name: Build firmware
-        run: /opt/esp/entrypoint.sh idf.py build
+        run: bash ci/run_ci.sh firmware
 
       - name: Verify effective watchdog configuration
-        run: |
-          grep -Fx '#define CONFIG_BOOTLOADER_WDT_TIME_MS 9000' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_INT_WDT_TIMEOUT_MS 300' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_INT_WDT_CHECK_CPU1 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_TASK_WDT_PANIC 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_TASK_WDT_TIMEOUT_S 5' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_ESP_COREDUMP_ENABLE_TO_NONE 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_BT_NIMBLE_MAX_CCCDS 3' build/config/sdkconfig.h
-          grep -Fx '#define CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU 247' build/config/sdkconfig.h
+        run: bash ci/run_ci.sh configuration

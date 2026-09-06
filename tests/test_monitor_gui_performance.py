@@ -5,7 +5,13 @@ from __future__ import annotations
 import unittest
 
 from tools.monitor_gui.cloudbasevario_serial import SerialEventInbox
-from tools.monitor_gui.cloudbasevario_widgets import downsample_values
+
+try:
+    from tools.monitor_gui.cloudbasevario_widgets import downsample_values
+except ModuleNotFoundError as error:
+    if error.name != "tkinter":
+        raise
+    downsample_values = None
 
 
 class SerialEventInboxTests(unittest.TestCase):
@@ -34,6 +40,7 @@ class SerialEventInboxTests(unittest.TestCase):
         self.assertEqual(inbox.get_nowait(), ("serial_error", "read failed"))
 
 
+@unittest.skipIf(downsample_values is None, "Tkinter is unavailable")
 class ChartReductionTests(unittest.TestCase):
     def test_downsampling_retains_bucket_extrema(self) -> None:
         values = [(float(index), float(index % 17)) for index in range(600)]

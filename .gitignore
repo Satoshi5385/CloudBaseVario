@@ -21,6 +21,7 @@ Desktop.ini
 **/build/
 sdkconfig
 sdkconfig.old
+sdkconfig.ci
 flasher_args.json
 *.bin
 *.elf
