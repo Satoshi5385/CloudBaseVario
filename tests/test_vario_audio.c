@@ -77,9 +77,8 @@ static void test_parameter_contract(void) {
     size_t profile_count = 0U;
 
     app_config_set_defaults(&config);
-    assert(app_config_parameter_count() == 34U);
+    assert(app_config_parameter_count() == 33U);
     assert(config.auto_power_off_minutes == 60U);
-    assert(fabsf(config.flight_climb_rate_threshold_mps - 0.5f) < 0.001f);
     assert(fabsf(config.flight_gps_speed_threshold_kmh - 10.0f) < 0.001f);
     assert(config.stationary_confirm_seconds == 60U);
     assert(config.bluetooth_battery_mode ==
@@ -100,7 +99,6 @@ static void test_parameter_contract(void) {
     assert(has_parameter("bluetooth_tx_power"));
     assert(has_parameter("bluetooth_notify_rate_hz"));
     assert(has_parameter("gps_send_interval_ms"));
-    assert(has_parameter("flight_climb_rate_threshold_mps"));
     assert(has_parameter("flight_gps_speed_threshold_kmh"));
     assert(has_parameter("stationary_confirm_seconds"));
     assert(!has_parameter("i2c_reinit_error_count"));
@@ -120,13 +118,9 @@ static void test_parameter_contract(void) {
             profile_count++;
         }
     }
-    assert(shared_count == 11U);
+    assert(shared_count == 10U);
     assert(profile_count == 23U);
     assert(app_config_validate(&config));
-    assert(app_config_set_text(&config,
-                               "flight_climb_rate_threshold_mps", "0.1"));
-    assert(!app_config_set_text(&config,
-                                "flight_climb_rate_threshold_mps", "0.09"));
     assert(app_config_set_text(&config,
                                "flight_gps_speed_threshold_kmh", "100"));
     assert(!app_config_set_text(&config,

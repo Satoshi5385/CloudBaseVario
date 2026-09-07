@@ -25,7 +25,7 @@ class BluetoothTxPowerConfigTests(unittest.TestCase):
             document.mc_parameters["bluetooth_battery_mode"], "PERCENT"
         )
         self.assertEqual(document.mc_parameters["bluetooth_tx_power"], "LOW")
-        self.assertEqual(len(document.mc_parameters), 11)
+        self.assertEqual(len(document.mc_parameters), 10)
 
         for preset in ("MIN", "LOW", "NORMAL", "HIGH"):
             candidate = copy.deepcopy(self.raw_document)

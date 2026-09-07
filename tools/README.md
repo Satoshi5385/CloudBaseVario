@@ -19,7 +19,7 @@
 - 気圧、昇降率、鉛直加速度の直近60秒グラフ
 - IMUのroll／pitch人工水平儀、yaw、クォータニオン表示
 - BARO、推定、IMU、較正、姿勢、融合、移動状態、BLE Notify、GPS、シリアルストリームの状態表示
-- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、IMU活動量、飛行証拠、静止経過時間、GPS速度の採否・鮮度、LK8EX1/BLE、GPS測位値と通信状態、ストリーム状態を表示
+- `Diagnostics`タブでBMP581／Kalman品質、IMU信頼度・振動・実効Mahonyゲイン・加速度校正、高度幅・GPS速度による飛行証拠、静止確認時間、自動OFF経過時間、GPS速度の採否・鮮度、LK8EX1/BLE、GPS測位値と通信状態、ストリーム状態を表示
 - 全テレメトリーフィールドの一覧表示
 - `PARAM LIST`によるパラメーター一覧取得
 - `PARAM SET`、`PARAM RESET`、`PARAM SAVE`操作
@@ -94,10 +94,10 @@ python -m venv .venv
 
 ## JSONの読込みと保存
 
-- `New`は共通11項目と番号1の音関連23項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
+- `New`は共通10項目と番号1の音関連23項目を組込み既定値で作成し、保存されない3個の音声操作をruntime既定値へ戻します。
 - `Open...`はfirmwareと同じversion 1の共通／セット分離構造、全項目、型、範囲および項目間関係を検証します。`Parameter set`から編集対象番号を選択できます。旧ファイル名、旧version、旧キーおよび全項目を各セットへ格納する旧ドラフトは読み込みません。
 - `Save`は確認後に現在のファイルを上書きし、`Save As...`は任意のJSONファイルへ保存します。
-- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通11項目と未選択セットを維持し、選択セットの音関連23項目だけをGUIの値で置き換えます。
+- 保存結果は常にUTF-8の完全な`format_version: 1`です。共通10項目と未選択セットを維持し、選択セットの音関連23項目だけをGUIの値で置き換えます。
 - version 1～6、旧ボード軸項目、旧 `i2c_reinit_error_count`／`imu_mahony_kp`／`imu_mahony_ki`、および旧 `audio_enabled`／`audio_amp_mode`／`sink_enabled` を含むファイルは現行firmwareと同様に拒否し、自動移行しません。
 - 一時ファイルを書いて再読込み検証してから置換するため、書込みまたは検証に失敗した場合は既存ファイルを変更しません。
 

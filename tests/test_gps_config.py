@@ -23,7 +23,7 @@ class GpsConfigTests(unittest.TestCase):
     def test_interval_default_and_boundaries(self) -> None:
         parsed = self.parse(self.raw)
         self.assertEqual(parsed.mc_parameters["gps_send_interval_ms"], 1000)
-        self.assertEqual(len(parsed.mc_parameters), 11)
+        self.assertEqual(len(parsed.mc_parameters), 10)
         for interval in (200, 1000, 10000):
             candidate = copy.deepcopy(self.raw)
             candidate["mc_parameters"]["gps_send_interval_ms"] = interval

@@ -16,13 +16,15 @@ static void test_disabled_and_nonstationary_reset(void) {
     assert(!state.tracking);
 }
 
-static void test_stationary_boundary_includes_confirmation_time(void) {
+static void test_stationary_boundary_starts_after_confirmation(void) {
     auto_power_off_state_t state = {0};
     int64_t stationary_since_us = INT64_C(1000000);
 
     assert(!auto_power_off_update(&state, 1U, false, true,
                                   stationary_since_us,
                                   stationary_since_us + MINUTE_US - 1));
+    assert(auto_power_off_elapsed_seconds(
+               &state, stationary_since_us + MINUTE_US - 1) == 59U);
     assert(auto_power_off_update(&state, 1U, false, true,
                                  stationary_since_us,
                                  stationary_since_us + MINUTE_US));
@@ -91,7 +93,7 @@ static void test_setting_change_and_invalid_time_reset(void) {
 
 int main(void) {
     test_disabled_and_nonstationary_reset();
-    test_stationary_boundary_includes_confirmation_time();
+    test_stationary_boundary_starts_after_confirmation();
     test_external_power_and_candidate_change_reset();
     test_external_power_does_not_count_stationary_time();
     test_setting_change_and_invalid_time_reset();

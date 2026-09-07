@@ -347,6 +347,7 @@ class CloudBaseVarioApp:
         self.status_badges: dict[str, StatusBadge] = {}
         for key, title in (
             ("baro", "BARO"),
+            ("motion", "MOTION"),
             ("estimate", "EST"),
             ("imu", "IMU"),
             ("calibration", "CAL"),
@@ -423,24 +424,29 @@ class CloudBaseVarioApp:
         container.grid_columnconfigure(1, weight=1)
         container.grid_rowconfigure(0, weight=1)
         container.grid_rowconfigure(1, weight=1)
+        container.grid_rowconfigure(2, weight=1)
 
         self.diagnostic_tables = {
+            "motion": DiagnosticTable(container, "Flight / stationary state"),
             "quality": DiagnosticTable(container, "Sensor / estimator quality"),
             "imu": DiagnosticTable(container, "IMU / calibration"),
             "ble": DiagnosticTable(container, "BLE / stream health"),
             "gps": DiagnosticTable(container, "GPS / positioning"),
         }
+        self.diagnostic_tables["motion"].grid(
+            row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 5)
+        )
         self.diagnostic_tables["quality"].grid(
-            row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 5)
+            row=1, column=0, sticky="nsew", padx=(0, 5), pady=5
         )
         self.diagnostic_tables["imu"].grid(
-            row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 5)
+            row=1, column=1, sticky="nsew", padx=(5, 0), pady=5
         )
         self.diagnostic_tables["ble"].grid(
-            row=1, column=0, sticky="nsew", padx=(0, 5), pady=(5, 0)
+            row=2, column=0, sticky="nsew", padx=(0, 5), pady=(5, 0)
         )
         self.diagnostic_tables["gps"].grid(
-            row=1, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0)
+            row=2, column=1, sticky="nsew", padx=(5, 0), pady=(5, 0)
         )
 
     def _build_detail_tab(self, parent: ttk.Frame) -> None:

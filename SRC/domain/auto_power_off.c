@@ -13,11 +13,9 @@ void auto_power_off_reset(auto_power_off_state_t *state) {
 }
 
 static void start_tracking(auto_power_off_state_t *state,
-                           int64_t candidate_since_us,
                            int64_t started_us,
                            int64_t now_us) {
     state->started_us = started_us;
-    state->candidate_since_us = candidate_since_us;
     state->last_update_us = now_us;
     state->tracking = true;
     state->triggered = false;
@@ -62,19 +60,17 @@ bool auto_power_off_update(auto_power_off_state_t *state,
     }
     if (state->tracking && now_us < state->last_update_us) {
         reset_tracking(state);
-        start_tracking(state, stationary_since_us, now_us, now_us);
+        start_tracking(state, now_us, now_us);
         return false;
     }
     if (!state->tracking) {
         if (state->blocked_stationary_since_us == stationary_since_us) {
             effective_stationary_since_us = now_us;
         }
-        start_tracking(state, stationary_since_us,
-                       effective_stationary_since_us, now_us);
+        start_tracking(state, effective_stationary_since_us, now_us);
         state->blocked_stationary_since_us = 0;
-    } else if (state->candidate_since_us != stationary_since_us) {
-        start_tracking(state, stationary_since_us,
-                       stationary_since_us, now_us);
+    } else if (state->started_us < stationary_since_us) {
+        start_tracking(state, stationary_since_us, now_us);
     }
 
     state->last_update_us = now_us;
@@ -89,4 +85,19 @@ bool auto_power_off_update(auto_power_off_state_t *state,
         return true;
     }
     return false;
+}
+
+uint32_t auto_power_off_elapsed_seconds(
+    const auto_power_off_state_t *state, int64_t now_us) {
+    int64_t elapsed_us = 0;
+
+    if (state == NULL || !state->tracking || state->started_us <= 0 ||
+        now_us < state->started_us) {
+        return 0U;
+    }
+    elapsed_us = now_us - state->started_us;
+    if (elapsed_us / INT64_C(1000000) > (int64_t) UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    return (uint32_t) (elapsed_us / INT64_C(1000000));
 }

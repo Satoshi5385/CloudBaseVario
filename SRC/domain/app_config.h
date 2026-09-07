@@ -24,7 +24,6 @@ typedef enum {
 typedef struct {
     float sea_level_pressure_pa;
     uint32_t auto_power_off_minutes;
-    float flight_climb_rate_threshold_mps;
     float flight_gps_speed_threshold_kmh;
     uint32_t stationary_confirm_seconds;
     app_filter_mode_t filter_mode;

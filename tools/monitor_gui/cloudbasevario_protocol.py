@@ -152,12 +152,11 @@ IMU_FIELD_SPECS = (
 MOTION_FIELD_SPECS = (
     TelemetryFieldSpec("motion_evidence", "Flight evidence mask", "", 0),
     TelemetryFieldSpec("motion_state_elapsed_s", "State elapsed", "s", 0),
-    TelemetryFieldSpec("stationary_elapsed_s", "Stationary elapsed", "s", 0),
+    TelemetryFieldSpec("stationary_elapsed_s", "Stationary candidate", "s", 0),
     TelemetryFieldSpec("motion_altitude_range_m", "Altitude range", "m", 2),
-    TelemetryFieldSpec("imu_motion_accel_rms_g", "Motion accel RMS", "g", 4),
-    TelemetryFieldSpec(
-        "imu_motion_gyro_rms_dps", "Motion gyro RMS", "deg/s", 3
-    ),
+    TelemetryFieldSpec("motion_gps_high_elapsed_s", "GPS high speed", "s", 0),
+    TelemetryFieldSpec("motion_gps_high_updates", "GPS high updates", "", 0),
+    TelemetryFieldSpec("auto_power_off_elapsed_s", "Auto-off elapsed", "s", 0),
 )
 
 
@@ -456,18 +455,16 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
     motion = (
         _number_item(sample, MOTION_FIELD_SPECS[0]),
         _flag_item(sample, "motion_altitude_evidence", "Altitude evidence"),
-        _flag_item(sample, "motion_climb_evidence", "Climb-rate evidence"),
         _flag_item(sample, "motion_gps_evidence", "GPS-speed evidence"),
-        _flag_item(sample, "motion_imu_evidence", "IMU-activity evidence"),
         _number_item(sample, MOTION_FIELD_SPECS[1]),
         _number_item(sample, MOTION_FIELD_SPECS[2]),
         _number_item(sample, MOTION_FIELD_SPECS[3]),
         _flag_item(sample, "motion_vario_used", "Vario used"),
         _flag_item(sample, "motion_gps_used", "GPS speed used"),
-        _flag_item(sample, "motion_imu_used", "IMU activity used"),
-        _flag_item(sample, "imu_motion_valid", "IMU motion metrics"),
         _number_item(sample, MOTION_FIELD_SPECS[4]),
         _number_item(sample, MOTION_FIELD_SPECS[5]),
+        _flag_item(sample, "motion_gps_high_pending", "GPS confirmation pending"),
+        _number_item(sample, MOTION_FIELD_SPECS[6]),
     )
 
     return TelemetryViewModel(

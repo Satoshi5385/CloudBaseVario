@@ -57,8 +57,6 @@ _Static_assert(sizeof(app_bluetooth_tx_power_t) == sizeof(int32_t),
 static const app_parameter_descriptor_t parameter_table[] = {
     PARAM_FLOAT(sea_level_pressure_pa, 101325.0f, 80000.0, 110000.0, APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(auto_power_off_minutes, 60, 0.0, 1440.0, APP_PARAMETER_SCOPE_SHARED),
-    PARAM_FLOAT(flight_climb_rate_threshold_mps, 0.5f, 0.1, 5.0,
-                APP_PARAMETER_SCOPE_SHARED),
     PARAM_FLOAT(flight_gps_speed_threshold_kmh, 10.0f, 1.0, 100.0,
                 APP_PARAMETER_SCOPE_SHARED),
     PARAM_UINT(stationary_confirm_seconds, 60, 10.0, 600.0,

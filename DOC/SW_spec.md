@@ -57,10 +57,10 @@ BMP581の気圧とICM-42688P-HXYの姿勢補正済み鉛直加速度から高度
 - SW1～SW3は10 ms周期で読み、同じ入力を最初に観測してから30 msが経過した4回目のサンプリングで確定状態とすること。電源ラッチ回路を介するSW1は押下時High、外付けプルアップのSW2とSW3は押下時Lowとして扱うこと。初回加速度個体較正中のSW3は3秒長押しでそのbootの較正をスキップし、3秒未満で離した場合はパラメータセット切替として扱うこと。
 - SW1は、起動後に一度「離された」状態を確認した後、`POWER_OFF_HOLD_MS`（既定1000 ms）の長押しで電源OFF要求を生成すること。起動のために押しているSW1をそのまま電源OFF操作と判定してはならない。
 - 移動状態は`UNKNOWN`／`STATIONARY`／`FLYING`の3状態とする。安全側として、飛行以外の歩行・車載など明確な移動も`FLYING`に含め、自動電源OFFを禁止する。
-- 飛行証拠は、静止候補期間内の高度変動幅が10 mを超えること、絶対昇降率が`flight_climb_rate_threshold_mps`以上で3秒継続すること、freshかつfix有効なGPS速度が`flight_gps_speed_threshold_kmh`以上で連続2更新すること、または0.5秒EMAのIMU加速度RMSが0.03 g以上か角速度RMSが10 deg/s以上の状態が1秒継続することのいずれかとする。高度変動幅がちょうど10 mの場合は飛行証拠にしない。
-- 静止候補はfreshで有効な実センサーバリオを必須とし、高度変動幅10 m以下、絶対昇降率が飛行閾値の50 %以下、利用可能なGPS速度が飛行閾値の50 %以下、利用可能なIMU加速度RMSが0.01 g以下かつ角速度RMSが3 deg/s以下のすべてを満たす間だけ継続する。GPS非搭載・未捕捉、IMU故障・校正スキップでは該当する補助入力を省略し、バリオ単独へ縮退する。
-- 起動後または`UNKNOWN`から静止候補が`stationary_confirm_seconds`継続した場合に`STATIONARY`へ遷移する。`FLYING`成立後は同じ静穏条件が120秒継続するまで`FLYING`を維持する。必須バリオが無効・stale・非有限、時刻逆行、設定変更、または入力がヒステリシス中間域の場合は`UNKNOWN`として静止候補をリセットする。ただし、明確なGPSまたはIMU移動証拠があればバリオ無効時でも`FLYING`とする。長時間の水平加速度積分は行わない。
-- 外部給電がなく、MSC storage modeでなく、移動状態が`STATIONARY`のまま実際の静止開始時刻から`auto_power_off_minutes`継続した場合に電源OFF要求を1回だけ生成し、既存の電源OFF処理へ合流する。`FLYING`／`UNKNOWN`、外部給電中、MSC storage mode中、設定無効、時刻逆行または設定変更時は自動電源OFF計時をリセットする。デバッグ高度は移動判定へ使用せず、`auto_power_off_minutes=0`では本機能を無効とする。
+- 飛行証拠は、静止候補期間内のバリオ統合高度幅が5 mを超えること、またはfreshかつfix有効なGPS速度が`flight_gps_speed_threshold_kmh`以上で1秒継続もしくは連続2更新することのいずれかとする。高度幅がちょうど5 mの場合は飛行証拠にしない。瞬時昇降率とIMU活動量は飛行判定に使用せず、水平加速度による判定は将来実装とする。
+- 静止候補はfreshで有効な実センサーバリオを必須とし、高度幅5 m超と確定済みGPS速度証拠のいずれも成立しない間だけ継続する。GPS非搭載・未捕捉ではGPS条件を不成立としてバリオ単独へ縮退する。GPS高速度の成立待ち中は静止確認を進めない。
+- すべての飛行条件が不成立の状態が`stationary_confirm_seconds`継続した場合に`STATIONARY`へ遷移する。直前が`FLYING`なら確認中は`FLYING`を維持し、起動後は`UNKNOWN`を維持する。GPS高速度の成立待ち、必須バリオの無効・stale・非有限、時刻逆行または設定変更では`UNKNOWN`として静止候補をリセットする。ただし、確定したGPS速度証拠はバリオ無効時でも`FLYING`とする。
+- 外部給電がなく、MSC storage modeでなく、移動状態が`STATIONARY`へ遷移した後から`auto_power_off_minutes`継続した場合に電源OFF要求を1回だけ生成し、既存の電源OFF処理へ合流する。`FLYING`／`UNKNOWN`、外部給電中、MSC storage mode中、設定無効、時刻逆行または設定変更時は自動電源OFF計時をリセットする。デバッグ高度は移動判定へ使用せず、`auto_power_off_minutes=0`では本機能を無効とする。
 - LEDはLowで点灯、Highで消灯するものとして制御すること。
 - GPIO43のROM起動ログによる一時的な黄LED点滅は許容し、アプリ初期化後はUART0として使用しないこと。
 
@@ -412,7 +412,7 @@ TinyUSB CDCでhostがDTRをassertしている間は、`console_task`から100 ms
 `console_task`はDTR接続中に10 ms、未接続中に250 msの周期で入力・診断処理を確認する。未接続中は100 ms monitor期限とdrop数を進めず、DTRの再接続時に次回monitor期限を再設定する。
 
 ```text
-BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pressure=... temp_c=... pressure_pa=... altitude_m=... climb_mps=... climb_valid=... estimate_valid=... i2c_errors=... overruns=... ble_pressure_pa=... ble_altitude_m=... ble_vario_cm_s=... ble_temperature_c=... ble_battery=... ble_available=... ble_notify=... imu_online=... imu_calibrated=... imu_attitude_valid=... imu_accel_calibrated=... imu_accel_cal_persisted=... imu_accel_cal_skipped=... imu_stale=... q_w=... q_x=... q_y=... q_z=... roll_deg=... pitch_deg=... yaw_deg=... vertical_accel_mps2=... vertical_accel_valid=... fusion_active=... kalman_accel_bias_mps2=... kalman_baro_innovation_m=... kalman_baro_innovation_valid=... kalman_accel_innovation_mps2=... kalman_accel_innovation_valid=... kalman_baro_r_m2=... kalman_accel_r_m2_s4=... imu_samples=... imu_missed=... imu_confidence=... imu_vibration_rms_g=... imu_kp_effective=... imu_ki_effective=... imu_ki_active=... imu_cal_samples=... imu_cal_save_pending=... imu_cal_storage=... imu_cal_storage_error=... imu_motion_valid=... imu_motion_accel_rms_g=... imu_motion_gyro_rms_dps=... motion_state=... motion_evidence=... motion_altitude_evidence=... motion_climb_evidence=... motion_gps_evidence=... motion_imu_evidence=... motion_state_elapsed_s=... stationary_elapsed_s=... motion_altitude_range_m=... motion_vario_used=... motion_gps_used=... motion_imu_used=... stream_drops=...
+BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pressure=... temp_c=... pressure_pa=... altitude_m=... climb_mps=... climb_valid=... estimate_valid=... i2c_errors=... overruns=... ble_pressure_pa=... ble_altitude_m=... ble_vario_cm_s=... ble_temperature_c=... ble_battery=... ble_available=... ble_notify=... imu_online=... imu_calibrated=... imu_attitude_valid=... imu_accel_calibrated=... imu_accel_cal_persisted=... imu_accel_cal_skipped=... imu_stale=... q_w=... q_x=... q_y=... q_z=... roll_deg=... pitch_deg=... yaw_deg=... vertical_accel_mps2=... vertical_accel_valid=... fusion_active=... kalman_accel_bias_mps2=... kalman_baro_innovation_m=... kalman_baro_innovation_valid=... kalman_accel_innovation_mps2=... kalman_accel_innovation_valid=... kalman_baro_r_m2=... kalman_accel_r_m2_s4=... imu_samples=... imu_missed=... imu_confidence=... imu_vibration_rms_g=... imu_kp_effective=... imu_ki_effective=... imu_ki_active=... imu_cal_samples=... imu_cal_save_pending=... imu_cal_storage=... imu_cal_storage_error=... imu_motion_valid=... imu_motion_accel_rms_g=... imu_motion_gyro_rms_dps=... motion_state=... motion_evidence=... motion_altitude_evidence=... motion_gps_evidence=... motion_state_elapsed_s=... stationary_elapsed_s=... motion_altitude_range_m=... motion_vario_used=... motion_gps_used=... motion_gps_high_elapsed_s=... motion_gps_high_updates=... motion_gps_high_pending=... auto_power_off_elapsed_s=... stream_drops=...
 ```
 
 `ble_*`の5値は、同じsnapshotからLK8EX1へ実際に整形する値と一致させ、無効値`999999`／`99999`／`9999`／`99`／`999`もそのまま表示する。`motion_*_used`は今回の判定で補助入力を採用したこと、GPSの鮮度は独立したGPS行の`age_ms`、IMU活動量は`imu_motion_*`で示す。yawは磁気センサーを使わない相対角であり、絶対方位として扱わない。host未接続時は行を蓄積せず、出力失敗または周期超過時は古い行を再送せず`stream_drops`を増加させる。
@@ -481,7 +481,6 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
   "mc_parameters": {
     "sea_level_pressure_pa": 101325.0,
     "auto_power_off_minutes": 60,
-    "flight_climb_rate_threshold_mps": 0.5,
     "flight_gps_speed_threshold_kmh": 10.0,
     "stationary_confirm_seconds": 60,
     "filter_mode": "AUTO",
@@ -505,12 +504,12 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 ```
 
 - 出力はUTF-8、BOMなし、2 space indent、LF改行、末尾改行ありの整形済みJSONとする。読込みではUTF-8 BOM、LFおよびCRLFを許容するが、JSON commentは許容しない。
-- top-levelには整数の `format_version`、共通11項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`を置き、正本はversion 1とする。選別後の有効セットは1～5件とし、各要素は1～5の整数`parameter_number`と、音関連23項目を持つobject型`parameters`を持つこと。未知の項目は読み飛ばし、保存時は未知の項目を含めず番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
+- top-levelには整数の `format_version`、共通10項目を持つobject型`mc_parameters`、array型の `vario_parameter_sets`を置き、正本はversion 1とする。選別後の有効セットは1～5件とし、各要素は1～5の整数`parameter_number`と、音関連23項目を持つobject型`parameters`を持つこと。未知の項目は読み飛ばし、保存時は未知の項目を含めず番号順に整列すること。完全な例は`DOC/setting_json.md`を正本とする。
 - version 1の規定構造だけを受理し、自動変換しないこと。未知のtop-level key、未知のparameter、誤った階層の項目は読み飛ばすこと。
 - `mc_parameters`および各セットの`parameters`には値だけを格納する。パラメータ名、型、単位、値域、既定値および相互関係は、本書の単一パラメータ表と対応する実装テーブルを正本とすること。
 - boolはJSON boolean、uint32は0以上の整数、floatは有限のJSON number、enumは定義済み名称のJSON stringとして表すこと。NaNおよび無限大を受理しないこと。
 - ファイルサイズの上限は32 KiBとする。上限を超えるファイルは途中まで解析せず無効とすること。
-- 共通11項目はすべて必須とし、欠落、既知keyの重複、型違いまたは値域違反があればファイル全体を無効とすること。新しい移動判定3項目を持たない旧version 1ファイルも無効として組込み標準構成へフォールバックすること。各セットの音関連23項目もすべて必須とするが、不正番号、既知keyの重複、項目不足、型違い、値域違反または相互関係違反は該当セットだけを無効とすること。同じ`parameter_number`が複数あれば、その番号のセットをすべて無効とすること。有効なセットが0件なら共通値も適用せず、組込み標準構成を使用すること。
+- 共通10項目はすべて必須とし、欠落、既知keyの重複、型違いまたは値域違反があればファイル全体を無効とすること。旧JSONの移行・互換処理は行わない。各セットの音関連23項目もすべて必須とするが、不正番号、既知keyの重複、項目不足、型違い、値域違反または相互関係違反は該当セットだけを無効とすること。同じ`parameter_number`が複数あれば、その番号のセットをすべて無効とすること。有効なセットが0件なら共通値も適用せず、組込み標準構成を使用すること。
 - 設定ファイルには認証情報、秘密鍵、tokenなどの秘密情報を保存しないこと。
 
 加速度個体較正は同じFAT直下の`mc_data.json`へ、`format_version=2`、対象`model`および3軸`offset_mps2`だけを格納する。`who_am_i`、座標系、校正方法および校正サンプル数は`model`ごとのファームウェア固定定義とし、ICM-42688P-HXYではそれぞれ`0x6A`、`SENSOR`、`LEVEL_Z_UP`、800とする。UTF-8 JSONとして厳格に検証し、非有限値、未知・重複key、対象不一致または±0.20 gを超える値を受理しない。保存は`mc_data.tmp`、`mc_data.bak`を使う全量置換とし、正本がない場合だけ有効なbackupを復元する。
@@ -721,7 +720,7 @@ typedef struct {
 | `domain` | `imu_calibration_controller` | 初回加速度較正の収集、boot内スキップ、atomic保存と再試行の状態管理 |
 | `domain` | `vario_estimator` | 気圧高度、気圧単独フィルタ、IMU品質連動の観測分散を持つ4状態の気圧・IMU融合、診断および出力切替 |
 | `domain` | `vario_audio` | 音声状態、しきい値、音程・テンポ計算 |
-| `domain` | `flight_state` | バリオ・GPS・IMUによる`UNKNOWN`／`STATIONARY`／`FLYING`判定と飛行証拠bit |
+| `domain` | `flight_state` | バリオ統合高度幅・GPS速度による`UNKNOWN`／`STATIONARY`／`FLYING`判定と飛行証拠bit |
 | `domain` | `auto_power_off` | `STATIONARY`の実継続時間による1回限りの自動電源OFF判定 |
 | `platform` | `audio_output` | ESP-IDF LEDCとPAM8904E GPIO制御 |
 | `domain` | `system_policy` | debounce、SW1～SW3操作、通知要求、電源OFF判定 |
@@ -812,7 +811,7 @@ typedef struct {
 - 既定値は単一のテーブルで定義し、起動時とRESET時で共用する。
 - 型、最小値、最大値、相互関係を検証してから変更を反映する。
 - センサー・音声タスクは周期の先頭で必要な設定をローカルへコピーし、処理途中で設定が変化しないようにする。
-- 起動時に有効なversion 1の`setting.json`がある場合は、共通11項目と音関連23項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
+- 起動時に有効なversion 1の`setting.json`がある場合は、共通10項目と音関連23項目を持つ全セットをRAMへ一括反映し、選択時に完全な実行時設定へ合成する。Bluetooth Controller用NVSとユーザーパラメータ保存を混同しない。
 - consoleによる変更は `PARAM SAVE`が成功するまでRAMだけに保持し、再起動時は最後に正常保存されたファイルから再構成する。
 - 公開パラメータは本節の表に定義した項目だけとする。SW1音量、SW2シンク状態、SW3選択番号は専用NVSを正本とし、`PARAM LIST/GET/SET/RESET/SAVE`の対象外とする。
 - I2C連続エラーによるセンサ再初期化閾値は10回、Mahony姿勢フィルタのKpは5.0、Kiは0.05にファームウェアで固定し、`setting.json`および`PARAM`操作へ公開しない。旧`i2c_reinit_error_count`、`imu_mahony_kp`、`imu_mahony_ki`を含むversion 1ファイルでは、これらを未知のparameterとして読み飛ばす。
@@ -823,7 +822,6 @@ typedef struct {
 | --- | --- | ---: | --- |
 | `sea_level_pressure_pa` | float | 101325 | 80000～110000 Pa |
 | `auto_power_off_minutes` | uint32 | 60 | 0～1440 min。`0`は無効 |
-| `flight_climb_rate_threshold_mps` | float | 0.5 | 0.1～5.0 m/s |
 | `flight_gps_speed_threshold_kmh` | float | 10.0 | 1.0～100.0 km/h |
 | `stationary_confirm_seconds` | uint32 | 60 | 10～600 s |
 | `filter_mode` | enum | `AUTO` | `AUTO` / `BARO_ONLY`。`AUTO`は有効なIMUを融合し、利用不可時は自動縮退 |

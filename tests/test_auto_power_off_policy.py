@@ -22,7 +22,7 @@ CONFIG_HEADER = (ROOT / "SRC/platform/config_storage.h").read_text(
 class AutoPowerOffPolicyTests(unittest.TestCase):
     def test_motion_thresholds_and_public_settings(self) -> None:
         self.assertIn(
-            "#define FLIGHT_STATE_ALTITUDE_RANGE_M 10.0f",
+            "#define FLIGHT_STATE_ALTITUDE_RANGE_M 5.0f",
             FLIGHT_HEADER,
         )
         self.assertIn(
@@ -31,7 +31,6 @@ class AutoPowerOffPolicyTests(unittest.TestCase):
             CONFIG_SOURCE,
         )
         for expression in (
-            "PARAM_FLOAT(flight_climb_rate_threshold_mps, 0.5f, 0.1, 5.0,",
             "PARAM_FLOAT(flight_gps_speed_threshold_kmh, 10.0f, 1.0, 100.0,",
             "PARAM_UINT(stationary_confirm_seconds, 60, 10.0, 600.0,",
         ):
@@ -47,6 +46,10 @@ class AutoPowerOffPolicyTests(unittest.TestCase):
         self.assertIn("flight_state_update(", system_task)
         self.assertIn("FLIGHT_STATE_STATIONARY", system_task)
         self.assertIn("auto_power_off_update(", system_task)
+        self.assertIn(
+            "snapshot.external_power_present || storage_mode_active",
+            system_task,
+        )
         self.assertIn("request_power_off(&snapshot);", system_task)
         self.assertNotIn("app_resources_apply_debug_vario", system_task)
 

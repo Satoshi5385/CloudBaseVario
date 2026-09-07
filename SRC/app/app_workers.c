@@ -133,7 +133,6 @@ static auto_power_off_state_t system_auto_power_off_state;
 static app_config_t system_auto_power_off_config;
 static vario_result_t system_auto_power_off_vario;
 static gps_snapshot_t system_flight_state_gps;
-static imu_diagnostics_t system_flight_state_imu;
 static flight_state_detector_t system_flight_state_detector;
 static uint32_t system_auto_power_off_config_revision = 0U;
 static bool system_auto_power_off_config_revision_valid = false;
@@ -2381,7 +2380,6 @@ void app_system_worker_task(void *context) {
         bool auto_power_off_config_valid = false;
         bool vario_copied = false;
         bool gps_copied = false;
-        bool imu_copied = false;
         uint32_t auto_power_off_minutes = 0U;
         uint32_t auto_power_off_config_revision = 0U;
         flight_state_input_t motion_input = {0};
@@ -2428,38 +2426,26 @@ void app_system_worker_task(void *context) {
         vario_copied =
             app_resources_copy_vario(&system_auto_power_off_vario);
         gps_copied = app_resources_copy_gps(&system_flight_state_gps);
-        imu_copied = app_resources_copy_imu_diagnostics(
-            &system_flight_state_imu);
         if (!gps_copied) {
             memset(&system_flight_state_gps, 0,
                    sizeof(system_flight_state_gps));
         }
-        if (!imu_copied) {
-            memset(&system_flight_state_imu, 0,
-                   sizeof(system_flight_state_imu));
-        }
-        if (storage_mode_active || !auto_power_off_config_valid) {
+        if (!auto_power_off_config_valid) {
             auto_power_off_reset(&system_auto_power_off_state);
             flight_state_reset(&system_flight_state_detector);
         } else {
             motion_input.now_us = snapshot.timestamp_us;
-            motion_input.climb_rate_threshold_mps =
-                system_auto_power_off_config
-                    .flight_climb_rate_threshold_mps;
             motion_input.gps_speed_threshold_kmh =
                 system_auto_power_off_config
                     .flight_gps_speed_threshold_kmh;
             motion_input.stationary_confirm_seconds =
                 system_auto_power_off_config.stationary_confirm_seconds;
             motion_input.vario_available =
-                vario_copied && system_auto_power_off_vario.estimate_valid &&
-                system_auto_power_off_vario.climb_rate_valid;
+                vario_copied && system_auto_power_off_vario.estimate_valid;
             motion_input.vario_timestamp_us =
                 system_auto_power_off_vario.timestamp_us;
             motion_input.altitude_m =
                 system_auto_power_off_vario.altitude_m;
-            motion_input.climb_rate_mps =
-                system_auto_power_off_vario.climb_rate_mps;
             motion_input.gps_available = gps_copied &&
                 system_gps_speed_available(
                     &system_flight_state_gps,
@@ -2468,21 +2454,11 @@ void app_system_worker_task(void *context) {
             motion_input.gps_sequence = system_flight_state_gps.sequence;
             motion_input.gps_speed_kmh =
                 (float) system_flight_state_gps.speed_kmh;
-            motion_input.imu_available =
-                imu_copied && system_flight_state_imu.online &&
-                !system_flight_state_imu.stale &&
-                system_flight_state_imu.motion_valid;
-            motion_input.imu_timestamp_us =
-                system_flight_state_imu.motion_timestamp_us;
-            motion_input.imu_acceleration_rms_g =
-                system_flight_state_imu.motion_acceleration_rms_g;
-            motion_input.imu_gyro_rms_dps =
-                system_flight_state_imu.motion_gyro_rms_dps;
             flight_state_update(&system_flight_state_detector,
                                 &motion_input, &motion_output);
             auto_power_off_issued = auto_power_off_update(
                 &system_auto_power_off_state, auto_power_off_minutes,
-                snapshot.external_power_present,
+                snapshot.external_power_present || storage_mode_active,
                 motion_output.state == FLIGHT_STATE_STATIONARY,
                 motion_output.stationary_since_us,
                 snapshot.timestamp_us);
@@ -2492,12 +2468,20 @@ void app_system_worker_task(void *context) {
         snapshot.motion_state_elapsed_s =
             motion_output.state_elapsed_seconds;
         snapshot.stationary_elapsed_s =
-            motion_output.stationary_elapsed_seconds;
+            motion_output.stationary_candidate_elapsed_seconds;
+        snapshot.motion_gps_high_speed_elapsed_s =
+            motion_output.gps_high_speed_elapsed_seconds;
+        snapshot.motion_gps_high_speed_updates =
+            motion_output.gps_high_speed_updates;
+        snapshot.motion_gps_high_speed_pending =
+            motion_output.gps_high_speed_pending;
+        snapshot.auto_power_off_elapsed_s =
+            auto_power_off_elapsed_seconds(
+                &system_auto_power_off_state, snapshot.timestamp_us);
         snapshot.motion_altitude_range_m =
             motion_output.altitude_range_m;
         snapshot.motion_vario_used = motion_output.vario_used;
         snapshot.motion_gps_used = motion_output.gps_used;
-        snapshot.motion_imu_used = motion_output.imu_used;
 
         if (switch_actions.advance_volume) {
             snapshot.volume_level =
@@ -2713,12 +2697,13 @@ static bool console_write_monitor_line(void) {
         " imu_cal_save_pending=%d imu_cal_storage=%s"
         " imu_cal_storage_error=%" PRId32
         " motion_state=%s motion_evidence=%" PRIu32
-        " motion_altitude_evidence=%d motion_climb_evidence=%d"
-        " motion_gps_evidence=%d motion_imu_evidence=%d"
+        " motion_altitude_evidence=%d motion_gps_evidence=%d"
         " motion_state_elapsed_s=%" PRIu32
         " stationary_elapsed_s=%" PRIu32
         " motion_altitude_range_m=%.2f motion_vario_used=%d"
-        " motion_gps_used=%d motion_imu_used=%d"
+        " motion_gps_used=%d motion_gps_high_elapsed_s=%" PRIu32
+        " motion_gps_high_updates=%u motion_gps_high_pending=%d"
+        " auto_power_off_elapsed_s=%" PRIu32
         " stream_drops=%" PRIu32 "\r\n",
         vario.sequence, vario.timestamp_us, vario.bmp581_online,
         vario.pressure_valid, vario.raw_temperature, vario.raw_pressure,
@@ -2760,13 +2745,14 @@ static bool console_write_monitor_line(void) {
         imu.accel_calibration_storage_error,
         flight_state_name(system.motion_state), system.motion_evidence,
         (system.motion_evidence & FLIGHT_EVIDENCE_ALTITUDE_RANGE) != 0U,
-        (system.motion_evidence & FLIGHT_EVIDENCE_CLIMB_RATE) != 0U,
         (system.motion_evidence & FLIGHT_EVIDENCE_GPS_SPEED) != 0U,
-        (system.motion_evidence & FLIGHT_EVIDENCE_IMU_ACTIVITY) != 0U,
         system.motion_state_elapsed_s, system.stationary_elapsed_s,
         (double) system.motion_altitude_range_m,
         system.motion_vario_used, system.motion_gps_used,
-        system.motion_imu_used,
+        system.motion_gps_high_speed_elapsed_s,
+        (unsigned int) system.motion_gps_high_speed_updates,
+        system.motion_gps_high_speed_pending,
+        system.auto_power_off_elapsed_s,
         serial_monitor_drop_count);
 }
 
@@ -3019,7 +3005,9 @@ static void console_diag_status(void) {
         " motion_state_elapsed_s=%" PRIu32
         " stationary_elapsed_s=%" PRIu32
         " motion_altitude_range_m=%.2f motion_vario_used=%d"
-        " motion_gps_used=%d motion_imu_used=%d\r\n",
+        " motion_gps_used=%d motion_gps_high_elapsed_s=%" PRIu32
+        " motion_gps_high_updates=%u motion_gps_high_pending=%d"
+        " auto_power_off_elapsed_s=%" PRIu32 "\r\n",
         system.battery_valid, (double) system.battery_voltage_v,
         system.battery_display_valid,
         (double) system.battery_display_voltage_v,
@@ -3039,7 +3027,10 @@ static void console_diag_status(void) {
         system.stationary_elapsed_s,
         (double) system.motion_altitude_range_m,
         system.motion_vario_used, system.motion_gps_used,
-        system.motion_imu_used);
+        system.motion_gps_high_speed_elapsed_s,
+        (unsigned int) system.motion_gps_high_speed_updates,
+        system.motion_gps_high_speed_pending,
+        system.auto_power_off_elapsed_s);
     console_writef(
         "SWITCH source=%s load=%s load_error=%s save_result=%s"
         " clear_result=%s load_errors=%" PRIu32

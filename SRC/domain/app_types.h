@@ -94,10 +94,13 @@ typedef struct {
     uint32_t motion_evidence;
     uint32_t motion_state_elapsed_s;
     uint32_t stationary_elapsed_s;
+    uint32_t motion_gps_high_speed_elapsed_s;
+    uint32_t auto_power_off_elapsed_s;
+    uint8_t motion_gps_high_speed_updates;
     float motion_altitude_range_m;
     bool motion_vario_used;
     bool motion_gps_used;
-    bool motion_imu_used;
+    bool motion_gps_high_speed_pending;
 } system_snapshot_t;
 
 typedef struct {

@@ -60,7 +60,6 @@ class ConfigDocument:
 PARAMETER_SPECS: dict[str, ParameterSpec] = {
     "sea_level_pressure_pa": ParameterSpec("float", 101325.0, 80000.0, 110000.0),
     "auto_power_off_minutes": ParameterSpec("uint", 60, 0.0, 1440.0),
-    "flight_climb_rate_threshold_mps": ParameterSpec("float", 0.5, 0.1, 5.0),
     "flight_gps_speed_threshold_kmh": ParameterSpec("float", 10.0, 1.0, 100.0),
     "stationary_confirm_seconds": ParameterSpec("uint", 60, 10.0, 600.0),
     "filter_mode": ParameterSpec(

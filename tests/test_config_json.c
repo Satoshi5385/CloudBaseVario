@@ -14,7 +14,6 @@
 #define SHARED_FIELDS                                                        \
     "\"sea_level_pressure_pa\":100000,"                                   \
     "\"auto_power_off_minutes\":60,"                                      \
-    "\"flight_climb_rate_threshold_mps\":0.5,"                         \
     "\"flight_gps_speed_threshold_kmh\":10.0,"                          \
     "\"stationary_confirm_seconds\":60,"                                 \
     "\"filter_mode\":\"AUTO\","                                        \
@@ -93,7 +92,6 @@ static void test_unknown_items_are_ignored(void) {
 static void test_missing_shared_item_uses_defaults(void) {
     static const char document[] = DOCUMENT(
         "\"auto_power_off_minutes\":60,"
-        "\"flight_climb_rate_threshold_mps\":0.5,"
         "\"flight_gps_speed_threshold_kmh\":10.0,"
         "\"stationary_confirm_seconds\":60,\"filter_mode\":\"AUTO\","
         "\"bluetooth_battery_mode\":\"PERCENT\","

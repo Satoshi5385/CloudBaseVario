@@ -64,7 +64,7 @@ typedef struct {
 /**
  * @brief Load and validate setting.json from a mounted FAT volume.
  *
- * All eight shared parameters are required. Each complete, valid version-1
+ * All ten shared parameters are required. Each complete, valid version-1
  * profile is loaded independently; invalid profiles are skipped. Missing or
  * invalid shared data, or zero valid profiles, leaves built-in defaults in
  * the returned configuration.

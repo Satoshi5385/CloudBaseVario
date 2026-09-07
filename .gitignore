@@ -79,3 +79,4 @@ env/
 .codex/
 
 # Local planning work remains untracked; regression tests are repository assets.
+*.old

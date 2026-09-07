@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from tools.monitor_gui.cloudbasevario_protocol import (
     DISPLAY_UNAVAILABLE,
@@ -8,18 +9,31 @@ from tools.monitor_gui.cloudbasevario_protocol import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+GUI_APP = (
+    ROOT / "tools" / "monitor_gui" / "cloudbasevario_gui_app.py"
+).read_text(encoding="utf-8")
+
+
 class MonitorGuiMotionTests(unittest.TestCase):
+    def test_gui_exposes_motion_badge_and_diagnostics(self) -> None:
+        self.assertIn('(\"motion\", \"MOTION\")', GUI_APP)
+        self.assertIn(
+            '\"motion\": DiagnosticTable(container, '
+            '\"Flight / stationary state\")',
+            GUI_APP,
+        )
+
     def test_motion_status_and_diagnostics(self) -> None:
         sample = parse_telemetry_line(
             "BARO online=1 pressure_valid=1 estimate_valid=1 climb_valid=1 "
-            "motion_state=FLYING motion_evidence=5 "
-            "motion_altitude_evidence=1 motion_climb_evidence=0 "
-            "motion_gps_evidence=1 motion_imu_evidence=0 "
+            "motion_state=FLYING motion_evidence=3 "
+            "motion_altitude_evidence=1 motion_gps_evidence=1 "
             "motion_state_elapsed_s=12 stationary_elapsed_s=0 "
-            "motion_altitude_range_m=10.5 motion_vario_used=1 "
-            "motion_gps_used=1 motion_imu_used=0 imu_motion_valid=1 "
-            "imu_motion_accel_rms_g=0.0312 "
-            "imu_motion_gyro_rms_dps=11.25"
+            "motion_altitude_range_m=5.5 motion_vario_used=1 "
+            "motion_gps_used=1 motion_gps_high_elapsed_s=2 "
+            "motion_gps_high_updates=2 motion_gps_high_pending=0 "
+            "auto_power_off_elapsed_s=0"
         )
         self.assertIsNotNone(sample)
         view = build_telemetry_view(sample)
@@ -27,9 +41,9 @@ class MonitorGuiMotionTests(unittest.TestCase):
         self.assertEqual(motion_status.value, "FLYING")
         group = next(group for group in view.diagnostics if group.key == "motion")
         items = {item.key: item for item in group.items}
-        self.assertEqual(items["motion_evidence"].value, "5")
-        self.assertEqual(items["motion_altitude_range_m"].value, "10.50 m")
-        self.assertEqual(items["imu_motion_gyro_rms_dps"].value, "11.250 deg/s")
+        self.assertEqual(items["motion_evidence"].value, "3")
+        self.assertEqual(items["motion_altitude_range_m"].value, "5.50 m")
+        self.assertEqual(items["motion_gps_high_updates"].value, "2")
 
     def test_unknown_and_missing_motion_status(self) -> None:
         unknown = parse_telemetry_line("BARO motion_state=UNKNOWN")

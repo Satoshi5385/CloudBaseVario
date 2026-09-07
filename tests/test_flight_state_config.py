@@ -29,15 +29,11 @@ class FlightStateConfigTests(unittest.TestCase):
     def test_defaults_and_boundaries(self) -> None:
         parsed = self.parse(self.raw)
         self.assertEqual(
-            parsed.mc_parameters["flight_climb_rate_threshold_mps"], 0.5
-        )
-        self.assertEqual(
             parsed.mc_parameters["flight_gps_speed_threshold_kmh"], 10.0
         )
         self.assertEqual(parsed.mc_parameters["stationary_confirm_seconds"], 60)
 
         boundaries = {
-            "flight_climb_rate_threshold_mps": (0.1, 5.0),
             "flight_gps_speed_threshold_kmh": (1.0, 100.0),
             "stationary_confirm_seconds": (10, 600),
         }
@@ -50,7 +46,6 @@ class FlightStateConfigTests(unittest.TestCase):
     def test_missing_or_invalid_required_value_uses_defaults(self) -> None:
         defaults = default_config_document()
         for name, invalid in (
-            ("flight_climb_rate_threshold_mps", 0.09),
             ("flight_gps_speed_threshold_kmh", 100.1),
             ("stationary_confirm_seconds", 9),
         ):
@@ -66,7 +61,6 @@ class FlightStateConfigTests(unittest.TestCase):
 
     def test_editor_and_param_console_share_the_contract(self) -> None:
         for name in (
-            "flight_climb_rate_threshold_mps",
             "flight_gps_speed_threshold_kmh",
             "stationary_confirm_seconds",
         ):
