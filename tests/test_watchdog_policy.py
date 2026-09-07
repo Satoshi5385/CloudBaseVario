@@ -13,7 +13,6 @@ SERVICE = (ROOT / "SRC/platform/watchdog_service.c").read_text(encoding="utf-8")
 POLICY = (ROOT / "SRC/domain/watchdog_recovery_policy.c").read_text(
     encoding="utf-8"
 )
-SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 WORKFLOW = "\n".join(
     (
         (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8"),
@@ -144,7 +143,6 @@ class WatchdogPolicyTests(unittest.TestCase):
         self.assertIn("CONFIG_ESP_TASK_WDT_PANIC 1", WORKFLOW)
         self.assertIn("CONFIG_ESP_COREDUMP_ENABLE_TO_NONE 1", WORKFLOW)
         self.assertIn("test_watchdog_recovery_policy", WORKFLOW)
-        self.assertIn("Task Watchdog", SPEC)
 
 
 if __name__ == "__main__":

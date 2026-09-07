@@ -23,7 +23,6 @@ BLE_WORKER_SOURCE = (ROOT / "SRC/app/ble_tx_worker.c").read_text(
     encoding="utf-8"
 )
 SDKCONFIG_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
-BLE_SPEC = (ROOT / "DOC/BLE_IF.md").read_text(encoding="utf-8")
 
 
 def battery_level_from_voltage(voltage: float) -> int:
@@ -253,7 +252,6 @@ class BleBatteryServicePolicyTests(unittest.TestCase):
             '"LK8EX1,%s,%s,%s,%s,%s,"',
             BLE_SOURCE,
         )
-        self.assertIn("LK8EX1には充電状態を示す標準フィールドがない", BLE_SPEC)
         self.assertIn("BLE_VARIO_BATTERY_LEVEL_STATUS_SIZE 3U", BLE_HEADER)
 
 

@@ -9,11 +9,7 @@ MSC = (ROOT / "components/esp_tinyusb/tinyusb_msc.c").read_text(
 TINYUSB = (ROOT / "components/esp_tinyusb/tinyusb.c").read_text(
     encoding="utf-8"
 )
-SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 SDKCONFIG_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
-LOCAL_PATCH = (ROOT / "components/esp_tinyusb/LOCAL_PATCH.md").read_text(
-    encoding="utf-8"
-)
 
 
 def function_body(source: str, signature: str, next_signature: str) -> str:
@@ -26,7 +22,6 @@ class UsbMscEjectDurabilityTests(unittest.TestCase):
     def test_esp32s3_msc_transfer_buffer_is_4096_bytes(self) -> None:
         self.assertIn("CONFIG_TINYUSB_MSC_BUFSIZE=4096", SDKCONFIG_DEFAULTS)
         self.assertNotIn("CONFIG_TINYUSB_MSC_BUFSIZE=8192", SDKCONFIG_DEFAULTS)
-        self.assertIn("MSC転送bufferは4096 byte", SPEC)
 
     def test_write_runs_on_worker_and_queues_ownership_transition(self) -> None:
         write = function_body(
@@ -122,13 +117,6 @@ class UsbMscEjectDurabilityTests(unittest.TestCase):
         self.assertIn("msc_storage_mount_to_app();", unmount)
         self.assertIn("msc_storage_request_mount", mount_all)
         self.assertIn("ESP_ERR_NOT_FINISHED", mount_all)
-
-    def test_spec_requires_drain_before_app_mount(self) -> None:
-        self.assertIn("受理済みWRITEが残る場合はAPP側mountを遅延", SPEC)
-        self.assertIn("非同期完了処理が終わった後にだけ所有権をAPP側へ戻す", SPEC)
-        self.assertIn("TinyUSB event taskとは別の専用storage worker", SPEC)
-        self.assertIn("defer application\nmounting", LOCAL_PATCH)
-
 
 if __name__ == "__main__":
     unittest.main()

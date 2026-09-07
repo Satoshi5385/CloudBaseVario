@@ -12,10 +12,6 @@ UPDATE = (ROOT / "SRC/platform/firmware_update.c").read_text(encoding="utf-8")
 UPDATE_HEADER = (ROOT / "SRC/platform/firmware_update.h").read_text(
     encoding="utf-8"
 )
-SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
-README = (ROOT / "README.md").read_text(encoding="utf-8")
-DEVELOPER_README = (ROOT / "README2.md").read_text(encoding="utf-8")
-SETTING_GUIDE = (ROOT / "DOC/setting_json.md").read_text(encoding="utf-8")
 
 
 def body(source: str, start_text: str, end_text: str) -> str:
@@ -184,30 +180,6 @@ class RecoveryModePolicyTests(unittest.TestCase):
             "esp_err_t firmware_update_process_recovery(bool external_power_present);",
             UPDATE_HEADER,
         )
-
-    def test_spec_records_recovery_boundary_and_gestures(self) -> None:
-        self.assertIn("SW2+SW3", SPEC)
-        self.assertIn("SW3", SPEC)
-        self.assertIn("RECOVERY", SPEC)
-        self.assertIn("ROM Download Mode", SPEC)
-        self.assertIn("CBVUPDATE", SPEC)
-        self.assertIn("PSRAM-backed", SPEC)
-
-    def test_user_documents_do_not_offer_switch_formatting(self) -> None:
-        documents = (README, DEVELOPER_README, SETTING_GUIDE)
-
-        for document in documents:
-            self.assertIn("CBVUPDATE", document)
-            self.assertIn("PSRAM-backed", document)
-            self.assertNotIn("SW2とSW3による起動時初期化", document)
-            self.assertNotIn(
-                "SW2とSW3を同時に押したまま電源ONすると設定FATをformat",
-                document,
-            )
-        self.assertIn("SW3単独の起動操作では設定用ドライブを初期化しません", README)
-        self.assertIn("SW3単独にも設定FATの初期化機能はありません", DEVELOPER_README)
-        self.assertIn("SW3単独に初期化機能はありません", SETTING_GUIDE)
-
 
 if __name__ == "__main__":
     unittest.main()

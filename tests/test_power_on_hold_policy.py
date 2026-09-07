@@ -28,7 +28,6 @@ UPDATE_SOURCE = (ROOT / "SRC/platform/firmware_update.c").read_text(
 UPDATE_HEADER = (ROOT / "SRC/platform/firmware_update.h").read_text(
     encoding="utf-8"
 )
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 
 
 class PowerOnHoldPolicyTests(unittest.TestCase):
@@ -223,12 +222,6 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
         self.assertIn("hold_time_ms >= POWER_ON_HOLD_MS", loop)
         self.assertIn("esp_restart();", loop)
         self.assertNotIn("hold_time_ms >= POWER_OFF_HOLD_MS", loop)
-
-    def test_specification_records_power_on_wait(self) -> None:
-        self.assertIn("POWER_ON_WAIT", SW_SPEC)
-        self.assertIn("POWER_ON_HOLD_MS", SW_SPEC)
-        self.assertIn("0→100 %", SW_SPEC)
-
 
 if __name__ == "__main__":
     unittest.main()

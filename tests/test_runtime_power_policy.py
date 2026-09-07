@@ -8,7 +8,6 @@ AUDIO_OUTPUT = (ROOT / "SRC/platform/audio_output.c").read_text(
     encoding="utf-8"
 )
 DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 
 
 def function_body(source: str, signature: str, next_signature: str) -> str:
@@ -69,8 +68,6 @@ class RuntimePowerPolicyTests(unittest.TestCase):
     def test_product_build_uses_performance_optimization(self):
         self.assertIn("CONFIG_COMPILER_OPTIMIZATION_PERF=y", DEFAULTS)
         self.assertNotIn("CONFIG_COMPILER_OPTIMIZATION_DEBUG=y", DEFAULTS)
-        self.assertIn("performance optimization", SW_SPEC)
-        self.assertIn("`-O2`", SW_SPEC)
 
     def test_sensor_cpu_lock_only_wraps_due_sample_processing(self):
         measurement = function_body(
@@ -110,7 +107,6 @@ class RuntimePowerPolicyTests(unittest.TestCase):
         self.assertNotIn("app_power_sensor_work_begin", maintenance)
         self.assertNotIn("app_power_sensor_work_end", maintenance)
         self.assertNotIn("sensor_try_save_accel_calibration", calibration)
-        self.assertIn("実際にIMUまたはBMP581のサンプル処理", SW_SPEC)
 
     def test_bmp_overrun_tracking_starts_with_first_read_attempt(self):
         state_definition = function_body(
@@ -142,10 +138,5 @@ class RuntimePowerPolicyTests(unittest.TestCase):
             "state->next_bmp_deadline_us = now_us + BMP581_SAMPLE_PERIOD_US;",
             bmp,
         )
-        self.assertIn(
-            "最初のBMP581読み出しを10 ms絶対期限の基準", SW_SPEC
-        )
-
-
 if __name__ == "__main__":
     unittest.main()

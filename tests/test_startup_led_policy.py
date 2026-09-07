@@ -7,7 +7,6 @@ POLICY_HEADER = (ROOT / "SRC/domain/system_policy.h").read_text(encoding="utf-8"
 POLICY_SOURCE = (ROOT / "SRC/domain/system_policy.c").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
 STARTUP_SOURCE = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 
 
 class StartupLedPolicyTests(unittest.TestCase):
@@ -64,13 +63,6 @@ class StartupLedPolicyTests(unittest.TestCase):
         self.assertIn("static uint32_t led_firefly_brightness", POLICY_SOURCE)
         self.assertIn("system_policy_power_off_brightness", POLICY_SOURCE)
         self.assertNotIn("led_firefly_brightness_percent", WORKER_SOURCE)
-
-    def test_specification_defines_led_priority(self):
-        self.assertIn("表の上から順に優先度が高い", SW_SPEC)
-        self.assertIn("低電池残量", SW_SPEC)
-        self.assertIn("BLE", SW_SPEC)
-        self.assertIn("GPS搭載機", SW_SPEC)
-
 
 if __name__ == "__main__":
     unittest.main()

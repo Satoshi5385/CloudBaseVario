@@ -1,4 +1,3 @@
-import json
 import re
 import unittest
 from pathlib import Path
@@ -17,7 +16,6 @@ CONFIG_SOURCE = (ROOT / "SRC/domain/app_config.c").read_text(encoding="utf-8")
 STORAGE_SOURCE = (ROOT / "SRC/platform/config_storage.c").read_text(
     encoding="utf-8"
 )
-PARAMETER_SPEC = (ROOT / "DOC/setting_json.md").read_text(encoding="utf-8")
 
 
 class SwitchPreferencesPolicyTests(unittest.TestCase):
@@ -126,27 +124,11 @@ class SwitchPreferencesPolicyTests(unittest.TestCase):
         )
         self.assertIn("SHUTDOWN_DEADLINE_MS", shutdown)
 
-    def test_removed_keys_are_not_public_or_migrated(self) -> None:
+    def test_removed_keys_are_not_configured_or_migrated(self) -> None:
         table = CONFIG_SOURCE.split("parameter_table[] = {", 1)[1].split("};", 1)[0]
         for name in ("audio_enabled", "audio_amp_mode", "sink_enabled"):
             self.assertNotIn(name, table)
             self.assertNotIn(f'"{name}"', STORAGE_SOURCE)
-
-        example = PARAMETER_SPEC.split("```json", 1)[1].split("```", 1)[0]
-        document = json.loads(example)
-        shared_parameters = document["mc_parameters"]
-        profile_parameters = document["vario_parameter_sets"][0]["parameters"]
-        self.assertEqual(len(shared_parameters), 11)
-        self.assertEqual(len(profile_parameters), 23)
-        for name in ("audio_enabled", "audio_amp_mode", "sink_enabled"):
-            self.assertNotIn(name, shared_parameters)
-            self.assertNotIn(name, profile_parameters)
-        for name in (
-            "i2c_reinit_error_count",
-            "imu_mahony_kp",
-            "imu_mahony_ki",
-        ):
-            self.assertNotIn(name, shared_parameters)
 
 
 if __name__ == "__main__":

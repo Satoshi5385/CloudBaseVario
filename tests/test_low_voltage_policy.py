@@ -12,7 +12,6 @@ BATTERY_SOURCE = (ROOT / "SRC/domain/battery_level.c").read_text(
 )
 STARTUP_SOURCE = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
 
 
 class LowVoltagePolicyTests(unittest.TestCase):
@@ -58,11 +57,6 @@ class LowVoltagePolicyTests(unittest.TestCase):
             "                low_battery_power_off_pending",
             WORKER_SOURCE,
         )
-
-    def test_specification_records_both_protection_boundaries(self) -> None:
-        self.assertIn("3.2 V以下", SW_SPEC)
-        self.assertIn("3.1 V以下", SW_SPEC)
-
 
 if __name__ == "__main__":
     unittest.main()

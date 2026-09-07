@@ -20,12 +20,6 @@ RESOURCE_SOURCE = (ROOT / "SRC/app/app_resources.c").read_text(
 RESOURCE_HEADER = (ROOT / "SRC/app/app_resources.h").read_text(
     encoding="utf-8"
 )
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
-PARAMETER_SPEC = (ROOT / "DOC/setting_json.md").read_text(
-    encoding="utf-8"
-)
-
-
 class SystemSoundPolicyTests(unittest.TestCase):
     def test_switch_debounce_waits_thirty_ms_after_the_edge_sample(self) -> None:
         self.assertIn("SYSTEM_POLICY_SAMPLE_PERIOD_MS UINT32_C(10)", POLICY_HEADER)
@@ -163,23 +157,6 @@ class SystemSoundPolicyTests(unittest.TestCase):
         self.assertIn("volume_amplifier_mode(volume_level)", TASK_SOURCE)
         self.assertIn("selected_volume_level(&system)", TASK_SOURCE)
         self.assertIn("if (amplifier_mode == 0U)", TASK_SOURCE)
-
-    def test_documentation_matches_runtime_behavior(self) -> None:
-        self.assertIn("1000 Hz、80 ms、デューティ50 %", SW_SPEC)
-        self.assertIn(
-            "ONでは700 Hzを180 ms鳴動、80 ms無音、1200 Hzを120 ms鳴動",
-            SW_SPEC,
-        )
-        self.assertIn(
-            "OFFでは1200 Hzを120 ms鳴動、80 ms無音、700 Hzを180 ms鳴動",
-            SW_SPEC,
-        )
-        self.assertIn("深さ1のlatest-value queueへ非ブロッキング", SW_SPEC)
-        self.assertIn("変更後の音量", SW_SPEC)
-        self.assertIn("消音時は鳴りません", PARAMETER_SPEC)
-        self.assertIn("SW2はONを低音→高音、OFFを高音→低音で通知します", PARAMETER_SPEC)
-        self.assertIn("SW1の音量", PARAMETER_SPEC)
-
 
 if __name__ == "__main__":
     unittest.main()

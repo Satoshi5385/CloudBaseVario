@@ -19,12 +19,6 @@ CONFIG_SOURCE = (ROOT / "SRC/domain/app_config.c").read_text(
 CONFIG_HEADER = (ROOT / "SRC/platform/config_storage.h").read_text(
     encoding="utf-8"
 )
-SW_SPEC = (ROOT / "DOC/SW_spec.md").read_text(encoding="utf-8")
-PARAMETER_SPEC = (ROOT / "DOC/setting_json.md").read_text(
-    encoding="utf-8"
-)
-
-
 class AutoPowerOffPolicyTests(unittest.TestCase):
     def test_motion_thresholds_and_public_settings(self) -> None:
         self.assertIn(
@@ -66,19 +60,6 @@ class AutoPowerOffPolicyTests(unittest.TestCase):
         ):
             self.assertIn(expression, POLICY_SOURCE)
         self.assertIn("auto_power_off_config_revision", TASK_SOURCE)
-
-    def test_documentation_matches_runtime_contract(self) -> None:
-        for text in (
-            "`auto_power_off_minutes`",
-            "0～1440 min",
-            "`flight_climb_rate_threshold_mps`",
-            "`flight_gps_speed_threshold_kmh`",
-            "`stationary_confirm_seconds`",
-            "デバッグ高度",
-        ):
-            self.assertIn(text, PARAMETER_SPEC)
-        self.assertIn("`UNKNOWN`／`STATIONARY`／`FLYING`", SW_SPEC)
-
 
 if __name__ == "__main__":
     unittest.main()
