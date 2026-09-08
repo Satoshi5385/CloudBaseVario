@@ -368,6 +368,8 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 ### TinyUSB CDC + MSC構成
 
 - ESP32-S3のUSB OTG内蔵PHYを使用し、CDC ACM 1 interfaceとMSC 1 LUNを同時に公開する。USB Serial/JTAG、UART consoleおよびUSB DFU interfaceは併用しない。
+- VBUSがGPIO42で30 ms連続してHighと確認された場合だけ、TinyUSB device taskとUSB PHYを開始する。VBUSがLowの間はCDCを初期化せず、TinyUSB device taskとUSB PHYを停止する。再接続時はCDCを再初期化し、起動時のOTA確認および加速度較正gateが完了済みならMSC媒体も再公開する。
+- VBUS消失を30 ms連続して確認した場合は、新規MSC I/Oを閉じ、受理済みWRITEの完了、storage作業モード終了およびAPP所有権復帰を待ってからTinyUSB device taskとUSB PHYを停止する。設定FATと通知待ち中のMSC書込みworkerは維持し、ESP32側からの設定読込み・保存を継続する。
 - TinyUSB device taskはcore0固定、priority 6、stack 4096 byteとする。CDC RX/TX/endpoint bufferは512/4096/512 byte、MSC転送bufferは4096 byteとする。
 - CDCはESP-IDF log、10 Hzテレメトリーおよびコマンドコンソールを提供する。MSCは4 MiB共有FATを公開する。
 - MSC class driverはFAT mountより先に初期化する。FATをmountできない場合はLUNへmediaを登録せず、CDC + MSC descriptorを維持してSCSI要求へ「メディアなし」として応答する。未初期化のMSC class callbackをhostへ公開してはならない。
@@ -569,7 +571,7 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 - ESP-IDF標準の2コアFreeRTOSを使用し、`CONFIG_FREERTOS_UNICORE`と実験的Amazon SMP kernelを選択する`CONFIG_FREERTOS_SMP`はいずれも無効とする。`CONFIG_FREERTOS_NUMBER_OF_CORES=2`、tick rate 1000 Hzとすること。
 - BluetoothはBLE + NimBLE Hostだけを有効にし、Classic BluetoothとWi-Fiを無効にすること。
 - アプリケーションのstandard I/OをTinyUSB CDCへ接続し、同じTinyUSB deviceでMSCを提供すること。TinyUSBと競合する `CONFIG_ESP_CONSOLE_USB_CDC`、アプリ稼働中の `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`およびUART consoleは使用せず、GPIO19/20をUSB OTG以外の通常GPIOとして再設定しないこと。
-- CPU既定・最大周波数を80 MHz、DFS最小周波数を40 MHzとし、アプリケーションが `esp_pm_configure()` で明示的に設定すること。通常計測中はLight-sleep禁止ロックを保持し、全worker停止後の安全停止状態だけで解放すること。
+- CPU既定・最大周波数を80 MHz、DFS最小周波数を40 MHzとし、アプリケーションが `esp_pm_configure()` で明示的に設定すること。通常計測中はLight-sleep禁止ロックを保持し、全worker停止後の安全停止状態だけで解放すること。VBUS連動TinyUSB停止だけではこの通常動作lockを変更しないこと。
 - applicationはperformance optimization（GCCでは `-O2`）でbuildし、400 Hzのセンサー演算後にCPUが速やかにidleへ戻れるようにすること。センサー用80 MHz lockは実際にIMUまたはBMP581のサンプル処理が必要なburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
 - tickless idle、Bluetooth modem sleepおよびBluetooth low-power clockのmain XTALを有効にすること。通常動作中にTinyUSB CDCまたはMSCがUSB hostへ接続している間は自動Light-sleepを禁止すること。明示的な電源OFFではpending MSC writeがない状態でアプリケーション側TinyUSBを停止し、停止成功後はVBUSが残っていてもSAFE_STOPの自動Light-sleepを許可すること。
 - Wi-Fi/Bluetoothソフトウェア共存制御、NimBLEの未使用role・標準service・BLE 5.x追加機能・DTM testを無効にし、NimBLEはPeripheral/GATT Server、接続数1、Preferred ATT MTU 247とすること。交渉済みATT MTUは23～247を許容すること。
@@ -756,7 +758,7 @@ typedef struct {
 6. 最大80 MHz、最小40 MHz、Light-sleep許可でPMを初期化し、通常動作用Light-sleep禁止lockを取得する。初期化またはlock生成に失敗した場合は80 MHz固定・Light-sleep無効へ戻し、主要機能を継続する。
 7. 共有FATをformatせずESP32側へmountして `setting.json`を検証・反映し、ない場合は既定値から生成する。`INFO.TXT`および`setting_editor.html`は組込み内容と一致する場合は再書込みせずread-only属性だけを保証し、欠落または内容不一致の場合だけ4 KiB単位で復元する。mount、比較、書込み、flush、sync、実行partitionの署名検証用hashおよびMSC生成の処理中に起動Task Watchdogを定期給餌する。mount失敗時は自動formatせず既定値で継続する。
 8. 電池ADCを一度だけ初期化し、GPIO42 Lowの場合は100 ms間隔、最大5 sampleで起動時電池電圧を取得する。有効かつ有限な電圧が3.2 V以下なら、起動サウンドおよび以降の通常初期化へ進まず`SAFE_STOP`へ移る。同じ測定値をOTA電源判定にも再利用し、`UPDATE.PND/BAD/TXT`を整理した後、GPIO42 High、または電池電圧が3.4 Vを超え、かつ `UPDATE.BIN`がある場合はimageを検証してinactive OTA slotへ書き、成功時は再起動する。OTA pending-verify起動にも3.2 Vの起動禁止は適用するが、3.4 VのOTA適用条件は再適用せず10秒の確認taskを開始する。
-9. TinyUSB CDCを開始して起動中の診断を可能にする。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外しまたはdetachではESP32側へ戻す。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
+9. GPIO42でVBUSがHighの場合だけTinyUSB CDCを開始して起動中の診断を可能にする。VBUSがLowの場合はTinyUSB taskとUSB PHYを開始せず、通常worker開始後のVBUS接続を監視する。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外し、detachまたはVBUS消失ではESP32側へ戻し、再接続時はCDCと許可済みMSCを再開する。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
 10. キュー、mutex、Event Groupを生成する。必須同期オブジェクトを生成できない場合はブザーを停止したfatal stateへ入り、電源OFF操作だけを受理する。
 11. I2C busを初期化する。bus初期化に失敗した場合は、`sensor_task`の起動時初期化処理で再生成を試み、BMP581の初期化成否を確定するまで`ACTIVE`へ遷移しない。
 12. `audio_task`、`system_task`、`sensor_task`、`console_task`、`ble_tx_task`の順に開始する。`system_task`はBMP581起動完了まで緑100 %を維持し、完了を最初に観測した周期をLED位相0 msとする。5 task生成後はperipheral成否を待たずOTA初回boot確認条件を満たしたと記録する。BMP581の起動時初期化に失敗した場合は`ACTIVE`へ遷移せず`FATAL`へ移り、ICM-42688P-HXYだけが未検出の場合は気圧単独のまま`ACTIVE`へ移る。

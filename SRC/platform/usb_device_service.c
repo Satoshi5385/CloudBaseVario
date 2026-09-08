@@ -69,6 +69,7 @@ static bool storage_transition_locked;
 static usb_storage_owner_t storage_transition_from =
     USB_STORAGE_UNAVAILABLE;
 static bool msc_exposure_enabled;
+static bool msc_exposure_requested;
 static bool usb_stopping;
 static bool console_redirect_ready;
 static wl_handle_t wear_levelling_handle = WL_INVALID_HANDLE;
@@ -1366,6 +1367,41 @@ esp_err_t usb_device_start_recovery(void) {
     return start_usb_device(true);
 }
 
+esp_err_t usb_device_update_vbus(void) {
+    bool driver_ready;
+    bool exposure_enabled;
+    bool exposure_requested;
+    bool stopping;
+    esp_err_t ret;
+
+    portENTER_CRITICAL(&state_lock);
+    driver_ready = usb_diagnostics.driver_ready;
+    exposure_enabled = msc_exposure_enabled;
+    exposure_requested = msc_exposure_requested;
+    stopping = usb_stopping;
+    portEXIT_CRITICAL(&state_lock);
+
+    if (!usb_device_vbus_present()) {
+        if (!driver_ready) {
+            return ESP_OK;
+        }
+        return usb_device_stop();
+    }
+    if (stopping) {
+        return ESP_ERR_NOT_FINISHED;
+    }
+    if (!driver_ready) {
+        ret = usb_device_start();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+    if (exposure_requested && !exposure_enabled) {
+        return usb_device_enable_msc();
+    }
+    return ESP_OK;
+}
+
 esp_err_t usb_device_stop(void) {
     usb_storage_owner_t owner;
     bool driver_ready;
@@ -1547,6 +1583,20 @@ esp_err_t usb_device_enable_msc(void) {
     }
     ESP_LOGI(TAG, "MSC medium enabled for USB host");
     return ESP_OK;
+}
+
+esp_err_t usb_device_request_msc(void) {
+    bool driver_ready;
+
+    portENTER_CRITICAL(&state_lock);
+    msc_exposure_requested = true;
+    driver_ready = usb_diagnostics.driver_ready;
+    portEXIT_CRITICAL(&state_lock);
+    if (!driver_ready) {
+        ESP_LOGI(TAG, "MSC exposure deferred until USB VBUS is present");
+        return ESP_OK;
+    }
+    return usb_device_enable_msc();
 }
 
 esp_err_t usb_device_wait_for_host_release(uint32_t release_count,

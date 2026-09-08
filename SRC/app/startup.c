@@ -549,7 +549,6 @@ void app_startup_run(void) {
     bool nvs_ready = false;
     bool update_confirmation_required = false;
     bool usb_msc_gate_required = false;
-    bool usb_composite_active = false;
     bool imu_accel_calibration_required = false;
     bool ota_confirmation_boot = false;
     startup_boot_gesture_t boot_gesture = STARTUP_BOOT_GESTURE_NONE;
@@ -746,14 +745,18 @@ void app_startup_run(void) {
         startup_gate_result = ret;
     }
 
-    usb_result = usb_device_start();
-    usb_composite_active = usb_result == ESP_OK;
-    if (usb_result != ESP_OK) {
-        ESP_LOGW(TAG, "early TinyUSB CDC diagnostics unavailable: %s",
-                 esp_err_to_name(usb_result));
-    } else if (usb_msc_gate_required) {
+    if (external_power_present) {
+        usb_result = usb_device_start();
+        if (usb_result != ESP_OK) {
+            ESP_LOGW(TAG, "early TinyUSB CDC diagnostics unavailable: %s",
+                     esp_err_to_name(usb_result));
+        } else if (usb_msc_gate_required) {
+            ESP_LOGI(TAG,
+                     "USB CDC started; MSC medium remains APP-owned until startup gates clear");
+        }
+    } else {
         ESP_LOGI(TAG,
-                 "USB CDC started; MSC medium remains APP-owned until startup gates clear");
+                 "USB VBUS absent; TinyUSB task and PHY remain stopped");
     }
 
     ret = app_resources_init();
@@ -924,9 +927,8 @@ void app_startup_run(void) {
         }
     }
 
-    if (usb_result == ESP_OK && startup_gate_result == ESP_OK &&
-        usb_composite_active) {
-        usb_result = usb_device_enable_msc();
+    if (storage_result == ESP_OK && startup_gate_result == ESP_OK) {
+        usb_result = usb_device_request_msc();
         if (usb_result != ESP_OK) {
             ESP_LOGE(TAG, "USB MSC enable failed: %s",
                      esp_err_to_name(usb_result));

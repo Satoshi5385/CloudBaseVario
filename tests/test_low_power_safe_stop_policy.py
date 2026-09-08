@@ -13,6 +13,9 @@ USB_HEADER = (ROOT / "SRC/platform/usb_device_service.h").read_text(
 TINYUSB_MSC = (ROOT / "components/esp_tinyusb/tinyusb_msc.c").read_text(
     encoding="utf-8"
 )
+TINYUSB_CONSOLE = (ROOT / "components/esp_tinyusb/tinyusb_console.c").read_text(
+    encoding="utf-8"
+)
 POWER = (ROOT / "SRC/platform/app_power.c").read_text(encoding="utf-8")
 WAKE = (ROOT / "SRC/platform/safe_stop_wake.c").read_text(encoding="utf-8")
 
@@ -32,6 +35,14 @@ class LowPowerSafeStopPolicyTests(unittest.TestCase):
         self.assertIn("if (connected && !previously_connected)", console)
         self.assertIn("else if (!connected)", console)
         self.assertIn("if (connected && now_us >= next_monitor_us)", console)
+        self.assertIn("USB_VBUS_STABLE_MS", console)
+        self.assertIn("usb_device_update_vbus();", console)
+
+    def test_console_can_restart_after_vbus_shutdown(self) -> None:
+        self.assertIn("#if CONFIG_ESP_CONSOLE_NONE", TINYUSB_CONSOLE)
+        self.assertIn('default_uart_dev = "/dev/null";', TINYUSB_CONSOLE)
+        self.assertIn("tinyusb_console_deinit", USB)
+        self.assertIn("tinyusb_console_init", USB)
 
     def test_tinyusb_stop_preserves_storage_and_rejects_writes(self) -> None:
         self.assertIn("esp_err_t usb_device_stop(void);", USB_HEADER)

@@ -101,6 +101,19 @@ esp_err_t usb_device_start(void);
 esp_err_t usb_device_start_recovery(void);
 
 /**
+ * @brief Match the normal application TinyUSB lifecycle to the raw VBUS input.
+ *
+ * Starts the TinyUSB task, PHY, and CDC when VBUS is present. When VBUS is
+ * absent, stops them only after the existing MSC write/ownership checks allow
+ * shutdown. The Flash-backed application FAT and its sleeping MSC write worker
+ * remain initialized.
+ *
+ * @return ESP_OK when the requested state is reached, or a retryable/error
+ *         result from USB startup or the safe shutdown path.
+ */
+esp_err_t usb_device_update_vbus(void);
+
+/**
  * @brief Stop the application TinyUSB task and PHY without deleting FAT/MSC storage.
  *
  * The call is idempotent, but refuses to stop while an MSC write session is
@@ -114,6 +127,14 @@ esp_err_t usb_device_stop(void);
  * so startup calibration, OTA cleanup, and configuration writes can complete.
  */
 esp_err_t usb_device_enable_msc(void);
+
+/**
+ * @brief Permit normal MSC exposure now or after the next VBUS connection.
+ *
+ * This records the completed startup gate even when TinyUSB is stopped because
+ * VBUS is absent. A later usb_device_update_vbus() call restores MSC exposure.
+ */
+esp_err_t usb_device_request_msc(void);
 
 /**
  * Wait for a completed HOST-to-APP ownership transition after @p release_count.

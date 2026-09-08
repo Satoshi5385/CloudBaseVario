@@ -72,6 +72,9 @@
 #define STORAGE_MODE_POLL_MS UINT32_C(10)
 #define CONSOLE_CONNECTED_POLL_MS UINT32_C(10)
 #define CONSOLE_DISCONNECTED_POLL_MS UINT32_C(250)
+#define USB_VBUS_STABLE_MS UINT32_C(30)
+#define USB_LIFECYCLE_DRAIN_RETRY_MS UINT32_C(50)
+#define USB_LIFECYCLE_ERROR_RETRY_MS UINT32_C(1000)
 
 #define BMP581_SAMPLE_PERIOD_US INT64_C(10000)
 #define SENSOR_PUBLICATION_PERIOD_US BMP581_SAMPLE_PERIOD_US
@@ -3339,6 +3342,9 @@ void app_console_worker_task(void *context) {
     uint32_t previous_gps_interval_ms = 0U;
     uint32_t previous_gps_sent = 0U;
     uint32_t previous_gps_dropped = 0U;
+    bool vbus_candidate_present = usb_device_vbus_present();
+    int64_t vbus_candidate_since_us = esp_timer_get_time();
+    esp_err_t previous_usb_lifecycle_error = ESP_OK;
     int64_t next_monitor_us = 0;
     int64_t next_gps_heartbeat_us = 0;
 
@@ -3348,7 +3354,8 @@ void app_console_worker_task(void *context) {
 
     for (;;) {
         int64_t now_us = esp_timer_get_time();
-        bool connected = usb_device_cdc_connected();
+        bool connected;
+        bool vbus_present = usb_device_vbus_present();
         uint32_t poll_ms = CONSOLE_DISCONNECTED_POLL_MS;
 
         if (app_stop_requested()) {
@@ -3379,6 +3386,48 @@ void app_console_worker_task(void *context) {
             }
             acknowledge_and_delete(APP_EVENT_CONSOLE_ACK);
         }
+
+        if (vbus_present != vbus_candidate_present) {
+            vbus_candidate_present = vbus_present;
+            vbus_candidate_since_us = now_us;
+            poll_ms = USB_VBUS_STABLE_MS;
+        } else if (now_us - vbus_candidate_since_us >=
+                   (int64_t) USB_VBUS_STABLE_MS * INT64_C(1000)) {
+            esp_err_t lifecycle_ret = usb_device_update_vbus();
+
+            if (lifecycle_ret == ESP_OK) {
+                previous_usb_lifecycle_error = ESP_OK;
+            } else {
+                if (lifecycle_ret != previous_usb_lifecycle_error &&
+                    lifecycle_ret != ESP_ERR_NOT_FINISHED &&
+                    !(lifecycle_ret == ESP_ERR_INVALID_STATE &&
+                      !vbus_present)) {
+                    ESP_LOGW(TAG, "USB VBUS lifecycle update failed: %s",
+                             esp_err_to_name(lifecycle_ret));
+                    post_runtime_diagnostic(
+                        DIAGNOSTIC_EVENT_PERIPHERAL_FAILURE,
+                        lifecycle_ret);
+                }
+                previous_usb_lifecycle_error = lifecycle_ret;
+                if (vbus_present) {
+                    poll_ms = USB_LIFECYCLE_ERROR_RETRY_MS;
+                } else {
+                    poll_ms = USB_LIFECYCLE_DRAIN_RETRY_MS;
+                }
+            }
+        } else {
+            int64_t remaining_us =
+                (int64_t) USB_VBUS_STABLE_MS * INT64_C(1000) -
+                (now_us - vbus_candidate_since_us);
+            uint32_t remaining_ms =
+                (uint32_t) ((remaining_us + INT64_C(999)) / INT64_C(1000));
+
+            if (remaining_ms < poll_ms) {
+                poll_ms = remaining_ms;
+            }
+        }
+
+        connected = usb_device_cdc_connected();
 
         if (connected && !previously_connected) {
             next_monitor_us = now_us + SERIAL_MONITOR_PERIOD_US;

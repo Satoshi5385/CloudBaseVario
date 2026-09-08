@@ -74,7 +74,11 @@ static esp_err_t redirect_std_streams_to(FILE **f_in, FILE **f_out, FILE **f_err
  */
 static esp_err_t restore_std_streams(FILE **f_in, FILE **f_out, FILE **f_err)
 {
+#if CONFIG_ESP_CONSOLE_NONE
+    const char *default_uart_dev = "/dev/null";
+#else
     const char *default_uart_dev = "/dev/uart/" STRINGIFY(CONFIG_ESP_CONSOLE_UART_NUM);
+#endif
     if (f_in) {
         stdin = freopen(default_uart_dev, "r", *f_in);
         if (stdin == NULL) {

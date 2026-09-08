@@ -21,12 +21,14 @@ class UsbStartupPolicyTests(unittest.TestCase):
         workers_start = MAIN_SOURCE.index("ret = app_tasks_start();")
 
         self.assertLess(composite_start, workers_start)
+        startup = MAIN_SOURCE[composite_start - 80 : composite_start + 100]
+        self.assertIn("if (external_power_present)", startup)
 
     def test_msc_is_enabled_only_after_startup_waits(self) -> None:
         workers_start = MAIN_SOURCE.index("ret = app_tasks_start();")
         ota_wait = MAIN_SOURCE.index("firmware_update_wait_for_confirmation(")
         calibration_wait = MAIN_SOURCE.index("xEventGroupWaitBits(")
-        msc_enable = MAIN_SOURCE.index("usb_result = usb_device_enable_msc();")
+        msc_enable = MAIN_SOURCE.index("usb_result = usb_device_request_msc();")
 
         self.assertLess(workers_start, ota_wait)
         self.assertLess(ota_wait, msc_enable)
@@ -46,11 +48,28 @@ class UsbStartupPolicyTests(unittest.TestCase):
 
     def test_msc_exposure_is_explicit_and_diagnosable(self) -> None:
         self.assertIn("esp_err_t usb_device_enable_msc(void);", USB_HEADER)
+        self.assertIn("esp_err_t usb_device_request_msc(void);", USB_HEADER)
         self.assertIn("bool msc_enabled;", USB_HEADER)
         self.assertIn("usb_diagnostics.msc_enabled = true;", USB_SOURCE)
         self.assertIn(
             "TINYUSB_MSC_STORAGE_MOUNT_USB", USB_SOURCE
         )
+
+    def test_runtime_tinyusb_lifecycle_follows_vbus(self) -> None:
+        lifecycle = USB_SOURCE[
+            USB_SOURCE.index("esp_err_t usb_device_update_vbus(void)") :
+            USB_SOURCE.index(
+                "esp_err_t usb_device_stop(void)",
+                USB_SOURCE.index("esp_err_t usb_device_update_vbus(void)"),
+            )
+        ]
+
+        self.assertIn("usb_device_vbus_present()", lifecycle)
+        self.assertIn("usb_device_start();", lifecycle)
+        self.assertIn("usb_device_stop();", lifecycle)
+        self.assertIn("msc_exposure_requested", lifecycle)
+        self.assertIn("usb_device_enable_msc();", lifecycle)
+        self.assertIn("msc_exposure_requested = true;", USB_SOURCE)
 
     def test_calibration_debug_usb_variant_is_removed(self) -> None:
         combined = MAIN_SOURCE + USB_SOURCE + USB_HEADER
