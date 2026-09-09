@@ -7,6 +7,9 @@ DEFAULTS = (ROOT / "sdkconfig.defaults").read_text(encoding="utf-8")
 STARTUP = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
 TASKS = (ROOT / "SRC/app/app_tasks.c").read_text(encoding="utf-8")
 WORKERS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
+SENSOR_WORKER = (ROOT / "SRC/app/sensor_worker.c").read_text(
+    encoding="utf-8"
+)
 BLE_WORKER = (ROOT / "SRC/app/ble_tx_worker.c").read_text(encoding="utf-8")
 UPDATE = (ROOT / "SRC/platform/firmware_update.c").read_text(encoding="utf-8")
 SERVICE = (ROOT / "SRC/platform/watchdog_service.c").read_text(encoding="utf-8")
@@ -78,7 +81,7 @@ class WatchdogPolicyTests(unittest.TestCase):
             "WATCHDOG_ACTOR_AUDIO",
             "WATCHDOG_ACTOR_SYSTEM",
         ):
-            self.assertIn(actor, STARTUP + TASKS + WORKERS)
+            self.assertIn(actor, STARTUP + TASKS + WORKERS + SENSOR_WORKER)
         console = WORKERS[
             WORKERS.index("void app_console_worker_task") :
             WORKERS.index("void app_workers_run_fatal_fallback")
@@ -98,10 +101,11 @@ class WatchdogPolicyTests(unittest.TestCase):
 
     def test_intentional_fatal_and_shutdown_paths_are_wdt_safe(self) -> None:
         self.assertIn(
-            "unregister_critical_watchdog(WATCHDOG_ACTOR_SENSOR", WORKERS
+            "app_worker_unregister_watchdog(WATCHDOG_ACTOR_SENSOR",
+            SENSOR_WORKER,
         )
         self.assertIn(
-            "unregister_critical_watchdog(WATCHDOG_ACTOR_AUDIO", WORKERS
+            "app_worker_unregister_watchdog(WATCHDOG_ACTOR_AUDIO", WORKERS
         )
         shutdown_wait = WORKERS[
             WORKERS.index("static bool wait_for_shutdown_bits") :

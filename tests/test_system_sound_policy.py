@@ -136,8 +136,8 @@ class SystemSoundPolicyTests(unittest.TestCase):
             TASK_SOURCE.index("void app_audio_worker_task(void *context)") :
             TASK_SOURCE.index("static uint32_t shutdown_remaining_ms")
         ]
-        stop = audio_task.index("if (app_stop_requested())")
-        fatal = audio_task.index("if (app_fatal_state())")
+        stop = audio_task.index("if (app_worker_stop_requested())")
+        fatal = audio_task.index("if (app_worker_fatal_state())")
         button = audio_task.index("xQueueReceive(button_sound_queue", fatal)
         vario = audio_task.index("vario_audio_step(", button)
         self.assertLess(stop, fatal)

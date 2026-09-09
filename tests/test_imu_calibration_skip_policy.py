@@ -5,7 +5,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
-TASK_SOURCE = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
+TASK_SOURCE = "\n".join(
+    (ROOT / path).read_text(encoding="utf-8")
+    for path in ("SRC/app/app_workers.c", "SRC/app/sensor_worker.c")
+)
 RESOURCE_HEADER = (ROOT / "SRC/app/app_events.h").read_text(
     encoding="utf-8"
 )

@@ -28,7 +28,7 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 | 11 | `SD_MOSI` | `PIN_SD_MOSI` | microSD CMD／MOSI | 出力 | SPI |
 | 12 | `SD_CLK` | `PIN_SD_CLK` | microSD クロック | 出力 | SPI |
 | 13 | `SD_MISO` | `PIN_SD_MISO` | microSD DAT0／MISO | 入力 | SPI |
-| 14 | `INT_ICM` | `PIN_INT_ICM` | ICM-42688P-HXY INT1 Data Ready | 入力 | 立上りedge。ISRはsensor taskへの通知だけを行う |
+| 14 | `INT_ICM` | `PIN_INT_ICM` | ICM-42688P-HXY INT1（4サンプルFIFO WTM） | 入力 | 立上りGPIO割り込み、約100 Hz |
 | 15 | `BUZZER_MODE1` | `PIN_BUZZER_MODE1` | PAM8904E EN1 | 出力 | Highアクティブ、外付け100kΩプルダウン |
 | 16 | `LED_1` | `PIN_LED_1` | 緑LED | 出力 | Lowで点灯、Highで消灯 |
 | 17 | `GPS_RX` | `PIN_GPS_UART_TX` | GPS受信端子へのUART送信 | 出力 | ESP32側UART1 TX。L96-M33 RXD1へ接続 |
@@ -95,10 +95,10 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 |---|---:|---|
 | `PIN_I2C_SDA` | 4 | I2C SDA |
 | `PIN_I2C_SCL` | 5 | I2C SCL |
-| `PIN_INT_ICM` | 14 | ICM-42688P-HXY INT1 Data Ready |
+| `PIN_INT_ICM` | 14 | ICM-42688P-HXY INT1（4サンプルFIFO WTM、約100 Hz） |
 | `PIN_INT_BMP` | 21 | BMP581 INT |
 
-ICM-42688P-HXYはSDO Low固定とし、7 bit I2Cアドレスを`0x18`に固定する。`0x19`は使用しない。CSBはI2C modeとなるHighを維持する。ソフトウェアはBMP581のdevice handleを1 MHz、ICM-42688P-HXYのdevice handleを400 kHz以下とし、HXY品の識別レジスタ`0x01`が`0x6A`であることを確認する。識別後はHXY版レジスタで400 Hz、加速度±8 g、ジャイロ±2000 dpsへ設定し、INT1 Data ReadyをGPIO14の立上り割り込みへ接続する。
+ICM-42688P-HXYはSDO Low固定とし、7 bit I2Cアドレスを`0x18`に固定する。`0x19`は使用しない。CSBはI2C modeとなるHighを維持する。ソフトウェアはBMP581のdevice handleを1 MHz、ICM-42688P-HXYのdevice handleを400 kHz以下とし、HXY品の識別レジスタ`0x01`が`0x6A`であることを確認する。識別後はHXY版レジスタで400 Hz、加速度±8 g、ジャイロ±2000 dpsへ設定し、FIFOへ蓄積する。4サンプルとSensor_Timeが揃う26 wordに対してWTM閾値を25 wordへ設定し、INT1/GPIO14の立上り通知でFIFOとBMP581を同じ測定バーストとして処理する。詳細は[IMU FIFO取得](imu_fifo.md)を参照する。
 
 ### 3.4 GPS
 

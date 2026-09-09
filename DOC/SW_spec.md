@@ -202,28 +202,32 @@ Data Ready割り込みを使用しないため、読出し成功ごとにsequenc
 | --- | ---: | ---: | --- |
 | `SOFT_RST` | `0x4A` | `0xA5` | ソフトウェアリセット |
 | `PWR_CTRL` | `0x7D` | `0x0E` | 温度、ジャイロ、加速度を有効化 |
-| `COM_CFG` | `0x05` | `0x50` | HXY I2C通信設定 |
+| `COM_CFG` | `0x05` | `0x40` | BDU有効、Addr_Auto無効（FIFO_DATAの単一アドレス連続読出し） |
 | `ACC_CONF` | `0x40` | `0xAA` | high-performance、normal average 4、400 Hz |
 | `ACC_RANGE` | `0x41` | `0x02` | ±8 g |
 | `GYR_CONF` | `0x42` | `0xAA` | high-performance、normal average 4、400 Hz |
 | `GYR_RANGE` | `0x43` | `0x00` | ±2000 dps |
-| `INT_CFG1` | `0x06` | `0x03` | ジャイロData ReadyをINT1へ出力 |
+| `INT_CFG1` | `0x06` | `0x09` | FIFO WTMをINT1へ出力、active High |
+| `FIFO_CFG0` | `0x1C` | `0x06` | 加速度・ジャイロFIFO有効、headerなし、16 bit維持 |
+| `FIFO_CFG1` | `0x1D` | `0x10` | FIFOモード。読出し後は`0x00`→`0x10`で再開 |
+| `FIFO_CFG2` | `0x1E` | `0x19` | WTM閾値25 word。26 word（Sensor_Time＋4サンプル）で成立 |
+| `FIFO_DOWNS` | `0x45` | `0x88` | filteredデータ、間引きなし（400 Hz） |
 
-- `DATA_STAT`（`0x0B`）から加速度・ジャイロのData Readyと設定エラーを確認し、出力レジスタ`0x0C`～`0x17`を同一transactionで連続読み出しすること。設定エラーbit mask `0x30`が非0、またはData Ready mask `0x03`が揃っていないframeは有効サンプルとしないこと。
+- `DATA_STAT`（`0x0B`）の設定エラーmask `0x30`を確認し、`FIFO_STAT0/1`の2-byte単位の残量から`FIFO_DATA`（`0x21`）を単一アドレスで連続読み出しすること。先頭4 byteのSensor_Timeに続くgyro XYZ、accel XYZを16 bitとして復号する。初回転送後に残量を再確認し、転送中に到着した完全な12-byteフレームをバッチ全体で最大16サンプルまで追加取得する。部分フレーム、16サンプル超過、overflow、count不整合、通信失敗またはFIFO再開失敗ではバッチ全体を推定へ渡さない。Data Readyの現在値で過去のFIFOサンプルを除外しない。詳細は[IMU FIFO取得](imu_fifo.md)を参照する。
 - 3軸加速度と3軸ジャイロはbig-endianのsigned 16 bitとして復元すること。±8 gは4096 LSB/g、±2000 dpsは0.061 dps/LSBとしてSI単位へ変換すること。
-- GPIO14はHXY INT1の立上りData Ready入力とする。ISRは`sensor_task`へのtask notificationだけを行い、I2C、姿勢計算、ログ整形またはBLE送信を行わないこと。
+- GPIO14は立上り割り込みとし、4サンプルWTMの約100 Hz通知だけを`sensor_task`へ送ること。最初のISRで同じバッチの再通知をmaskし、BY-PASS→FIFO再開成功後に再び有効化すること。400 HzのData Ready割り込みは使用しない。WTM通知では設定コピーや演算を挟まず`FIFO取得・再開 → BMP581取得`を連続実行し、その後にIMUサンプルを時刻順に処理して、最後に現在周期のBMPサンプルで気圧更新すること。BMP581再試行中もWTMによるIMU取得を継続すること。
 - config FAT直下の`mc_data.json`に有効な個体較正値がない場合は、基板上面を上にして水平静止させ、補正前の基板座標でX/Yが各±0.10 g以内、Zが+0.75～+1.25 g、各軸ジャイロ絶対値3 dps以下、加速度ノルム振動RMSが0.02 g以下となる800連続サンプルから加速度オフセットを求めること。収集時のZ範囲は上向き姿勢を確認する粗い判定とし、個体オフセットの妥当性は800サンプル平均から求めた各軸オフセットが±0.20 g以内であることにより最終判定する。収集中の条件違反では蓄積をやり直し、最終オフセットが範囲外の場合は保存しないこと。
 - 加速度オフセットはセンサ座標で各軸±0.20 g以内とし、`mc_data.json`へ原子的に保存できた後だけ有効化すること。保存までは気圧単独・音・BLEおよびTinyUSB CDC診断を継続する一方、config FATを`APP_OWNED`に維持してMSC媒体を公開しない。保存失敗は2秒間隔で再試行すること。初回較正中にSW3を3秒長押しした場合は、そのbootに限って収集と保存再試行を中止し、未保存候補を破棄してIMUを停止した気圧単独動作へ移ること。スキップ状態をFATまたはNVSへ保存せず、正式buildではMSC媒体を公開し、次回bootでは再び初回較正を要求すること。
 - 通常buildはMSC媒体の公開前にCDCを開始し、校正状態、永続化状態、収集数、確定オフセット、保存結果、Mahony信頼度、振動RMS、実効Kp/KiおよびKi activeを10 Hzモニターまたは`DIAG STATUS`へ出力すること。初回較正と起動時ファイル処理の完了まではconfig FATをESP32側の`APP_OWNED`に維持し、完了後は同一boot中にMSC媒体を公開すること。
 - 有効な加速度オフセットを生のセンサ加速度から減算してから基板座標へ変換すること。センサ交換または再較正時はMSC上で`mc_data.json`を削除し、安全な取り外し後に再起動すること。
 - 加速度補正後は、加速度ノルム0.9～1.1 gかつ各軸ジャイロ絶対値3 dps以下の連続サンプルで起動毎の静止ジャイロ較正を行うこと。水平や特定姿勢を要求せず、既定の完了条件は200サンプルとし、途中で静止条件を外れた場合は蓄積をやり直すこと。
-- 静止加速度からroll/pitchを初期化し、ジャイロ積分と加速度の重力方向補正を行う6DoF姿勢推定を400 Hzサンプルの実時刻差で更新すること。磁気センサーを使用しないためyawは絶対方位として扱わないこと。
+- 静止加速度からroll/pitchを初期化し、ジャイロ積分と加速度の重力方向補正を行う6DoF姿勢推定をFIFOバッチ内は公称2.5 ms間隔、バッチ間は推定ホスト時刻差で更新すること。磁気センサーを使用しないためyawは絶対方位として扱わないこと。
 - 基板座標へ軸変換後、加速度を地球座標へ回転し、上向きZ成分から標準重力9.80665 m/s²を減算して鉛直加速度を得ること。
 - Mahonyの加速度補正信頼度は、1 gからのノルム誤差0.15 gで0となる線形値、バイアス補正後角速度10 dps以下で1・90 dps以上で0となる線形値、および0.25秒EMAで求めた振動RMS 0.01 g以下で1・0.05 g以上で0となる線形値の最小値とする。実効Kpは設定Kpと信頼度の積とする。
 - Kiは、1 gからの誤差0.03 g以内、角速度3 dps以下、振動RMS 0.01 g以下が0.5秒連続したときだけ更新する。非信頼時は積分値を保持して更新を止め、各軸を±5 dps相当に制限すること。
 - 姿勢のタイムスタンプが逆行、同値または50 ms超の間隔となった場合、非有限値または正規化不能なquaternionとなった場合は、姿勢と較正を破棄し、気圧単独へ縮退して静止較正から再開すること。
-- 未検出、無応答、ID不一致、連続通信エラー、100 ms超のstale、較正未完了または姿勢無効は非FATALとし、BMP581による気圧単独推定、音およびBLEを継続すること。再初期化は約2秒間隔とし、task delayで待たず次回試行時刻として管理すること。
-- `imu_diagnostics_t`に有効、online、設定済み、加速度較正・保存状態、ジャイロ較正済み、姿勢有効、融合中、stale、アドレス、`WHO_AM_I`、`DATA_STAT`、最終エラー、試行・サンプル・連続エラー・各較正・取りこぼし回数、3軸加速度オフセット、加速度ノルム、ジャイロバイアス、信頼度、振動RMS、実効Kp/Ki、Ki有効状態、クォータニオンおよびroll／pitch／yawを保持し、10 Hz連続モニターと`DIAG STATUS`へ表示すること。yawは磁気方位ではなく、6DoF推定開始時を基準とする相対角として扱う。
+- 未検出、無応答、ID不一致、最初の取得異常、100 ms超のstale、較正未完了または姿勢無効は非FATALとし、BMP581による気圧単独推定、音およびBLEを継続すること。最初のIMU取得異常、4件未満、FIFO異常またはWTM timeoutでは、同じ周期のBMP読出しを試行してからIMUを無効化する。再初期化は約2秒間隔とし、reset・電源起動・sensor起動待ちにtask delayを使わず段階実行すること。BMP期限まで5 ms未満では新しいIMU初期化I2C処理を始めず、初期化中もBMPを絶対10 ms周期で取得すること。
+- `imu_diagnostics_t`に有効、online、設定済み、加速度較正・保存状態、ジャイロ較正済み、姿勢有効、融合中、stale、アドレス、`WHO_AM_I`、`DATA_STAT`、最終エラー、試行・サンプル・連続エラー・各較正・取りこぼし回数、現在cadence、WTM周期数、BMPタイマ周期数、直近・最大周期時間、3軸加速度オフセット、加速度ノルム、ジャイロバイアス、信頼度、振動RMS、実効Kp/Ki、Ki有効状態、クォータニオンおよびroll／pitch／yawを保持し、10 Hz連続モニターと`DIAG STATUS`へ表示すること。`missed_interrupt_count`はWTM timeoutによりBMPタイマへ縮退した回数だけを表す。yawは磁気方位ではなく、6DoF推定開始時を基準とする相対角として扱う。
 
 TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Select方式は本部品へ適用しない。
 
@@ -551,8 +555,8 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 
 ## 非機能要件
 
-- BMP581の目標取得周期を10 ms、ICM-42688P-HXYの目標取得周期を2.5 ms、音声評価周期を10 ms以下とすること。姿勢推定と融合フィルタのIMU更新は2.5 ms周期を維持するが、正常なIMUサンプルだけを理由にvario snapshot、音声キューまたはIMU診断snapshotを更新せず、通常計測中の公開頻度は最大100 Hzに制限すること。IMUのData Ready通知が複数回蓄積した場合は最新frameを優先し、取りこぼし数を計数すること。未検出時は約2秒間隔で再初期化すること。
-- BMP581の周期超過とI2Cエラーは別々に計数すること。起動時および再初期化後は、最初のBMP581読み出しを10 ms絶対期限の基準とし、その読み出しまでのデバイス初期化時間は周期超過へ計上しないこと。
+- ICM-42688P-HXY FIFOの4サンプルWTMを正常時の共通測定起床とし、`FIFO取得・再開 → BMP581取得 → IMU姿勢・加速度処理 → 現在周期のBMP気圧更新 → 公開`の順で実行すること。IMU内部ODRは400 Hzを維持し、完全な4サンプルを厳密な10 msより優先する。BMPサンプルを次周期へ保留しない。vario snapshot、音声キュー、IMU診断snapshotの通常公開頻度は最大100 Hzを維持する。
+- WTM期限とBMP期限は別々に保持すること。WTM timeout、最初のIMU取得異常、4件未満またはFIFO異常では、同じ周期のBMP読出し後にBMP専用の絶対10 ms周期へ縮退する。IMU不使用、異常および段階初期化中もBMP 100 Hzを継続する。BMP581の周期超過、I2Cエラー、FIFO error、overflow、破棄数、WTM timeoutは別々に計数すること。
 - 周期処理は単調増加時刻と絶対期限を使用し、処理時間を次周期へ累積させないこと。
 - 最新値だけが必要な経路では、キュー満杯時に古い値を破棄し、高優先度タスクを待たせないこと。
 - センサー取得および音声処理のアプリケーション経路は、USB処理またはファイル処理の完了を同期的に待たないこと。
@@ -572,7 +576,7 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 - BluetoothはBLE + NimBLE Hostだけを有効にし、Classic BluetoothとWi-Fiを無効にすること。
 - アプリケーションのstandard I/OをTinyUSB CDCへ接続し、同じTinyUSB deviceでMSCを提供すること。TinyUSBと競合する `CONFIG_ESP_CONSOLE_USB_CDC`、アプリ稼働中の `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`およびUART consoleは使用せず、GPIO19/20をUSB OTG以外の通常GPIOとして再設定しないこと。
 - CPU既定・最大周波数を80 MHz、DFS最小周波数を40 MHzとし、アプリケーションが `esp_pm_configure()` で明示的に設定すること。通常計測中はLight-sleep禁止ロックを保持し、全worker停止後の安全停止状態だけで解放すること。VBUS連動TinyUSB停止だけではこの通常動作lockを変更しないこと。
-- applicationはperformance optimization（GCCでは `-O2`）でbuildし、400 Hzのセンサー演算後にCPUが速やかにidleへ戻れるようにすること。センサー用80 MHz lockは実際にIMUまたはBMP581のサンプル処理が必要なburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
+- applicationはperformance optimization（GCCでは `-O2`）でbuildし、100 Hzの一括センサー演算後にCPUが速やかにidleへ戻れるようにすること。センサー用80 MHz lockは実際にIMUまたはBMP581のサンプル処理が必要なburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
 - tickless idle、Bluetooth modem sleepおよびBluetooth low-power clockのmain XTALを有効にすること。通常動作中にTinyUSB CDCまたはMSCがUSB hostへ接続している間は自動Light-sleepを禁止すること。明示的な電源OFFではpending MSC writeがない状態でアプリケーション側TinyUSBを停止し、停止成功後はVBUSが残っていてもSAFE_STOPの自動Light-sleepを許可すること。
 - Wi-Fi/Bluetoothソフトウェア共存制御、NimBLEの未使用role・標準service・BLE 5.x追加機能・DTM testを無効にし、NimBLEはPeripheral/GATT Server、接続数1、Preferred ATT MTU 247とすること。交渉済みATT MTUは23～247を許容すること。
 - factory、4 MiB共有FAT、OTA dataおよび2個の3.5 MiB OTA slotを持つcustom partition tableを使用し、bootloader rollbackを有効にすること。
@@ -595,14 +599,14 @@ ESP32-S3の両コアでESP-IDF標準FreeRTOSを動作させる。FreeRTOSをcore
 
 優先度は `configMAX_PRIORITIES >= 25` を前提とする。表のstackを設定値とする。ESP-IDFの `xTaskCreatePinnedToCore()` へ渡すstackサイズはbyte単位である。
 
-`sensor_task`はGPIO14のtask notification、次のBMP581絶対期限、BMP581再試行時刻、ICM-42688P-HXYのstale期限または再試行時刻のうち最も早い条件までblockし、busy loopにしない。NimBLE HostはESP-IDFが生成する専用タスクで動作し、`ble_tx_task`はセンサーキューやI2Cを直接操作しない。
+`sensor_task`はGPIO14のWTM task notification、独立したWTM timeout、BMP絶対期限、BMP581再試行時刻、段階IMU初期化の次回処理時刻、ICM-42688P-HXYのstale期限または再試行時刻のうち最も早い条件までblockし、busy loopにしない。IMU offlineまたは初期化中は次のBMP絶対期限を使用する。NimBLE HostはESP-IDFが生成する専用タスクで動作し、`ble_tx_task`はセンサーキューやI2Cを直接操作しない。
 
 ### データの流れ
 
 ```mermaid
 flowchart LR
     BMP[BMP581] --> SENSOR[sensor_task]
-    IMU[ICM-42688P-HXY<br/>accel / gyro / DRDY] --> SENSOR
+    IMU[ICM-42688P-HXY<br/>accel / gyro / 4-sample WTM] --> SENSOR
     SENSOR --> ATTITUDE[axis map / gyro calibration<br/>6DoF attitude]
     ATTITUDE --> FUSION[vertical acceleration<br/>baro / IMU fusion]
     SENSOR --> FUSION
@@ -681,7 +685,16 @@ typedef struct {
     uint32_t consecutive_error_count;
     uint32_t calibration_sample_count;
     uint32_t accel_calibration_sample_count;
-    uint32_t missed_interrupt_count;
+    uint32_t missed_interrupt_count; /* WTM timeout縮退回数 */
+    uint32_t fifo_read_count;
+    uint32_t fifo_last_sample_count;
+    uint32_t fifo_overflow_count;
+    uint32_t fifo_error_count;
+    uint32_t wtm_cycle_count;
+    uint32_t bmp_timer_cycle_count;
+    uint32_t last_cycle_interval_us;
+    uint32_t max_cycle_interval_us;
+    imu_diagnostic_cadence_t cadence;
     float accel_norm_g;
     float accel_offset_mps2[3];
     float gyro_bias_radps[3];
@@ -715,11 +728,12 @@ typedef struct {
 | --- | --- | --- |
 | `platform` | `board` | GPIO番号、極性、I2C、LEDC、ADC換算、軸方向 |
 | `platform` | `bmp581` | レジスタ設定、検出、温度・気圧の一括読出しと変換 |
-| `platform` | `icm42688_hxy` | HXY識別、設定read-back、GPIO14 ISR、accel/gyro一括読出しと物理値変換 |
+| `platform` | `icm42688_hxy` | HXY識別、設定read-back、4サンプルFIFO WTM、GPIO14 ISR、上限付き読出しと再開、物理値変換とサンプル時刻の推定 |
 | `platform` | `sensor_bus` | 共有I2C busの生成、参照および異常時再生成 |
 | `domain` | `imu_fusion` | 個体加速度較正、軸変換、静止ジャイロ較正、信頼度付きMahony、6DoF姿勢、姿勢補正済み鉛直加速度 |
 | `domain` | `imu_motion` | 軸別加速度分散と角速度二乗平均の0.5秒EMA活動量。速度積分は行わない |
 | `domain` | `imu_calibration_controller` | 初回加速度較正の収集、boot内スキップ、atomic保存と再試行の状態管理 |
+| `domain` | `sensor_scheduler` | WTM timeoutとBMP絶対期限を分離した`WTM`／`IMU_INIT`／`BMP_TIMER`周期管理 |
 | `domain` | `vario_estimator` | 気圧高度、気圧単独フィルタ、IMU品質連動の観測分散を持つ4状態の気圧・IMU融合、診断および出力切替 |
 | `domain` | `vario_audio` | 音声状態、しきい値、音程・テンポ計算 |
 | `domain` | `flight_state` | バリオ統合高度幅・GPS速度による`UNKNOWN`／`STATIONARY`／`FLYING`判定と飛行証拠bit |
@@ -739,7 +753,9 @@ typedef struct {
 | `domain` | `app_config` | 既定値、値域検証、実行時設定 |
 | `app` | `main` / `startup` | 薄いESP-IDF入口と段階化した起動コーディネート |
 | `app` | `app_tasks` | task生成、core・priority・stack・ACK、起動状態管理 |
-| `app` | `app_workers` | sensor、audio、system、console workerの実行処理 |
+| `app` | `sensor_worker` | I2C取得順、異常縮退、段階IMU初期化、姿勢・融合、センサー結果公開 |
+| `app` | `app_worker_support` | worker共通の停止判定、Watchdog登録・給餌・解除、診断カウンタ補助 |
+| `app` | `app_workers` | audio、system、console workerの実行処理 |
 | `app` | `ble_tx_worker` | BLE送信workerと停止ACK |
 | `app` | `app_events` / `app_resources` | Event Group定義と共有resource |
 | `app` | `diagnostics` | エラーカウンタ、周期、状態の収集 |
@@ -906,7 +922,7 @@ typedef struct {
 | 項目 | 確定値 | 実装条件 |
 | --- | --- | --- |
 | バッテリーADC換算 | バッテリー側1 MΩ、GND側330 kΩ、scale=`133/33`（約4.030303）、gain correction=1.0、offset=0 V | ADC校正後の端子電圧へscale、gain correction、offsetを適用する |
-| ICM-42688P-HXY通信・取得 | SDO Low、7 bit address=`0x18`、`WHO_AM_I` register=`0x01`、value=`0x6A`、I2C最大400 kHz、ODR=400 Hz、accel=±8 g、gyro=±2000 dps、INT1=GPIO14 | `0x19`を探索せず、HXY版レジスタだけを使用し、GPIO14 ISRはtask notificationだけを行う |
+| ICM-42688P-HXY通信・取得 | SDO Low、7 bit address=`0x18`、`WHO_AM_I` register=`0x01`、value=`0x6A`、I2C最大400 kHz、ODR=400 Hz、4サンプルFIFO WTM約100 Hz、accel=±8 g、gyro=±2000 dps | `0x19`を探索せず、HXY版レジスタだけを使用。GPIO14のWTM立上りでBMPと同じ測定バーストを実行 |
 
 リフト・シンク周波数とPAM8904E増幅モードの正本は、単一の既定値テーブルと [vario_sound_spec.md](vario_sound_spec.md) とする。
 

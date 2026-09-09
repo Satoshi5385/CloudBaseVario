@@ -7,6 +7,12 @@
 
 #define GPS_NMEA_SENTENCE_CAPACITY 96U
 
+typedef enum {
+    IMU_DIAGNOSTIC_CADENCE_BMP_TIMER = 0,
+    IMU_DIAGNOSTIC_CADENCE_IMU_INIT,
+    IMU_DIAGNOSTIC_CADENCE_WTM,
+} imu_diagnostic_cadence_t;
+
 typedef struct {
     uint32_t sequence;
     int64_t timestamp_us;
@@ -159,7 +165,16 @@ typedef struct {
     uint32_t consecutive_error_count;
     uint32_t calibration_sample_count;
     uint32_t accel_calibration_sample_count;
-    uint32_t missed_interrupt_count;
+    uint32_t missed_interrupt_count; /* WTM timeout degradation count. */
+    uint32_t fifo_read_count;
+    uint32_t fifo_last_sample_count;
+    uint32_t fifo_overflow_count;
+    uint32_t fifo_error_count;
+    uint32_t wtm_cycle_count;
+    uint32_t bmp_timer_cycle_count;
+    uint32_t last_cycle_interval_us;
+    uint32_t max_cycle_interval_us;
+    imu_diagnostic_cadence_t cadence;
     float accel_norm_g;
     float accel_offset_mps2[3];
     float gyro_bias_radps[3];

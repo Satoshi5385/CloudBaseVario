@@ -55,8 +55,16 @@ run_host_c_tests() (
         -I SRC tests/test_auto_power_off.c SRC/domain/auto_power_off.c -lm
     compile_and_run test_flight_state \
         -I SRC tests/test_flight_state.c SRC/domain/flight_state.c -lm
+    compile_and_run test_imu_fifo_order \
+        -I SRC tests/test_imu_fifo_order.c SRC/domain/vario_estimator.c -lm
+    compile_and_run test_imu_fifo \
+        -I tests/imu_stubs -I SRC tests/test_imu_fifo.c \
+        SRC/platform/icm42688_hxy.c -lm
     compile_and_run test_imu_motion \
         -I SRC tests/test_imu_motion.c SRC/domain/imu_motion.c -lm
+    compile_and_run test_sensor_scheduler \
+        -I SRC tests/test_sensor_scheduler.c \
+        SRC/domain/sensor_scheduler.c
     compile_and_run test_firmware_update_policy \
         -I SRC tests/test_firmware_update_policy.c \
         SRC/domain/firmware_update_policy.c -lm

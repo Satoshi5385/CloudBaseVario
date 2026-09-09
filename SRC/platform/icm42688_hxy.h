@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "driver/i2c_master.h"
@@ -12,6 +13,8 @@
 #define ICM42688_HXY_WHO_AM_I_REGISTER UINT8_C(0x01)
 #define ICM42688_HXY_WHO_AM_I_VALUE UINT8_C(0x6A)
 #define ICM42688_HXY_SAMPLE_RATE_HZ UINT32_C(400)
+#define ICM42688_HXY_SAMPLE_PERIOD_US INT64_C(2500)
+#define ICM42688_HXY_FIFO_MAX_SAMPLES UINT32_C(16)
 #define ICM42688_HXY_ACCEL_RANGE_G 8.0f
 #define ICM42688_HXY_GYRO_RANGE_DPS 2000.0f
 
@@ -30,31 +33,47 @@ typedef struct {
     bool valid;
 } icm42688_hxy_sample_t;
 
-/**
- * @brief Detect and configure the C46550687 HXY IMU for fused-vario use.
- *
- * The device is configured at 400 Hz, +/-8 g, and +/-2000 dps. GPIO14 is
- * routed from the HXY gyro Data Ready signal and only notifies sensor_task;
- * I2C is never accessed from the ISR.
- *
- * @param[in] bus_handle Shared I2C master bus.
- * @param[in] sensor_task Task to notify from the GPIO14 ISR.
- * @param[out] identity Observed fixed address and WHO_AM_I value.
- * @return ESP_OK only after all HXY configuration read-backs match.
- */
-esp_err_t icm42688_hxy_init(i2c_master_bus_handle_t bus_handle,
-                            TaskHandle_t sensor_task,
-                            icm42688_hxy_identity_t *identity);
+typedef struct {
+    icm42688_hxy_sample_t samples[ICM42688_HXY_FIFO_MAX_SAMPLES];
+    size_t sample_count;
+    uint32_t discarded_samples;
+    uint32_t sensor_time;
+    uint8_t data_status;
+    bool overflow;
+} icm42688_hxy_batch_t;
+
+/** Begin non-blocking HXY initialization without performing bus I/O. */
+esp_err_t icm42688_hxy_init_begin(i2c_master_bus_handle_t bus_handle,
+                                  TaskHandle_t sensor_task);
+
+/** Execute at most one due initialization step. */
+esp_err_t icm42688_hxy_init_poll(int64_t now_us,
+                                 icm42688_hxy_identity_t *identity);
+
+/** Return the earliest time at which the next initialization step may run. */
+int64_t icm42688_hxy_init_next_action_us(void);
+
+/** Return true while non-blocking initialization is active. */
+bool icm42688_hxy_init_in_progress(void);
+
+/** Abort an in-progress initialization and release partial resources. */
+esp_err_t icm42688_hxy_init_abort(void);
 
 /**
- * @brief Read one coherent acceleration and angular-rate sample.
- * @param[out] sample Raw and physical HXY sample in sensor coordinates.
- * @return ESP_OK for a complete Data Ready frame.
+ * @brief Drain a bounded FIFO batch and rearm FIFO mode, without allocation.
+ * @param[out] batch Required output; diagnostics are also valid on error.
+ * Timestamps are host-time estimates spaced 2500 us within the batch, anchored
+ * to the last nonempty FIFO count observation, not per-sample hardware times.
+ * Sensor_Time is retained as a raw diagnostic; its sample association is not
+ * assumed. Complete frames arriving during transfer are drained, up to 16
+ * samples total. Partial frames or additional complete frames reject the batch.
+ * @return ESP_OK for a complete batch, ESP_ERR_NOT_FINISHED if not yet ready.
+ * Other errors discard the batch; no partial batch may reach the estimator.
  */
-esp_err_t icm42688_hxy_read_sample(icm42688_hxy_sample_t *sample);
+esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch);
 
 /**
- * @brief Disable GPIO14 notification, power down, and remove the I2C handle.
+ * @brief Remove the GPIO14 ISR, power down, and remove the I2C handle.
  * @return ESP_OK when resources were removed successfully.
  */
 esp_err_t icm42688_hxy_deinit(void);

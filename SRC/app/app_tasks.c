@@ -5,6 +5,7 @@
 
 #include "app/app_resources.h"
 #include "app/app_workers.h"
+#include "app/sensor_worker.h"
 #include "app/ble_tx_worker.h"
 #include "app/gps_worker.h"
 #include "esp_log.h"
@@ -101,7 +102,7 @@ static bool worker_is_enabled(const app_task_descriptor_t *descriptor) {
 void app_tasks_set_imu_accel_calibration(
     const imu_accel_calibration_t *calibration,
     const imu_calibration_storage_diagnostics_t *diagnostics) {
-    app_workers_set_imu_accel_calibration(calibration, diagnostics);
+    sensor_worker_set_imu_accel_calibration(calibration, diagnostics);
 }
 
 void app_tasks_set_switch_preferences(
