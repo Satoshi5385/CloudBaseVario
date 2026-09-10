@@ -26,8 +26,6 @@
 #define ICM42688_HXY_REG_FIFO_CFG0 UINT8_C(0x1C)
 #define ICM42688_HXY_REG_FIFO_CFG1 UINT8_C(0x1D)
 #define ICM42688_HXY_REG_FIFO_CFG2 UINT8_C(0x1E)
-#define ICM42688_HXY_REG_FIFO_STAT0 UINT8_C(0x1F)
-#define ICM42688_HXY_REG_FIFO_STAT1 UINT8_C(0x20)
 #define ICM42688_HXY_REG_FIFO_DATA UINT8_C(0x21)
 #define ICM42688_HXY_REG_FIFO_DOWNS UINT8_C(0x45)
 #define ICM42688_HXY_REG_ACC_CONF UINT8_C(0x40)
@@ -46,21 +44,14 @@
 #define ICM42688_HXY_FIFO_BYPASS UINT8_C(0x00)
 #define ICM42688_HXY_FIFO_MODE UINT8_C(0x10)
 #define ICM42688_HXY_FIFO_FILTERED_400HZ UINT8_C(0x88)
-#define ICM42688_HXY_FIFO_OVERFLOW_MASK UINT8_C(0x10)
-#define ICM42688_HXY_FIFO_COUNT_HIGH_MASK UINT8_C(0x0F)
 #define ICM42688_HXY_FIFO_TIME_BYTES UINT32_C(4)
 #define ICM42688_HXY_FIFO_SAMPLE_BYTES UINT32_C(12)
-#define ICM42688_HXY_FIFO_MAX_TAIL_BYTES \
-    (ICM42688_HXY_FIFO_SAMPLE_BYTES - ICM42688_HXY_FIFO_WORD_BYTES)
+#define ICM42688_HXY_FIFO_WATERMARK_SAMPLES UINT32_C(4)
 #define ICM42688_HXY_FIFO_BUFFER_BYTES \
     (ICM42688_HXY_FIFO_TIME_BYTES + \
-     ICM42688_HXY_FIFO_MAX_SAMPLES * ICM42688_HXY_FIFO_SAMPLE_BYTES + \
-     ICM42688_HXY_FIFO_MAX_TAIL_BYTES)
-#define ICM42688_HXY_FIFO_COUNT_ATTEMPTS UINT32_C(3)
-#define ICM42688_HXY_FIFO_DRAIN_ATTEMPTS \
-    ICM42688_HXY_FIFO_MAX_SAMPLES
+     ICM42688_HXY_FIFO_WATERMARK_SAMPLES * \
+         ICM42688_HXY_FIFO_SAMPLE_BYTES)
 #define ICM42688_HXY_FIFO_WORD_BYTES UINT32_C(2)
-#define ICM42688_HXY_FIFO_WATERMARK_SAMPLES UINT32_C(4)
 /* WTM asserts when the word count exceeds FTH. Sensor Time is two words. */
 #define ICM42688_HXY_FIFO_WATERMARK_THRESHOLD_WORDS \
     ((ICM42688_HXY_FIFO_TIME_BYTES + \
@@ -91,6 +82,7 @@ static bool icm42688_hxy_isr_registered = false;
 static bool icm42688_hxy_fifo_needs_restart = false;
 static int64_t icm42688_hxy_last_sample_us = 0;
 static int64_t icm42688_hxy_fifo_read_after_us = 0;
+static uint8_t icm42688_hxy_last_data_status = 0U;
 
 typedef enum {
     ICM42688_HXY_INIT_IDLE = 0,
@@ -475,6 +467,7 @@ esp_err_t icm42688_hxy_init_poll(int64_t now_us,
                          data_status);
                 return fail_initialization(ESP_ERR_INVALID_STATE);
             }
+            icm42688_hxy_last_data_status = data_status;
             icm42688_hxy_init_phase = ICM42688_HXY_INIT_VERIFY_SECOND;
             return ESP_ERR_NOT_FINISHED;
         case ICM42688_HXY_INIT_VERIFY_SECOND:
@@ -549,41 +542,6 @@ static int16_t decode_be_int16(uint8_t high_byte, uint8_t low_byte) {
     return (int16_t) combined;
 }
 
-/* Non-NULL output arguments are required by the internal FIFO reader. */
-static esp_err_t read_fifo_count(size_t *byte_count, bool *overflow) {
-    uint8_t high_before = 0U;
-    uint8_t high_after = 0U;
-    uint8_t low = 0U;
-    esp_err_t ret = ESP_OK;
-
-    /* COM_CFG.Addr_Auto is off. Read high/low/high separately so a low-byte
-     * rollover cannot turn an in-flight count into an oversized transfer. */
-    for (size_t attempt = 0U; attempt < ICM42688_HXY_FIFO_COUNT_ATTEMPTS; attempt++) {
-        ret = read_register(ICM42688_HXY_REG_FIFO_STAT0, &high_before);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        ret = read_register(ICM42688_HXY_REG_FIFO_STAT1, &low);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        ret = read_register(ICM42688_HXY_REG_FIFO_STAT0, &high_after);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        *overflow |= ((high_before | high_after) &
-                      ICM42688_HXY_FIFO_OVERFLOW_MASK) != 0U;
-        if ((high_before & ICM42688_HXY_FIFO_COUNT_HIGH_MASK) ==
-            (high_after & ICM42688_HXY_FIFO_COUNT_HIGH_MASK)) {
-            *byte_count = (((size_t) (high_after &
-                                     ICM42688_HXY_FIFO_COUNT_HIGH_MASK) << 8U) |
-                           low) * ICM42688_HXY_FIFO_WORD_BYTES;
-            return ESP_OK;
-        }
-    }
-    return ESP_ERR_INVALID_RESPONSE;
-}
-
 /* Required pointers refer to a complete 12-byte six-axis frame and output. */
 static void decode_fifo_sample(const uint8_t *frame, int64_t timestamp_us,
                                uint8_t data_status, icm42688_hxy_sample_t *sample) {
@@ -609,9 +567,6 @@ static void decode_fifo_sample(const uint8_t *frame, int64_t timestamp_us,
 
 esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch) {
     uint8_t frame[ICM42688_HXY_FIFO_BUFFER_BYTES] = {0};
-    size_t bytes_read = 0U;
-    size_t total_bytes_read = 0U;
-    size_t sample_count = 0U;
     int64_t newest_timestamp_us = 0;
     int64_t first_timestamp_us = 0;
     esp_err_t ret = ESP_OK;
@@ -634,111 +589,38 @@ esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch) {
     if (esp_timer_get_time() < icm42688_hxy_fifo_read_after_us) {
         return ESP_ERR_NOT_FINISHED;
     }
-    ret = read_register(ICM42688_HXY_REG_DATA_STAT, &batch->data_status);
-    if (ret == ESP_OK && (batch->data_status &
-                         ICM42688_HXY_DATA_STATUS_CONFIG_ERROR_MASK) != 0U) {
-        ret = ESP_ERR_INVALID_STATE;
-    }
-    if (ret == ESP_OK) {
-        ret = read_fifo_count(&bytes_read, &batch->overflow);
-    }
-    if (ret == ESP_OK && !batch->overflow &&
-        bytes_read < ICM42688_HXY_FIFO_TIME_BYTES +
-                     ICM42688_HXY_FIFO_SAMPLE_BYTES) {
-        /* Leave the timestamp or an unfinished first sample in the FIFO. */
-        return ESP_ERR_NOT_FINISHED;
-    }
-    if (ret == ESP_OK && (batch->overflow || bytes_read > sizeof(frame))) {
-        ret = ESP_ERR_INVALID_SIZE;
-    }
-    if (ret == ESP_OK) {
-        ret = read_registers(ICM42688_HXY_REG_FIFO_DATA,
-                             frame, bytes_read);
-        total_bytes_read = bytes_read;
-    }
-    for (size_t attempt = 0U;
-         ret == ESP_OK && attempt < ICM42688_HXY_FIFO_DRAIN_ATTEMPTS;
-         attempt++) {
-        size_t remaining_bytes = 0U;
-        size_t tail_bytes = (total_bytes_read - ICM42688_HXY_FIFO_TIME_BYTES) %
-                            ICM42688_HXY_FIFO_SAMPLE_BYTES;
-        size_t bytes_needed = ICM42688_HXY_FIFO_SAMPLE_BYTES - tail_bytes;
-
-        if (tail_bytes == 0U) {
-            bytes_needed = ICM42688_HXY_FIFO_SAMPLE_BYTES;
-        }
-
-        ret = read_fifo_count(&remaining_bytes, &batch->overflow);
-        if (ret != ESP_OK || batch->overflow ||
-            remaining_bytes < bytes_needed) {
-            break;
-        }
-        if (remaining_bytes > sizeof(frame) - total_bytes_read) {
-            ret = ESP_ERR_INVALID_SIZE;
-            break;
-        }
-        ret = read_registers(ICM42688_HXY_REG_FIFO_DATA,
-                             &frame[total_bytes_read], remaining_bytes);
-        if (ret == ESP_OK) {
-            total_bytes_read += remaining_bytes;
-        }
-    }
-    if (ret == ESP_OK && !batch->overflow &&
-        total_bytes_read >= ICM42688_HXY_FIFO_TIME_BYTES) {
-        size_t remaining_bytes = 0U;
-
-        ret = read_fifo_count(&remaining_bytes, &batch->overflow);
-        if (ret == ESP_OK && remaining_bytes > 0U) {
-            ret = ESP_ERR_INVALID_SIZE;
-        }
-    }
-    if (ret == ESP_OK && batch->overflow) {
-        ret = ESP_ERR_INVALID_SIZE;
-    }
-    /* FIFO_STAT counts 2-byte words, not complete six-axis samples. Partial
-     * frames are diagnosed above and the whole batch is rejected. */
-    if (total_bytes_read == 0U) {
-        total_bytes_read = bytes_read;
-    }
-    if (total_bytes_read >= ICM42688_HXY_FIFO_TIME_BYTES) {
-        sample_count = (total_bytes_read - ICM42688_HXY_FIFO_TIME_BYTES) /
-                       ICM42688_HXY_FIFO_SAMPLE_BYTES;
-    }
-    if (ret == ESP_OK &&
-        (total_bytes_read - ICM42688_HXY_FIFO_TIME_BYTES) %
-            ICM42688_HXY_FIFO_SAMPLE_BYTES != 0U) {
-        ret = ESP_ERR_INVALID_SIZE;
-    }
-    /* The HXY requires BY-PASS -> FIFO after each drain, including failures.
-     * A failed rearm must be retried before consuming any more FIFO bytes. */
+    batch->data_status = icm42688_hxy_last_data_status;
+    ret = read_registers(ICM42688_HXY_REG_FIFO_DATA, frame,
+                         sizeof(frame));
+    /* WTM guarantees one Sensor_Time and four complete six-axis frames. Read
+     * exactly that burst, then rearm without FIFO count transactions. */
     reset_ret = restart_fifo();
     if (reset_ret != ESP_OK) {
         ret = reset_ret;
     }
     newest_timestamp_us = esp_timer_get_time();
     first_timestamp_us = newest_timestamp_us;
-    if (sample_count > 0U) {
-        first_timestamp_us -= ((int64_t) sample_count - 1) *
-                              ICM42688_HXY_SAMPLE_PERIOD_US;
-    }
-    if (ret == ESP_OK && (sample_count == 0U ||
-                         first_timestamp_us <= icm42688_hxy_last_sample_us)) {
+    first_timestamp_us -=
+        ((int64_t) ICM42688_HXY_FIFO_WATERMARK_SAMPLES - 1) *
+        ICM42688_HXY_SAMPLE_PERIOD_US;
+    if (ret == ESP_OK && first_timestamp_us <= icm42688_hxy_last_sample_us) {
         ret = ESP_ERR_INVALID_RESPONSE;
     }
     if (ret != ESP_OK) {
-        batch->discarded_samples = (uint32_t) sample_count;
+        batch->discarded_samples = ICM42688_HXY_FIFO_WATERMARK_SAMPLES;
         return ret;
     }
     batch->sensor_time = ((uint32_t) frame[1] << 16U) |
                          ((uint32_t) frame[2] << 8U) | frame[3];
-    for (size_t index = 0U; index < sample_count; index++) {
+    for (size_t index = 0U;
+         index < ICM42688_HXY_FIFO_WATERMARK_SAMPLES; index++) {
         decode_fifo_sample(&frame[ICM42688_HXY_FIFO_TIME_BYTES +
                                   index * ICM42688_HXY_FIFO_SAMPLE_BYTES],
                            first_timestamp_us + (int64_t) index *
                                ICM42688_HXY_SAMPLE_PERIOD_US,
                            batch->data_status, &batch->samples[index]);
     }
-    batch->sample_count = sample_count;
+    batch->sample_count = ICM42688_HXY_FIFO_WATERMARK_SAMPLES;
     icm42688_hxy_last_sample_us = newest_timestamp_us;
     return ESP_OK;
 }
@@ -763,6 +645,7 @@ esp_err_t icm42688_hxy_deinit(void) {
     }
     icm42688_hxy_last_sample_us = 0;
     icm42688_hxy_fifo_needs_restart = false;
+    icm42688_hxy_last_data_status = 0U;
     clear_init_state();
     return first_error;
 }

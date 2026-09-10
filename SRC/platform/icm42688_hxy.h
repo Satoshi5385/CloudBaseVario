@@ -60,15 +60,16 @@ bool icm42688_hxy_init_in_progress(void);
 esp_err_t icm42688_hxy_init_abort(void);
 
 /**
- * @brief Drain a bounded FIFO batch and rearm FIFO mode, without allocation.
+ * @brief Read one four-sample WTM burst and rearm FIFO mode.
  * @param[out] batch Required output; diagnostics are also valid on error.
  * Timestamps are host-time estimates spaced 2500 us within the batch, anchored
- * to the last nonempty FIFO count observation, not per-sample hardware times.
+ * to the completed fixed-size transfer, not per-sample hardware times.
  * Sensor_Time is retained as a raw diagnostic; its sample association is not
- * assumed. Complete frames arriving during transfer are drained, up to 16
- * samples total. Partial frames or additional complete frames reject the batch.
- * @return ESP_OK for a complete batch, ESP_ERR_NOT_FINISHED if not yet ready.
- * Other errors discard the batch; no partial batch may reach the estimator.
+ * assumed. A WTM notification guarantees one four-byte Sensor_Time followed by
+ * four complete 12-byte samples, so the normal path performs one fixed 52-byte
+ * FIFO read and the two writes needed for BY-PASS to FIFO rearming.
+ * @return ESP_OK for the four-sample batch. Other errors discard the batch; no
+ * partial batch may reach the estimator.
  */
 esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch);
 

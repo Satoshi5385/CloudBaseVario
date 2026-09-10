@@ -18,14 +18,13 @@ static size_t data_reads;
 static size_t largest_read;
 static size_t rearm_count;
 static size_t arrivals;
-static bool overflow;
+static size_t read_transactions;
+static size_t write_transactions;
+static size_t count_reads;
 static bool fail_data;
 static bool fail_rearm;
-static bool fail_count;
-static bool unstable_count;
 static int64_t time_us;
 static size_t delay_calls;
-static int64_t last_fifo_observation_us;
 static gpio_isr_t watermark_handler;
 static void *watermark_context;
 static size_t watermark_notifications;
@@ -113,13 +112,13 @@ static void append_sample(void) {
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t device,
     const uint8_t *tx, size_t size, int timeout_ms) {
     assert(device != NULL && size == 2 && timeout_ms == 5);
+    write_transactions++;
     time_us += 75;
     if (tx[0] == 0x1D && fail_rearm) return ESP_ERR_TIMEOUT;
     registers[tx[0]] = tx[1];
     if (tx[0] == 0x1D && tx[1] == 0) {
         fifo_size = 0;
         fifo_offset = 0;
-        overflow = false;
         rearm_count++;
     }
     return ESP_OK;
@@ -127,6 +126,7 @@ esp_err_t i2c_master_transmit(i2c_master_dev_handle_t device,
 esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t device,
     const uint8_t *tx, size_t tx_size, uint8_t *rx, size_t size, int timeout_ms) {
     assert(device != NULL && tx_size == 1 && timeout_ms == 5);
+    read_transactions++;
     time_us += (int64_t)(size + 3) * 23;
     if (*tx == 0x21) {
         assert(registers[0x05] == 0x40); /* Addr_Auto MUST be off. */
@@ -141,21 +141,9 @@ esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t device,
             arrivals--;
         }
     } else {
-        size_t words = (fifo_size - fifo_offset) / 2;
-        assert(size == 1); /* FIFO count registers cannot auto-increment. */
-        if (*tx == 0x1F) {
-            static uint8_t high_toggle;
-            if (fail_count) return ESP_ERR_TIMEOUT;
-            high_toggle ^= 1;
-            rx[0] = (uint8_t)(words >> 8);
-            if (unstable_count) rx[0] = high_toggle;
-            if (overflow) rx[0] |= 0x10;
-            last_fifo_observation_us = time_us;
-        } else if (*tx == 0x20) {
-            rx[0] = (uint8_t)words;
-        } else {
-            rx[0] = registers[*tx];
-        }
+        assert(size == 1);
+        if (*tx == 0x1F || *tx == 0x20) count_reads++;
+        rx[0] = registers[*tx];
     }
     return ESP_OK;
 }
@@ -166,12 +154,14 @@ static void init_device(void) {
     (void)icm42688_hxy_deinit();
     memset(registers, 0, sizeof(registers));
     fifo_size = fifo_offset = data_reads = largest_read = rearm_count = arrivals = 0;
+    read_transactions = write_transactions = count_reads = 0;
     delay_calls = 0;
     watermark_notifications = 0;
     watermark_interrupt_enabled = false;
-    overflow = fail_data = fail_rearm = fail_count = unstable_count = false;
+    fail_data = fail_rearm = false;
     time_us = 1000000;
     registers[1] = 0x6A;
+    registers[0x0B] = 0x07;
     assert(icm42688_hxy_init_begin((void *)registers,
                                    (void *)registers) == ESP_OK);
     while (ret == ESP_ERR_NOT_FINISHED) {
@@ -205,15 +195,19 @@ static void test_decode_and_cadence(void) {
     icm42688_hxy_batch_t batch;
     int64_t last_us = 0;
     init_device();
-    /* Vary count, including 3/5 due to clock phase and a delayed 16-sample batch. */
-    const size_t counts[] = {4, 3, 5, 1, 16};
-    for (size_t j = 0; j < sizeof(counts)/sizeof(counts[0]); j++) {
-        load_samples(counts[j]);
-        if (counts[j] == 16) time_us += 40000;
+    for (size_t j = 0; j < 5; j++) {
+        size_t reads_before = read_transactions;
+        size_t writes_before = write_transactions;
+
+        load_samples(4);
         assert(icm42688_hxy_read_fifo(&batch) == ESP_OK);
         assert(watermark_interrupt_enabled);
-        assert(batch.sample_count == counts[j] && batch.discarded_samples == 0);
+        assert(batch.sample_count == 4 && batch.discarded_samples == 0);
         assert(batch.sensor_time == 0xABCDEF);
+        assert(batch.data_status == 0x07 && !batch.overflow);
+        assert(read_transactions - reads_before == 1);
+        assert(write_transactions - writes_before == 2);
+        assert(count_reads == 0);
         for (size_t i = 0; i < batch.sample_count; i++) {
             const icm42688_hxy_sample_t *s = &batch.samples[i];
             assert(s->valid && s->timestamp_us > last_us && s->timestamp_us <= time_us);
@@ -226,48 +220,16 @@ static void test_decode_and_cadence(void) {
             last_us = s->timestamp_us;
         }
     }
-    assert(largest_read == 196);
+    assert(largest_read == 52);
 }
-static void test_empty_and_incomplete_first_sample(void) {
-    icm42688_hxy_batch_t batch;
-    init_device();
-    size_t resets = rearm_count;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_NOT_FINISHED);
-    load_samples(0);
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_NOT_FINISHED);
-    fifo_size += 6;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_NOT_FINISHED);
-    assert(data_reads == 0 && rearm_count == resets && batch.sample_count == 0);
-}
-static void test_arrivals_are_drained(void) {
+static void test_late_arrivals_are_cleared_by_rearm(void) {
     icm42688_hxy_batch_t batch;
     init_device(); load_samples(4); arrivals = 2;
     assert(icm42688_hxy_read_fifo(&batch) == ESP_OK);
-    assert(batch.sample_count == 6 && data_reads == 3);
+    assert(batch.sample_count == 4 && data_reads == 1);
     assert(fifo_size == 0 && registers[0x1D] == 0x10);
     assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_NOT_FINISHED);
-    assert(data_reads == 3); /* No early read after BY-PASS/FIFO writes. */
-
-}
-static void test_snapshot_read_and_fractional_tail(void) {
-    icm42688_hxy_batch_t batch;
-    init_device(); load_samples(4); arrivals = 10;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_OK);
-    assert(data_reads == 11 && batch.sample_count == 14 &&
-           batch.discarded_samples == 0);
-    init_device(); load_samples(17);
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_SIZE);
-    assert(data_reads == 0 && batch.discarded_samples == 17 && batch.sample_count == 0);
-    init_device(); load_samples(4); fifo_size += 2;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_SIZE);
-    assert(batch.sample_count == 0 && batch.discarded_samples == 4);
-    init_device(); load_samples(4); fifo_size += 10;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_SIZE);
-    assert(batch.sample_count == 0 && batch.discarded_samples == 4);
-    init_device(); load_samples(16); fifo_size += 10;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_SIZE);
-    assert(batch.sample_count == 0 && batch.discarded_samples == 16);
-    assert(data_reads == 1 && largest_read == 206);
+    assert(data_reads == 1); /* The 1 ms rearm guard prevents an early read. */
 }
 
 static void test_initialization_can_be_aborted(void) {
@@ -288,18 +250,6 @@ static void test_initialization_can_be_aborted(void) {
     assert(!icm42688_hxy_init_in_progress());
     assert(delay_calls == 0);
 }
-static void test_overflow_and_count_failure(void) {
-    icm42688_hxy_batch_t batch;
-    init_device(); load_samples(4); overflow = true;
-    assert(icm42688_hxy_read_fifo(&batch) != ESP_OK);
-    assert(batch.overflow && batch.sample_count == 0 && batch.discarded_samples == 4);
-    init_device(); load_samples(4); fail_count = true;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_TIMEOUT);
-    assert(batch.sample_count == 0 && data_reads == 0);
-    init_device(); load_samples(4); unstable_count = true;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_RESPONSE);
-    assert(batch.sample_count == 0 && data_reads == 0);
-}
 static void test_failed_transfer_and_rearm(void) {
     icm42688_hxy_batch_t batch;
     init_device(); load_samples(4); fail_data = true; fail_rearm = true;
@@ -314,27 +264,22 @@ static void test_failed_transfer_and_rearm(void) {
     assert(data_reads == reads);
     load_samples(4);
     assert(icm42688_hxy_read_fifo(&batch) == ESP_OK);
-    init_device(); load_samples(4); registers[0x0B] = 0x30;
-    assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_STATE);
-    assert(batch.sample_count == 0 && data_reads == 0);
 }
 static void test_nonmonotonic_batch_is_not_published(void) {
     icm42688_hxy_batch_t batch;
     init_device(); load_samples(4);
     assert(icm42688_hxy_read_fifo(&batch) == ESP_OK);
-    load_samples(16); /* 40 ms of data cannot fit in this 10 ms interval. */
+    load_samples(4);
+    time_us -= 8900;
     assert(icm42688_hxy_read_fifo(&batch) == ESP_ERR_INVALID_RESPONSE);
-    assert(batch.sample_count == 0 && batch.discarded_samples == 16);
+    assert(batch.sample_count == 0 && batch.discarded_samples == 4);
 }
 int main(void) {
     assert(icm42688_hxy_read_fifo(NULL) == ESP_ERR_INVALID_ARG);
     assert(icm42688_hxy_init_begin((void *)registers, NULL) ==
            ESP_ERR_INVALID_ARG);
     test_decode_and_cadence();
-    test_empty_and_incomplete_first_sample();
-    test_arrivals_are_drained();
-    test_snapshot_read_and_fractional_tail();
-    test_overflow_and_count_failure();
+    test_late_arrivals_are_cleared_by_rearm();
     test_failed_transfer_and_rearm();
     test_nonmonotonic_batch_is_not_published();
     test_initialization_can_be_aborted();
