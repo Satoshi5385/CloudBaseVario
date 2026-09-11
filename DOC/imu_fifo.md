@@ -13,6 +13,12 @@ ICM-42688P-HXYの加速度・ジャイロODRは400 Hzを維持し、4サンプ�
 
 BMPサンプルを次周期へ保留しない。GPIO14通知からFIFO取得とBMP581取得の間には、設定コピーや推定演算を挟まない。
 
+## 確定仕様
+
+正常なWTM周期のIMU I2C transactionは、52 byteの`FIFO_DATA`読出し1回と、`FIFO_CFG1`をBY-PASS、FIFO modeの順に設定する書込み2回の合計3回に固定する。FIFO count、残量、`DATA_STAT`は通常周期に読まない。400 kHz I2Cの理論上のbus占有時間は約1.37 msである。
+
+読出し後にFIFO modeを維持する連続FIFO方式は採用しない。実機では再初期化後の最初のWTMだけが成立し、その後はWTM timeoutとなった。また、FIFO境界が崩れて静止時の加速度ノルムが約8.99 gとなり、ジャイロ校正、姿勢推定、IMU融合が開始できなかった。読出し後のBY-PASS→FIFO切替をWTM再成立とデータ境界の必須操作とする。
+
 ## FIFO設定とデータ形式
 
 - `COM_CFG=0x40`としてAddr_Autoを無効にする。
@@ -57,6 +63,8 @@ IMU異常を検出した周期でもBMP581の取得を先に試行してからIM
 `missed_interrupt_count`はWTM timeoutによって`BMP_TIMER`へ縮退した回数だけを表す。FIFO error、破棄サンプル、BMP周期超過、I2C errorは別カウンタとする。`overflows`は出力互換のため残すが、通常周期では`FIFO_STAT1`を読まないため直接検出しない。
 
 実機正常時は30秒以上観測し、WTM timeout、FIFO error、破棄件数が増えず、各バッチが4件、IMU処理量が380～420 sample/s、BMP回数がWTM周期数と一致することを確認する。IMU不使用・異常時は`cadence=BMP_TIMER`、BMP 95～105 Hz、融合無効、気圧単独推定継続、初期化待ち中のBMP周期超過増加なしを確認する。
+
+確定版の実機確認では35.047秒間に3336 WTM周期、13344 IMUサンプルを処理し、380.75 sample/sであった。FIFO error、破棄、WTM timeout、BMPタイマ周期、Watchdog recoveryは観測中に増加せず、ジャイロ校正、姿勢推定、IMU融合は有効であった。
 
 ## 根拠
 

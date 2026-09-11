@@ -79,9 +79,9 @@
 static const char *TAG = "icm42688_hxy";
 static i2c_master_dev_handle_t icm42688_hxy_device = NULL;
 static bool icm42688_hxy_isr_registered = false;
-static bool icm42688_hxy_fifo_needs_restart = false;
+static bool icm42688_hxy_fifo_needs_rearm = false;
 static int64_t icm42688_hxy_last_sample_us = 0;
-static int64_t icm42688_hxy_fifo_read_after_us = 0;
+static int64_t icm42688_hxy_fifo_read_not_before_us = 0;
 static uint8_t icm42688_hxy_last_data_status = 0U;
 
 typedef enum {
@@ -131,6 +131,10 @@ _Static_assert(BOARD_ICM42688_HXY_I2C_SPEED_HZ == UINT32_C(400000),
                "ICM-42688P-HXY I2C must not exceed 400 kHz");
 _Static_assert(ICM42688_HXY_SAMPLE_RATE_HZ == UINT32_C(400),
                "HXY ODR table has no 500 Hz setting");
+_Static_assert(ICM42688_HXY_FIFO_BUFFER_BYTES == UINT32_C(52),
+               "WTM batch must contain Sensor_Time and four samples");
+_Static_assert(ICM42688_HXY_FIFO_WATERMARK_THRESHOLD_WORDS == UINT32_C(25),
+               "WTM must assert after the complete 52-byte batch");
 
 static esp_err_t read_registers(uint8_t register_address, uint8_t *data,
                                 size_t data_length) {
@@ -251,22 +255,22 @@ static esp_err_t disable_fifo_gpio(void) {
     return first_error;
 }
 
-static esp_err_t restart_fifo(void) {
+static esp_err_t rearm_fifo(void) {
     esp_err_t ret = write_register(ICM42688_HXY_REG_FIFO_CFG1,
                                    ICM42688_HXY_FIFO_BYPASS);
 
-    icm42688_hxy_fifo_needs_restart = true;
+    icm42688_hxy_fifo_needs_rearm = true;
     if (ret == ESP_OK) {
         ret = write_register(ICM42688_HXY_REG_FIFO_CFG1,
                              ICM42688_HXY_FIFO_MODE_CONFIG);
     }
     if (ret == ESP_OK) {
-        icm42688_hxy_fifo_needs_restart = false;
-        icm42688_hxy_fifo_read_after_us = esp_timer_get_time() +
+        icm42688_hxy_fifo_needs_rearm = false;
+        icm42688_hxy_fifo_read_not_before_us = esp_timer_get_time() +
             (int64_t) ICM42688_HXY_REGISTER_WRITE_DELAY_MS * INT64_C(1000);
         ret = gpio_intr_enable(PIN_INT_ICM);
         if (ret != ESP_OK) {
-            icm42688_hxy_fifo_needs_restart = true;
+            icm42688_hxy_fifo_needs_rearm = true;
         }
     }
     /* The reader enforces the HXY 1 ms configuration-to-read delay, even
@@ -307,7 +311,8 @@ static esp_err_t fail_initialization(esp_err_t error) {
         (void) disable_fifo_gpio();
     }
     (void) remove_device_handle();
-    icm42688_hxy_fifo_needs_restart = false;
+    icm42688_hxy_fifo_needs_rearm = false;
+    icm42688_hxy_fifo_read_not_before_us = 0;
     clear_init_state();
     return error;
 }
@@ -485,7 +490,7 @@ esp_err_t icm42688_hxy_init_poll(int64_t now_us,
             icm42688_hxy_init_phase = ICM42688_HXY_INIT_FIFO_BYPASS;
             return ESP_ERR_NOT_FINISHED;
         case ICM42688_HXY_INIT_FIFO_BYPASS:
-            icm42688_hxy_fifo_needs_restart = true;
+            icm42688_hxy_fifo_needs_rearm = true;
             ret = write_register(ICM42688_HXY_REG_FIFO_CFG1,
                                  ICM42688_HXY_FIFO_BYPASS);
             if (ret != ESP_OK) {
@@ -499,8 +504,8 @@ esp_err_t icm42688_hxy_init_poll(int64_t now_us,
             if (ret != ESP_OK) {
                 return fail_initialization(ret);
             }
-            icm42688_hxy_fifo_needs_restart = false;
-            icm42688_hxy_fifo_read_after_us = now_us +
+            icm42688_hxy_fifo_needs_rearm = false;
+            icm42688_hxy_fifo_read_not_before_us = now_us +
                 (int64_t) ICM42688_HXY_REGISTER_WRITE_DELAY_MS * INT64_C(1000);
             ret = gpio_intr_enable(PIN_INT_ICM);
             if (ret != ESP_OK) {
@@ -570,7 +575,7 @@ esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch) {
     int64_t newest_timestamp_us = 0;
     int64_t first_timestamp_us = 0;
     esp_err_t ret = ESP_OK;
-    esp_err_t reset_ret = ESP_OK;
+    esp_err_t rearm_ret = ESP_OK;
 
     if (batch == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -579,14 +584,14 @@ esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch) {
     if (icm42688_hxy_device == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (icm42688_hxy_fifo_needs_restart) {
-        ret = restart_fifo();
+    if (icm42688_hxy_fifo_needs_rearm) {
+        ret = rearm_fifo();
         if (ret != ESP_OK) {
             return ret;
         }
         return ESP_ERR_NOT_FINISHED;
     }
-    if (esp_timer_get_time() < icm42688_hxy_fifo_read_after_us) {
+    if (esp_timer_get_time() < icm42688_hxy_fifo_read_not_before_us) {
         return ESP_ERR_NOT_FINISHED;
     }
     batch->data_status = icm42688_hxy_last_data_status;
@@ -594,9 +599,9 @@ esp_err_t icm42688_hxy_read_fifo(icm42688_hxy_batch_t *batch) {
                          sizeof(frame));
     /* WTM guarantees one Sensor_Time and four complete six-axis frames. Read
      * exactly that burst, then rearm without FIFO count transactions. */
-    reset_ret = restart_fifo();
-    if (reset_ret != ESP_OK) {
-        ret = reset_ret;
+    rearm_ret = rearm_fifo();
+    if (rearm_ret != ESP_OK) {
+        ret = rearm_ret;
     }
     newest_timestamp_us = esp_timer_get_time();
     first_timestamp_us = newest_timestamp_us;
@@ -644,7 +649,8 @@ esp_err_t icm42688_hxy_deinit(void) {
         }
     }
     icm42688_hxy_last_sample_us = 0;
-    icm42688_hxy_fifo_needs_restart = false;
+    icm42688_hxy_fifo_needs_rearm = false;
+    icm42688_hxy_fifo_read_not_before_us = 0;
     icm42688_hxy_last_data_status = 0U;
     clear_init_state();
     return first_error;
