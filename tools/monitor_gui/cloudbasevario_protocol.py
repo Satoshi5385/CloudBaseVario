@@ -123,7 +123,7 @@ QUALITY_FIELD_SPECS = (
     TelemetryFieldSpec("raw_temp", "BMP581 raw temperature", "count", 0),
     TelemetryFieldSpec("raw_pressure", "BMP581 raw pressure", "count", 0),
     TelemetryFieldSpec("i2c_errors", "I²C errors", "", 0),
-    TelemetryFieldSpec("overruns", "BMP581 overruns", "", 0),
+    TelemetryFieldSpec("overruns", "Missed BMP581 DRDY frames", "", 0),
     TelemetryFieldSpec("kalman_accel_bias_mps2", "Kalman accel bias", "m/s²", 4),
     TelemetryFieldSpec("kalman_baro_innovation_m", "Baro innovation", "m", 4),
     TelemetryFieldSpec(
@@ -139,6 +139,10 @@ QUALITY_FIELD_SPECS = (
 IMU_FIELD_SPECS = (
     TelemetryFieldSpec("imu_samples", "IMU samples", "", 0),
     TelemetryFieldSpec("imu_missed", "Missed IMU samples", "", 0),
+    TelemetryFieldSpec(
+        "imu_buffer_high_watermark", "IMU buffer high watermark", "samples", 0
+    ),
+    TelemetryFieldSpec("imu_buffer_overflows", "IMU buffer overflows", "", 0),
     TelemetryFieldSpec("imu_confidence", "IMU confidence", "%", 1),
     TelemetryFieldSpec("imu_vibration_rms_g", "IMU vibration RMS", "g", 4),
     TelemetryFieldSpec("imu_kp_effective", "Effective Mahony Kp", "", 4),
@@ -424,12 +428,16 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
         ),
         _number_item(sample, IMU_FIELD_SPECS[0], valid=imu_online),
         _number_item(sample, IMU_FIELD_SPECS[1], warning_if_nonzero=True),
-        _number_item(sample, IMU_FIELD_SPECS[2], valid=imu_online, multiplier=100.0),
-        _number_item(sample, IMU_FIELD_SPECS[3], valid=imu_online),
-        _number_item(sample, IMU_FIELD_SPECS[4], valid=imu_online),
+        _number_item(sample, IMU_FIELD_SPECS[2], valid=imu_online),
+        _number_item(sample, IMU_FIELD_SPECS[3], warning_if_nonzero=True),
+        _number_item(
+            sample, IMU_FIELD_SPECS[4], valid=imu_online, multiplier=100.0
+        ),
         _number_item(sample, IMU_FIELD_SPECS[5], valid=imu_online),
+        _number_item(sample, IMU_FIELD_SPECS[6], valid=imu_online),
+        _number_item(sample, IMU_FIELD_SPECS[7], valid=imu_online),
         _flag_item(sample, "imu_ki_active", "Mahony Ki active", true_text="ACTIVE", false_text="OFF"),
-        _number_item(sample, IMU_FIELD_SPECS[6]),
+        _number_item(sample, IMU_FIELD_SPECS[8]),
         _flag_item(
             sample,
             "imu_cal_save_pending",
@@ -439,8 +447,8 @@ def build_telemetry_view(sample: TelemetrySample) -> TelemetryViewModel:
             true_state=DISPLAY_WARNING,
             false_state=DISPLAY_NORMAL,
         ),
-        _number_item(sample, IMU_FIELD_SPECS[7]),
-        _number_item(sample, IMU_FIELD_SPECS[8], warning_if_nonzero=True),
+        _number_item(sample, IMU_FIELD_SPECS[9]),
+        _number_item(sample, IMU_FIELD_SPECS[10], warning_if_nonzero=True),
     )
 
     ble = (

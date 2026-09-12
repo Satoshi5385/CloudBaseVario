@@ -32,9 +32,9 @@
 #define ICM42688_HXY_SOFT_RESET_VALUE UINT8_C(0xA5)
 #define ICM42688_HXY_COM_CFG_VALUE UINT8_C(0x50)
 #define ICM42688_HXY_INT1_GYRO_DATA_READY UINT8_C(0x03)
-#define ICM42688_HXY_ACC_CONF_400HZ_VALUE UINT8_C(0xAA)
+#define ICM42688_HXY_ACC_CONF_200HZ_VALUE UINT8_C(0xA9)
 #define ICM42688_HXY_ACC_RANGE_8G_VALUE UINT8_C(0x02)
-#define ICM42688_HXY_GYR_CONF_400HZ_VALUE UINT8_C(0xAA)
+#define ICM42688_HXY_GYR_CONF_200HZ_VALUE UINT8_C(0xA9)
 #define ICM42688_HXY_GYR_RANGE_2000DPS_VALUE UINT8_C(0x00)
 #define ICM42688_HXY_PWR_ACCEL_GYRO_TEMP_VALUE UINT8_C(0x0E)
 #define ICM42688_HXY_PWR_OFF_VALUE UINT8_C(0x00)
@@ -50,13 +50,16 @@
 static const char *TAG = "icm42688_hxy";
 static i2c_master_dev_handle_t icm42688_hxy_device = NULL;
 static bool icm42688_hxy_isr_registered = false;
+static portMUX_TYPE data_ready_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t latest_data_ready_timestamp_us = 0;
+static uint32_t pending_data_ready_count = 0U;
 
 _Static_assert(ICM42688_HXY_I2C_ADDRESS == UINT16_C(0x18),
                "Aohazuku Rev.0 fixes the HXY IMU SDO pin Low");
 _Static_assert(BOARD_ICM42688_HXY_I2C_SPEED_HZ == UINT32_C(400000),
                "ICM-42688P-HXY I2C must not exceed 400 kHz");
-_Static_assert(ICM42688_HXY_SAMPLE_RATE_HZ == UINT32_C(400),
-               "HXY ODR table has no 500 Hz setting");
+_Static_assert(ICM42688_HXY_SAMPLE_RATE_HZ == UINT32_C(200),
+               "HXY accel and gyro must use the requested 200 Hz ODR");
 
 static void delay_ms(uint32_t delay_time_ms) {
     vTaskDelay(pdMS_TO_TICKS(delay_time_ms));
@@ -126,6 +129,12 @@ static void IRAM_ATTR data_ready_isr(void *context) {
     BaseType_t high_priority_task_woken = pdFALSE;
     TaskHandle_t task = (TaskHandle_t) context;
 
+    portENTER_CRITICAL_ISR(&data_ready_lock);
+    latest_data_ready_timestamp_us = esp_timer_get_time();
+    if (pending_data_ready_count < UINT32_MAX) {
+        pending_data_ready_count++;
+    }
+    portEXIT_CRITICAL_ISR(&data_ready_lock);
     if (task != NULL) {
         vTaskNotifyGiveFromISR(task, &high_priority_task_woken);
     }
@@ -147,6 +156,10 @@ static esp_err_t configure_data_ready_gpio(TaskHandle_t sensor_task) {
     if (sensor_task == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    portENTER_CRITICAL(&data_ready_lock);
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
     ret = gpio_config(&data_ready_gpio_config);
     if (ret != ESP_OK) {
         return ret;
@@ -183,7 +196,28 @@ static esp_err_t disable_data_ready_gpio(void) {
     if (ret != ESP_OK && first_error == ESP_OK) {
         first_error = ret;
     }
+    portENTER_CRITICAL(&data_ready_lock);
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
     return first_error;
+}
+
+bool icm42688_hxy_take_data_ready_event(int64_t *timestamp_us,
+                                        uint32_t *interrupt_count) {
+    bool pending = false;
+
+    if (timestamp_us == NULL || interrupt_count == NULL) {
+        return false;
+    }
+    portENTER_CRITICAL(&data_ready_lock);
+    pending = pending_data_ready_count > 0U;
+    *timestamp_us = latest_data_ready_timestamp_us;
+    *interrupt_count = pending_data_ready_count;
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
+    return pending;
 }
 
 static esp_err_t verify_identity(icm42688_hxy_identity_t *identity) {
@@ -208,11 +242,11 @@ static esp_err_t configure_sensor(void) {
     const uint8_t registers[][2] = {
         {ICM42688_HXY_REG_COM_CFG, ICM42688_HXY_COM_CFG_VALUE},
         {ICM42688_HXY_REG_ACC_CONF,
-         ICM42688_HXY_ACC_CONF_400HZ_VALUE},
+         ICM42688_HXY_ACC_CONF_200HZ_VALUE},
         {ICM42688_HXY_REG_ACC_RANGE,
          ICM42688_HXY_ACC_RANGE_8G_VALUE},
         {ICM42688_HXY_REG_GYR_CONF,
-         ICM42688_HXY_GYR_CONF_400HZ_VALUE},
+         ICM42688_HXY_GYR_CONF_200HZ_VALUE},
         {ICM42688_HXY_REG_GYR_RANGE,
          ICM42688_HXY_GYR_RANGE_2000DPS_VALUE},
         {ICM42688_HXY_REG_INT_CFG1,
@@ -292,12 +326,18 @@ esp_err_t icm42688_hxy_init(i2c_master_bus_handle_t bus_handle,
         (void) remove_device_handle();
         return ret;
     }
-    ret = configure_sensor();
+    /*
+     * Arm the ESP32 GPIO before routing the sensor's data-ready signal to
+     * INT1.  configure_sensor() enables INT1 and then waits for the sensor to
+     * settle; registering the edge ISR after that wait can miss the first
+     * pulse and leave the interrupt-driven reader with no event to consume.
+     */
+    ret = configure_data_ready_gpio(sensor_task);
     if (ret == ESP_OK) {
-        ret = verify_identity(identity);
+        ret = configure_sensor();
     }
     if (ret == ESP_OK) {
-        ret = configure_data_ready_gpio(sensor_task);
+        ret = verify_identity(identity);
     }
     if (ret != ESP_OK) {
         (void) icm42688_hxy_deinit();
@@ -320,11 +360,12 @@ static int16_t decode_be_int16(uint8_t high_byte, uint8_t low_byte) {
     return (int16_t) combined;
 }
 
-esp_err_t icm42688_hxy_read_sample(icm42688_hxy_sample_t *sample) {
+esp_err_t icm42688_hxy_read_sample(int64_t interrupt_timestamp_us,
+                                   icm42688_hxy_sample_t *sample) {
     uint8_t frame[ICM42688_HXY_FRAME_LENGTH] = {0};
     esp_err_t ret = ESP_OK;
 
-    if (sample == NULL) {
+    if (sample == NULL || interrupt_timestamp_us <= 0) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(sample, 0, sizeof(*sample));
@@ -365,7 +406,7 @@ esp_err_t icm42688_hxy_read_sample(icm42688_hxy_sample_t *sample) {
             return ESP_ERR_INVALID_RESPONSE;
         }
     }
-    sample->timestamp_us = esp_timer_get_time();
+    sample->timestamp_us = interrupt_timestamp_us;
     sample->valid = true;
     return ESP_OK;
 }

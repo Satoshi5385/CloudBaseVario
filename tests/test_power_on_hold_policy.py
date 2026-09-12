@@ -141,11 +141,11 @@ class PowerOnHoldPolicyTests(unittest.TestCase):
         sound = MAIN_SOURCE.index("app_tasks_play_startup_sound(")
         storage = MAIN_SOURCE.index("usb_device_storage_init(")
         usb = MAIN_SOURCE.index("usb_device_start();")
-        sensor = MAIN_SOURCE.index("sensor_bus_init();")
+        workers = MAIN_SOURCE.index("ret = app_tasks_start();")
 
         self.assertLess(sound, storage)
         self.assertLess(sound, usb)
-        self.assertLess(sound, sensor)
+        self.assertLess(sound, workers)
         self.assertIn(
             "switch_preferences.volume_level", MAIN_SOURCE[sound : sound + 160]
         )

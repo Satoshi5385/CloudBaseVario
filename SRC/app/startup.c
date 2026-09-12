@@ -26,7 +26,6 @@
 #include "platform/board.h"
 #include "platform/board_identity_storage.h"
 #include "platform/firmware_update.h"
-#include "platform/sensor_bus.h"
 #include "platform/system_io.h"
 #include "platform/switch_preferences.h"
 #include "platform/usb_device_service.h"
@@ -852,13 +851,6 @@ void app_startup_run(void) {
                  esp_err_to_name(startup_sound_result));
         post_peripheral_failure(startup_sound_result);
     }
-    ret = sensor_bus_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "shared sensor I2C bus unavailable: %s",
-                 esp_err_to_name(ret));
-        post_peripheral_failure(ret);
-    }
-
     if (board_valid && system_io_result != ESP_OK) {
         post_peripheral_failure(system_io_result);
     }

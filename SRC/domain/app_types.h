@@ -160,6 +160,8 @@ typedef struct {
     uint32_t calibration_sample_count;
     uint32_t accel_calibration_sample_count;
     uint32_t missed_interrupt_count;
+    uint32_t buffer_high_watermark;
+    uint32_t buffer_overflow_count;
     float accel_norm_g;
     float accel_offset_mps2[3];
     float gyro_bias_radps[3];

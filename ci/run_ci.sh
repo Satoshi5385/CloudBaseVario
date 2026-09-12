@@ -57,6 +57,9 @@ run_host_c_tests() (
         -I SRC tests/test_flight_state.c SRC/domain/flight_state.c -lm
     compile_and_run test_imu_motion \
         -I SRC tests/test_imu_motion.c SRC/domain/imu_motion.c -lm
+    compile_and_run test_imu_sample_buffer \
+        -I SRC tests/test_imu_sample_buffer.c \
+        SRC/domain/imu_sample_buffer.c
     compile_and_run test_firmware_update_policy \
         -I SRC tests/test_firmware_update_policy.c \
         SRC/domain/firmware_update_policy.c -lm

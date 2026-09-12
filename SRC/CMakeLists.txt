@@ -21,6 +21,7 @@ idf_component_register(
         "domain/gps_nmea.c"
         "domain/imu_calibration_controller.c"
         "domain/imu_fusion.c"
+        "domain/imu_sample_buffer.c"
         "domain/imu_motion.c"
         "domain/lk8ex1.c"
         "domain/system_policy.c"

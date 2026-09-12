@@ -177,16 +177,16 @@ SW1の長押しにより、電源OFF操作を行う。
 - 初期設定後に `OSR_CONFIG=0x58`、`ODR_CONFIG=0xA9`、`DSP_CONFIG=0x03`、`DSP_IIR=0x00` をread-backして確認すること。
 - `OSR_EFF`の`ODR_IS_VALID`を確認し、無効なOSR/ODR組合せのまま測定を開始しないこと。
 - `INITIALIZING`中のBMP581起動時初期化に失敗した場合は、バリオとしての動作が期待できないため、`ACTIVE`へ遷移せず`FATAL`へ遷移すること。`FATAL`中は自動再検出を行わないこと。
-- レジスタ `0x1D` から温度・気圧の6 byteを約10 ms周期で連続読み出しすること。
-- 読み出した温度と気圧にタイムスタンプと有効状態を付けること。
+- Data Ready割り込みごとに`INT_STATUS`（`0x27`）を読み出してData Readyを確認・clearし、続けてレジスタ `0x1D` から温度・気圧の6 byteを連続読み出しすること。通常のサンプル取得は2 I2C transactionとする。
+- 読み出した温度と気圧に割り込み時刻と有効状態を付けること。
 - `ACTIVE`移行後にBMP581が未検出、staleまたは連続通信エラーとなった場合は、`ACTIVE`を維持して約2秒間隔で再初期化または再検出を試行すること。単発の通信エラーでは次周期の取得を継続すること。
 - 連続10回の読出しエラー、または最後の有効サンプルから100 ms超過をBMP581 staleとし、推定を無効化すること。連続エラー回数はパラメータで変更可能とすること。
 - 連続エラー時は、まずBMP581 device handleとBMP581だけを再初期化すること。BMP581 timeoutまたはSDA/SCL stuckにより共有I2C busを停止・再生成する場合は、先にICM-42688P-HXYのdevice handleとGPIO14割り込みも解除し、bus再生成後にHXY IMUを再初期化すること。
 - 初期化ではソフトウェアリセット後2 ms以上待ち、POR/soft-reset完了状態とNVM readyを確認してから設定すること。
 
-BMP581の割り込み端子は `PIN_INT_BMP`（GPIO21）とする。BMP581は周期読み出しで取得し、GPIO21は使用しない。
+BMP581の割り込み端子は `PIN_INT_BMP`（GPIO21）とする。INT出力は有効、push-pull、active-high、non-latched pulseとし、Data ReadyをGPIO21の立上り割り込みへ接続する。ISRは割り込み時刻と回数を記録して`sensor_task`へtask notificationだけを行う。
 
-Data Ready割り込みを使用しないため、読出し成功ごとにsequenceを進める。取得周期、重複値率および周期超過を診断値として測定する。
+読出し成功ごとにsequenceを進める。処理前に複数のData Ready割り込みが集約された場合は最新frameを読み、読み出せなかったframe数を`bmp_period_overrun_count`へ計上する。
 
 ### ICM-42688P-HXY取得、姿勢推定、鉛直加速度
 
@@ -196,34 +196,34 @@ Data Ready割り込みを使用しないため、読出し成功ごとにsequenc
 - `WHO_AM_I`レジスタ`0x01`を読み出し、`0x6A`であることを確認すること。ACKがあってもIDが不一致なら未検出として扱うこと。
 - `sensor_task`だけがI2Cアクセスを行い、BMP581アクセスと直列化すること。transaction timeoutは5 ms以下とすること。
 - 識別前のデバイスへ設定を書かないこと。識別成功後はソフトウェアリセット、電源起動、設定値の順で書き込み、各設定値を1 ms以上待ってread-backすること。電源起動後は10 ms以上待つこと。
-- HXY版には500 HzのODR設定がないため、加速度とジャイロを400 Hzに設定すること。設定値は次表を単一の根拠とする。
+- 加速度とジャイロを200 Hzに設定すること。設定値は次表を単一の根拠とする。
 
 | レジスタ | address | write値 | 用途 |
 | --- | ---: | ---: | --- |
 | `SOFT_RST` | `0x4A` | `0xA5` | ソフトウェアリセット |
 | `PWR_CTRL` | `0x7D` | `0x0E` | 温度、ジャイロ、加速度を有効化 |
 | `COM_CFG` | `0x05` | `0x50` | HXY I2C通信設定 |
-| `ACC_CONF` | `0x40` | `0xAA` | high-performance、normal average 4、400 Hz |
+| `ACC_CONF` | `0x40` | `0xA9` | high-performance、normal average 4、200 Hz |
 | `ACC_RANGE` | `0x41` | `0x02` | ±8 g |
-| `GYR_CONF` | `0x42` | `0xAA` | high-performance、normal average 4、400 Hz |
+| `GYR_CONF` | `0x42` | `0xA9` | high-performance、normal average 4、200 Hz |
 | `GYR_RANGE` | `0x43` | `0x00` | ±2000 dps |
 | `INT_CFG1` | `0x06` | `0x03` | ジャイロData ReadyをINT1へ出力 |
 
 - `DATA_STAT`（`0x0B`）から加速度・ジャイロのData Readyと設定エラーを確認し、出力レジスタ`0x0C`～`0x17`を同一transactionで連続読み出しすること。設定エラーbit mask `0x30`が非0、またはData Ready mask `0x03`が揃っていないframeは有効サンプルとしないこと。
 - 3軸加速度と3軸ジャイロはbig-endianのsigned 16 bitとして復元すること。±8 gは4096 LSB/g、±2000 dpsは0.061 dps/LSBとしてSI単位へ変換すること。
-- GPIO14はHXY INT1の立上りData Ready入力とする。ISRは`sensor_task`へのtask notificationだけを行い、I2C、姿勢計算、ログ整形またはBLE送信を行わないこと。
+- GPIO14はHXY INT1の立上りData Ready入力とする。初期化時はGPIO14のISRを登録してから`INT_CFG1`でINT1出力を有効にし、最初のData Ready pulseを取りこぼさないこと。ISRは割り込み時刻と回数を記録して`sensor_task`へtask notificationだけを行い、I2C、姿勢計算、ログ整形またはBLE送信を行わないこと。通知後に読み出した有効サンプルは割り込み時刻とともに固定長32件のリングバッファへ格納し、満杯時は最古サンプルを破棄して計数すること。
 - config FAT直下の`mc_data.json`に有効な個体較正値がない場合は、基板上面を上にして水平静止させ、補正前の基板座標でX/Yが各±0.10 g以内、Zが+0.75～+1.25 g、各軸ジャイロ絶対値3 dps以下、加速度ノルム振動RMSが0.02 g以下となる800連続サンプルから加速度オフセットを求めること。収集時のZ範囲は上向き姿勢を確認する粗い判定とし、個体オフセットの妥当性は800サンプル平均から求めた各軸オフセットが±0.20 g以内であることにより最終判定する。収集中の条件違反では蓄積をやり直し、最終オフセットが範囲外の場合は保存しないこと。
 - 加速度オフセットはセンサ座標で各軸±0.20 g以内とし、`mc_data.json`へ原子的に保存できた後だけ有効化すること。保存までは気圧単独・音・BLEおよびTinyUSB CDC診断を継続する一方、config FATを`APP_OWNED`に維持してMSC媒体を公開しない。保存失敗は2秒間隔で再試行すること。初回較正中にSW3を3秒長押しした場合は、そのbootに限って収集と保存再試行を中止し、未保存候補を破棄してIMUを停止した気圧単独動作へ移ること。スキップ状態をFATまたはNVSへ保存せず、正式buildではMSC媒体を公開し、次回bootでは再び初回較正を要求すること。
 - 通常buildはMSC媒体の公開前にCDCを開始し、校正状態、永続化状態、収集数、確定オフセット、保存結果、Mahony信頼度、振動RMS、実効Kp/KiおよびKi activeを10 Hzモニターまたは`DIAG STATUS`へ出力すること。初回較正と起動時ファイル処理の完了まではconfig FATをESP32側の`APP_OWNED`に維持し、完了後は同一boot中にMSC媒体を公開すること。
 - 有効な加速度オフセットを生のセンサ加速度から減算してから基板座標へ変換すること。センサ交換または再較正時はMSC上で`mc_data.json`を削除し、安全な取り外し後に再起動すること。
 - 加速度補正後は、加速度ノルム0.9～1.1 gかつ各軸ジャイロ絶対値3 dps以下の連続サンプルで起動毎の静止ジャイロ較正を行うこと。水平や特定姿勢を要求せず、既定の完了条件は200サンプルとし、途中で静止条件を外れた場合は蓄積をやり直すこと。
-- 静止加速度からroll/pitchを初期化し、ジャイロ積分と加速度の重力方向補正を行う6DoF姿勢推定を400 Hzサンプルの実時刻差で更新すること。磁気センサーを使用しないためyawは絶対方位として扱わないこと。
+- 静止加速度からroll/pitchを初期化し、ジャイロ積分と加速度の重力方向補正を行う6DoF姿勢推定を200 Hzサンプルの実時刻差で更新すること。姿勢推定はIMU割り込みでは実行せず、BMP581サンプルの読出し後に、そのBMP581割り込み時刻以前のバッファ済みIMUサンプルを順番に処理すること。BMP581処理は次のIMUを待たないこと。磁気センサーを使用しないためyawは絶対方位として扱わないこと。
 - 基板座標へ軸変換後、加速度を地球座標へ回転し、上向きZ成分から標準重力9.80665 m/s²を減算して鉛直加速度を得ること。
 - Mahonyの加速度補正信頼度は、1 gからのノルム誤差0.15 gで0となる線形値、バイアス補正後角速度10 dps以下で1・90 dps以上で0となる線形値、および0.25秒EMAで求めた振動RMS 0.01 g以下で1・0.05 g以上で0となる線形値の最小値とする。実効Kpは設定Kpと信頼度の積とする。
 - Kiは、1 gからの誤差0.03 g以内、角速度3 dps以下、振動RMS 0.01 g以下が0.5秒連続したときだけ更新する。非信頼時は積分値を保持して更新を止め、各軸を±5 dps相当に制限すること。
 - 姿勢のタイムスタンプが逆行、同値または50 ms超の間隔となった場合、非有限値または正規化不能なquaternionとなった場合は、姿勢と較正を破棄し、気圧単独へ縮退して静止較正から再開すること。
 - 未検出、無応答、ID不一致、連続通信エラー、100 ms超のstale、較正未完了または姿勢無効は非FATALとし、BMP581による気圧単独推定、音およびBLEを継続すること。再初期化は約2秒間隔とし、task delayで待たず次回試行時刻として管理すること。
-- `imu_diagnostics_t`に有効、online、設定済み、加速度較正・保存状態、ジャイロ較正済み、姿勢有効、融合中、stale、アドレス、`WHO_AM_I`、`DATA_STAT`、最終エラー、試行・サンプル・連続エラー・各較正・取りこぼし回数、3軸加速度オフセット、加速度ノルム、ジャイロバイアス、信頼度、振動RMS、実効Kp/Ki、Ki有効状態、クォータニオンおよびroll／pitch／yawを保持し、10 Hz連続モニターと`DIAG STATUS`へ表示すること。yawは磁気方位ではなく、6DoF推定開始時を基準とする相対角として扱う。
+- `imu_diagnostics_t`に有効、online、設定済み、加速度較正・保存状態、ジャイロ較正済み、姿勢有効、融合中、stale、アドレス、`WHO_AM_I`、`DATA_STAT`、最終エラー、試行・サンプル・連続エラー・各較正・取りこぼし回数、バッファ最大使用数・overflow回数、3軸加速度オフセット、加速度ノルム、ジャイロバイアス、信頼度、振動RMS、実効Kp/Ki、Ki有効状態、クォータニオンおよびroll／pitch／yawを保持し、10 Hz連続モニターと`DIAG STATUS`へ表示すること。yawは磁気方位ではなく、6DoF推定開始時を基準とする相対角として扱う。
 
 TDK純正品向けの`0x68`、`WHO_AM_I=0x75/0x47`、User BankおよびBank Select方式は本部品へ適用しない。
 
@@ -370,7 +370,7 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 - ESP32-S3のUSB OTG内蔵PHYを使用し、CDC ACM 1 interfaceとMSC 1 LUNを同時に公開する。USB Serial/JTAG、UART consoleおよびUSB DFU interfaceは併用しない。
 - VBUSがGPIO42で30 ms連続してHighと確認された場合だけ、TinyUSB device taskとUSB PHYを開始する。VBUSがLowの間はCDCを初期化せず、TinyUSB device taskとUSB PHYを停止する。再接続時はCDCを再初期化し、起動時のOTA確認および加速度較正gateが完了済みならMSC媒体も再公開する。
 - VBUS消失を30 ms連続して確認した場合は、新規MSC I/Oを閉じ、受理済みWRITEの完了、storage作業モード終了およびAPP所有権復帰を待ってからTinyUSB device taskとUSB PHYを停止する。設定FATと通知待ち中のMSC書込みworkerは維持し、ESP32側からの設定読込み・保存を継続する。
-- TinyUSB device taskはcore0固定、priority 6、stack 4096 byteとする。CDC RX/TX/endpoint bufferは512/4096/512 byte、MSC転送bufferは4096 byteとする。
+- TinyUSB device task `TinyUSB`はcore0固定、priority 6、stack 4096 byteとする。MSC storage worker `tinyusb_msc_io`はaffinityなし、priority 5、stack 4096 byteとし、VBUSがLowで`TinyUSB`を停止している間もstorage objectとともに維持する。CDC RX/TX/endpoint bufferは512/4096/512 byte、MSC転送bufferは4096 byteとする。
 - CDCはESP-IDF log、10 Hzテレメトリーおよびコマンドコンソールを提供する。MSCは4 MiB共有FATを公開する。
 - MSC class driverはFAT mountより先に初期化する。FATをmountできない場合はLUNへmediaを登録せず、CDC + MSC descriptorを維持してSCSI要求へ「メディアなし」として応答する。未初期化のMSC class callbackをhostへ公開してはならない。
 - FAT mount失敗時もTinyUSB CDC、センサー、推定、音声およびBLEを継続する。MSC class driver自体を初期化できない場合はTinyUSB compositeを開始せず、USB以外の主要機能を継続する。
@@ -382,7 +382,7 @@ $LK8EX1,<pressure_pa>,99999,<vario_cm_s>,<temperature_c>,<battery>,*<checksum>\r
 
 - 通常の診断・設定にはTinyUSB CDCを主コンソールとして使用し、設定ファイル公開用のMSCと同じUSB接続上の複合デバイスとして提供すること。UART0およびUSB Serial/JTAGをアプリ稼働中のコンソールとして使用しないこと。
 - センサー検出状態、気圧、温度、高度、昇降率、融合状態、BLE状態、電源状態を確認できること。
-- I2Cエラー数、周期超過数、キュー破棄数、各タスクのスタック余裕を確認できること。
+- I2Cエラー数、BMP581／IMUのData Ready取りこぼし数、IMUバッファ最大使用数・overflow数、キュー破棄数、各タスクのスタック余裕を確認できること。
 - 現在のCPU周波数、アプリケーションPMロック状態、Light-sleep復帰回数、観測できた周波数遷移回数およびPMロック異常数を確認できること。
 - パラメータの一覧、取得、変更、初期値への復帰ができること。
 - パラメータファイルの読込み元、検証結果、保存結果、FAT領域の所有者およびUSB MSC状態を確認できること。
@@ -414,7 +414,7 @@ TinyUSB CDCでhostがDTRをassertしている間は、`console_task`から100 ms
 `console_task`はDTR接続中に10 ms、未接続中に250 msの周期で入力・診断処理を確認する。未接続中は100 ms monitor期限とdrop数を進めず、DTRの再接続時に次回monitor期限を再設定する。
 
 ```text
-BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pressure=... temp_c=... pressure_pa=... altitude_m=... climb_mps=... climb_valid=... estimate_valid=... i2c_errors=... overruns=... ble_pressure_pa=... ble_altitude_m=... ble_vario_cm_s=... ble_temperature_c=... ble_battery=... ble_available=... ble_notify=... imu_online=... imu_calibrated=... imu_attitude_valid=... imu_accel_calibrated=... imu_accel_cal_persisted=... imu_accel_cal_skipped=... imu_stale=... q_w=... q_x=... q_y=... q_z=... roll_deg=... pitch_deg=... yaw_deg=... vertical_accel_mps2=... vertical_accel_valid=... fusion_active=... kalman_accel_bias_mps2=... kalman_baro_innovation_m=... kalman_baro_innovation_valid=... kalman_accel_innovation_mps2=... kalman_accel_innovation_valid=... kalman_baro_r_m2=... kalman_accel_r_m2_s4=... imu_samples=... imu_missed=... imu_confidence=... imu_vibration_rms_g=... imu_kp_effective=... imu_ki_effective=... imu_ki_active=... imu_cal_samples=... imu_cal_save_pending=... imu_cal_storage=... imu_cal_storage_error=... imu_motion_valid=... imu_motion_accel_rms_g=... imu_motion_gyro_rms_dps=... motion_state=... motion_evidence=... motion_altitude_evidence=... motion_gps_evidence=... motion_state_elapsed_s=... stationary_elapsed_s=... motion_altitude_range_m=... motion_vario_used=... motion_gps_used=... motion_gps_high_elapsed_s=... motion_gps_high_updates=... motion_gps_high_pending=... auto_power_off_elapsed_s=... stream_drops=...
+BARO seq=... timestamp_us=... online=... pressure_valid=... raw_temp=... raw_pressure=... temp_c=... pressure_pa=... altitude_m=... climb_mps=... climb_valid=... estimate_valid=... i2c_errors=... overruns=... ble_pressure_pa=... ble_altitude_m=... ble_vario_cm_s=... ble_temperature_c=... ble_battery=... ble_available=... ble_notify=... imu_online=... imu_calibrated=... imu_attitude_valid=... imu_accel_calibrated=... imu_accel_cal_persisted=... imu_accel_cal_skipped=... imu_stale=... q_w=... q_x=... q_y=... q_z=... roll_deg=... pitch_deg=... yaw_deg=... vertical_accel_mps2=... vertical_accel_valid=... fusion_active=... kalman_accel_bias_mps2=... kalman_baro_innovation_m=... kalman_baro_innovation_valid=... kalman_accel_innovation_mps2=... kalman_accel_innovation_valid=... kalman_baro_r_m2=... kalman_accel_r_m2_s4=... imu_samples=... imu_missed=... imu_buffer_high_watermark=... imu_buffer_overflows=... imu_confidence=... imu_vibration_rms_g=... imu_kp_effective=... imu_ki_effective=... imu_ki_active=... imu_cal_samples=... imu_cal_save_pending=... imu_cal_storage=... imu_cal_storage_error=... imu_motion_valid=... imu_motion_accel_rms_g=... imu_motion_gyro_rms_dps=... motion_state=... motion_evidence=... motion_altitude_evidence=... motion_gps_evidence=... motion_state_elapsed_s=... stationary_elapsed_s=... motion_altitude_range_m=... motion_vario_used=... motion_gps_used=... motion_gps_high_elapsed_s=... motion_gps_high_updates=... motion_gps_high_pending=... auto_power_off_elapsed_s=... stream_drops=...
 ```
 
 `ble_*`の5値は、同じsnapshotからLK8EX1へ実際に整形する値と一致させ、無効値`999999`／`99999`／`9999`／`99`／`999`もそのまま表示する。`motion_*_used`は今回の判定で補助入力を採用したこと、GPSの鮮度は独立したGPS行の`age_ms`、IMU活動量は`imu_motion_*`で示す。yawは磁気センサーを使わない相対角であり、絶対方位として扱わない。host未接続時は行を蓄積せず、出力失敗または周期超過時は古い行を再送せず`stream_drops`を増加させる。
@@ -450,7 +450,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 - FAT領域はESP32アプリケーションとUSB hostが同時にアクセスしてはならない。USB hostへMSCとして公開している間はhostだけが所有し、ESP32側からmount、読込みまたは書込みを行わないこと。
 - USB hostが安全な取り外しを完了し、FAT領域の所有権がESP32側へ戻ったことを確認した後にだけ、ESP32側からファイル操作を再開すること。hostの未flushデータを破壊する可能性があるため、保存目的でMSCを強制切断しないこと。
 - MSCのWRITE(10)はwear levelling領域への実書込みが完了するまでcommandを完了扱いにせず、その後にだけhostへ成功応答すること。SCSI SYNCHRONIZE CACHE(10/16)は受理済みWRITEが0で実媒体mutexを取得できた場合だけ成功応答すること。ejectまたはdetach開始時は新規host I/Oを閉じ、受理済みWRITEが残る場合はAPP側mountを遅延し、実書込みとTinyUSBの非同期完了処理が終わった後にだけ所有権をAPP側へ戻すこと。安全な取り外し完了時にdevice側の遅延書込みを残さないこと。
-- 最初のWRITE(10)では、TinyUSB event taskとは別の専用storage workerからFlash消去前にsensor taskとaudio taskへ休止要求を出して最大100 ms待つ。休止timeout時もWRITEを失敗させず診断を加算する。Wear Levelling実書込みと`tud_msc_async_io_done()`も同workerで実行し、TinyUSB event taskを休止待ちまたはFlash I/Oでblockしない。pending writeが0になってから1秒間新しいWRITEがなければ自動復帰し、安全な取り外しまたはdetach時はpending writeが0なら直ちに復帰する。復帰時はI2C、BMP581、IMUおよび推定器を再初期化し、新しい有効推定値が得られるまで音とBLE LK8EX1 Notifyを再開しない。
+- 最初のWRITE(10)では、TinyUSB event taskとは別の専用storage worker `tinyusb_msc_io`からFlash消去前にsensor taskとaudio taskへ休止要求を出して最大100 ms待つ。休止timeout時もWRITEを失敗させず診断を加算する。Wear Levelling実書込みと`tud_msc_async_io_done()`も同workerで実行し、TinyUSB event taskを休止待ちまたはFlash I/Oでblockしない。pending writeが0になってから1秒間新しいWRITEがなければ自動復帰し、安全な取り外しまたはdetach時はpending writeが0なら直ちに復帰する。復帰時はI2C、BMP581、IMUおよび推定器を再初期化し、新しい有効推定値が得られるまで音とBLE LK8EX1 Notifyを再開しない。
 - ストレージ作業モード中にSW1電源OFF要求が成立した場合は要求を保持し、pending writeが0となって作業モードを終了した時点から通常の15秒終了期限を開始する。作業モード中の時間は終了期限へ算入しない。移動状態と自動電源OFFの計時は作業中に進めず、復帰時に判定器をresetする。
 
 #### MSCファイルによるファームウェア更新
@@ -469,7 +469,7 @@ monitor GUIはGPS行の受信時刻を独立して管理し、`max(3000 ms, 3 ×
 - リカバリーではPSRAM MSCを公開し、一度`HOST_OWNED`になった後、SYNCHRONIZE CACHE、安全な取り外し、受理済みWRITEの完了を経て`APP_OWNED`へ戻った回数を確認してから`/update/UPDATE.BIN`を処理する。初期APP mountを取り外し完了として扱わず、待機中は100 ms以下の周期で起動Watchdogを給餌する。検証成功時だけ設定Flash上の競合`UPDATE.BIN`を`UPDATE.BAD`へ退避し、退避、status、小型pending recordのいずれかが失敗した場合はboot partitionを変更しない。ファイルなし、認証拒否または書込み失敗時はboot partitionを変更せずPSRAM MSCを再公開し、成功時だけ自動再起動してPENDING_VERIFYおよびrollback手順へ接続する。安全な取り外し後も再起動完了まではUSBを抜かない。PSRAM FATは揮発性であり、VBUS喪失または終了時は新規I/Oを止め、受理済みWRITEをdrainし、MSC/FatFs解除後に全域をゼロ化して解放する。ESP-IDFのboot時PSRAM初期化は維持し、非公開APIによる物理電源停止は行わない。
 - リカバリーモードのCDCはログ出力に加えて`DIAG STATUS`だけを受理し、PSRAM媒体、設定Flash mount結果、RAMディスク容量、確保前後の空き・最大連続block、allocation error、read/write件数・byte数・error数、更新sourceおよび転送中digest照合結果を返す。通常workerと通常コマンドconsoleは開始しない。
 - リカバリー更新の初回bootを含む`ESP_OTA_IMG_PENDING_VERIFY`中でも、手動のSW2+SW3を通常workerによる10秒確認より優先してMSCリカバリーへ入る。bootloader、partition table、現在のapplication自体、config FAT、USBまたはリカバリー経路が実行不能な場合は復旧できず、GPIO0を使うROM Download Modeが必要である。mask ROM自体は書換対象ではなく、更新対象はinactive OTA partitionである。
-- 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。5個の必須application workerが生成されたことを条件に10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
+- 更新firmwareの初回bootでは、実行中partitionの`ESP_OTA_IMG_PENDING_VERIFY`を安全GPIO初期化直後に確認し、SW1電源ON長押しを要求せず初期化を継続する。board identityに応じて有効なapplication worker（GPSなし5 task、GPSあり6 task）がすべて生成されたことを条件に、`ota_confirm`が10秒後に有効化する。確認中もTinyUSB CDC診断を開始するが、config FATはESP32側の`APP_OWNED`に維持しMSC媒体を公開しない。有効化後、`UPDATE_RESULT.TXT`を `CONFIRMED`へ更新し、`UPDATE.PND`の削除に成功し、かつ必要な加速度個体較正の保存も完了した後にだけMSC媒体を公開する。状態ファイルの更新、削除または個体較正保存に失敗した場合はCDCを継続してMSC媒体だけを公開しない。BMP581、IMU、音声、BLEなど個別peripheralの失敗はOTA有効化を妨げず、加速度較正待ちでもCDC診断・気圧単独・音・BLEは継続する。必須worker生成前のcrash、resetまたは10秒timeoutはbootloader rollback対象とする。
 - MSC更新が使用できない場合は、GPIO0 + resetによるROM download modeを復旧手段として使用する。
 - MSC更新はapplicationだけを対象とし、bootloader、partition tableおよびfactoryは更新しない。これらの書込みと完全復旧にはROM download modeによる有線flashを使用する。
 
@@ -551,16 +551,16 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 
 ## 非機能要件
 
-- BMP581の目標取得周期を10 ms、ICM-42688P-HXYの目標取得周期を2.5 ms、音声評価周期を10 ms以下とすること。姿勢推定と融合フィルタのIMU更新は2.5 ms周期を維持するが、正常なIMUサンプルだけを理由にvario snapshot、音声キューまたはIMU診断snapshotを更新せず、通常計測中の公開頻度は最大100 Hzに制限すること。IMUのData Ready通知が複数回蓄積した場合は最新frameを優先し、取りこぼし数を計数すること。未検出時は約2秒間隔で再初期化すること。
-- BMP581の周期超過とI2Cエラーは別々に計数すること。起動時および再初期化後は、最初のBMP581読み出しを10 ms絶対期限の基準とし、その読み出しまでのデバイス初期化時間は周期超過へ計上しないこと。
-- 周期処理は単調増加時刻と絶対期限を使用し、処理時間を次周期へ累積させないこと。
+- BMP581の目標取得周期を10 ms、ICM-42688P-HXYの目標取得周期を5 ms、音声評価周期を10 ms以下とすること。両センサーともData Ready割り込み時だけ読み出すこと。姿勢推定と融合フィルタのIMU更新はBMP581読出し時にバッファ済み200 Hzサンプルを一括処理し、通常計測中のsnapshot公開頻度は最大100 Hzに制限すること。Data Ready通知が複数回蓄積した場合は最新frameを優先し、取りこぼし数を計数すること。未検出時は約2秒間隔で再初期化すること。
+- BMP581のData Ready取りこぼしとI2Cエラーは別々に計数すること。起動・再初期化時間は取りこぼしへ計上しないこと。
+- センサー時系列にはISRで取得した単調増加時刻を使用し、I2C読出し完了時刻をサンプル時刻にしないこと。
 - 最新値だけが必要な経路では、キュー満杯時に古い値を破棄し、高優先度タスクを待たせないこと。
 - センサー取得および音声処理のアプリケーション経路は、USB処理またはファイル処理の完了を同期的に待たないこと。
 - MSC連続書込み中は計画休止として扱い、BMP581／IMUのstale、通信エラーまたは再試行へ計上しないこと。最終WRITEから約1秒後にセンサー、音およびBLE LK8EX1 Notifyの復帰を開始すること。
 - ISRおよびタイマーコールバックでは、I2Cアクセス、BLE送信、複雑な演算を行わないこと。
 - GPIO35、36、37および通常動作で使用しないstrapping pinを初期化しないこと。
 - GPIO、I2Cポート、LEDC channel、周期、しきい値などをソース各所へ重複定義しないこと。
-- `app_main`の起動処理、`startup_prep`、`sensor_task`、`audio_task`および`system_task`をTask Watchdogの監視対象とする。起動処理は必須worker起動後に解除し、sensor/audioは正常loopとMSC計画休止中だけ給餌してFATALでは解除する。system taskは250 ms以下に分割した終了待ち、`SHUTTING_DOWN`および`SAFE_STOP`でも給餌する。console、BLE送信、NimBLE内部taskおよびTinyUSB taskは個別登録しない。登録失敗時はtask failureを診断して`FATAL`へ移り、Watchdog回避だけを目的に異常状態で給餌し続けないこと。
+- `app_main`の起動処理、`startup_prep`、`sensor_task`、`audio_task`および`system_task`をTask Watchdogの監視対象とする。起動処理は必須worker起動後に解除し、sensor/audioは正常loopとMSC計画休止中だけ給餌してFATALでは解除する。system taskは250 ms以下に分割した終了待ち、`SHUTTING_DOWN`および`SAFE_STOP`でも給餌する。`console_task`、`ble_tx_task`、`gps_task`、`tinyusb_msc_io`、`ota_led`、`ota_confirm`、NimBLE／Bluetooth Controller内部taskおよび`TinyUSB`は個別登録しない。登録失敗時はtask failureを診断して`FATAL`へ移り、Watchdog回避だけを目的に異常状態で給餌し続けないこと。
 - 定常ループで動的メモリを確保・解放しないこと。NimBLEなどESP-IDF内部の動的確保はアプリケーション側の所有範囲外とする。
 
 ### ESP-IDFビルド設定
@@ -572,7 +572,7 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 - BluetoothはBLE + NimBLE Hostだけを有効にし、Classic BluetoothとWi-Fiを無効にすること。
 - アプリケーションのstandard I/OをTinyUSB CDCへ接続し、同じTinyUSB deviceでMSCを提供すること。TinyUSBと競合する `CONFIG_ESP_CONSOLE_USB_CDC`、アプリ稼働中の `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`およびUART consoleは使用せず、GPIO19/20をUSB OTG以外の通常GPIOとして再設定しないこと。
 - CPU既定・最大周波数を80 MHz、DFS最小周波数を40 MHzとし、アプリケーションが `esp_pm_configure()` で明示的に設定すること。通常計測中はLight-sleep禁止ロックを保持し、全worker停止後の安全停止状態だけで解放すること。VBUS連動TinyUSB停止だけではこの通常動作lockを変更しないこと。
-- applicationはperformance optimization（GCCでは `-O2`）でbuildし、400 Hzのセンサー演算後にCPUが速やかにidleへ戻れるようにすること。センサー用80 MHz lockは実際にIMUまたはBMP581のサンプル処理が必要なburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
+- applicationはperformance optimization（GCCでは `-O2`）でbuildし、センサー演算後にCPUが速やかにidleへ戻れるようにすること。センサーI2Cのclock sourceはXTALとし、I2C transaction中はアプリケーションの80 MHz CPU lockを保持しないこと。センサー用80 MHz lockはBMP581読出し後のバッファ済みIMU処理と高度・上昇率推定のburstだけで取得し、デバイス初期化、設定同期、較正保存、stale判定、I2C復旧および待機中は保持しないこと。assertionは有効のままとすること。
 - tickless idle、Bluetooth modem sleepおよびBluetooth low-power clockのmain XTALを有効にすること。通常動作中にTinyUSB CDCまたはMSCがUSB hostへ接続している間は自動Light-sleepを禁止すること。明示的な電源OFFではpending MSC writeがない状態でアプリケーション側TinyUSBを停止し、停止成功後はVBUSが残っていてもSAFE_STOPの自動Light-sleepを許可すること。
 - Wi-Fi/Bluetoothソフトウェア共存制御、NimBLEの未使用role・標準service・BLE 5.x追加機能・DTM testを無効にし、NimBLEはPeripheral/GATT Server、接続数1、Preferred ATT MTU 247とすること。交渉済みATT MTUは23～247を許容すること。
 - factory、4 MiB共有FAT、OTA dataおよび2個の3.5 MiB OTA slotを持つcustom partition tableを使用し、bootloader rollbackを有効にすること。
@@ -582,20 +582,39 @@ SW3単独の起動操作では設定FATをformatせず、`switch_pref/state`も�
 
 ### コアとタスク
 
-ESP32-S3の両コアでESP-IDF標準FreeRTOSを動作させる。FreeRTOSをcore0、ベアメタル処理をcore1で動かすAMP構成はESP-IDF 6.0で未サポートのため使用しない。ESP-IDF内部タスクとの競合を抑えるため、高周期処理をcore1へ固定し、アプリケーションの通信・操作系タスクはcore0へ固定する。ESP-IDFが生成するNimBLE内部タスクのaffinityはESP-IDF設定に従う。
+ESP32-S3の両コアでESP-IDF標準FreeRTOSを動作させる。FreeRTOSをcore0、ベアメタル処理をcore1で動かすAMP構成はESP-IDF 6.0で未サポートのため使用しない。ESP-IDF内部タスクとの競合を抑えるため、高周期処理をcore1へ固定し、アプリケーションの通信・操作系タスクはcore0へ固定する。次表はアプリケーション、リポジトリ内で変更しているコンポーネント、および`app_main`やBLEの実行位置を決めるESP-IDFタスクを示す。
 
 | タスク | Core | 優先度 | stack | 主な責務 |
 | --- | --- | ---: | ---: | --- |
+| Bluetooth Controller内部task | core0固定 | `configMAX_PRIORITIES - 2` | `ESP_TASK_BT_CONTROLLER_STACK`（現在4096 byte） | BLE Link Layer、HCI Controller処理。ESP-IDFが生成 |
+| `nimble_host` | core0固定 | `configMAX_PRIORITIES - 4` | `CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE`（現在4096 byte） | NimBLE Host event queue、GAP、GATT。BLE初期化成功時にESP-IDFが生成 |
 | `sensor_task` | core1固定 | 20 | 8192 byte | I2C所有、BMP581取得、HXY IMUの割り込み駆動取得・姿勢推定、0.5秒EMA活動量、気圧単独／IMU融合フィルタ、結果配信 |
 | `audio_task` | core1固定 | 18 | 4096 byte | 最新昇降率の状態判定、LEDC、PAM8904E制御 |
 | `system_task` | core0固定 | 12 | 4096 byte | スイッチ、LED、ADC、外部電源、飛行・静止判定、電源OFF処理 |
 | `ble_tx_task` | core0固定 | 8 | 6144 byte | LK8EX1生成とNimBLE Notify要求 |
-| TinyUSB device task | core0固定 | 6 | 4096 byte | USB OTG device、CDC + MSC class処理 |
+| `gps_task` | core0固定 | 7 | 6144 byte | L96 UART受信、NMEA解析、GPS snapshot更新。GPS搭載boardだけで生成 |
+| `TinyUSB` | core0固定 | 6 | 4096 byte | USB OTG device、CDC + MSC class処理。安定VBUS検出中だけ生成 |
 | `console_task` | core0固定 | 5 | 6144 byte | USBコンソール、パラメータ、デバッグ入力、診断文字列整形 |
+| `tinyusb_msc_io` | affinityなし | 5 | 4096 byte | MSC WRITEの実媒体I/O、sensor/audio休止、非同期完了通知。MSC storage生成中はVBUSによらず存続 |
+| `startup_prep` | core1固定 | 5 | 4096 byte | ブザーLEDC初期化、NVS初期化、スイッチ設定読込み。起動時に一度だけ生成して完了後に自己削除 |
+| `ota_confirm` | core0固定 | 2 | 3072 byte | PENDING_VERIFY imageの10秒確認、valid化、状態ファイル更新。該当bootだけで生成して自己削除 |
+| `main` | core0固定 | 1 | `CONFIG_ESP_MAIN_TASK_STACK_SIZE`（設定値6144 byte） | `app_main`による起動、リカバリー、OTA適用、worker開始。起動処理完了後にESP-IDFが削除 |
+| `ota_led` | core0固定 | 1 | 2048 byte | OTA適用中の黄LED 100 ms点滅。更新時だけ生成して停止時に自己削除 |
 
-優先度は `configMAX_PRIORITIES >= 25` を前提とする。表のstackを設定値とする。ESP-IDFの `xTaskCreatePinnedToCore()` へ渡すstackサイズはbyte単位である。
+優先度は `configMAX_PRIORITIES >= 25` を前提とする。`affinityなし`はFreeRTOS schedulerが実行coreを選択することを表す。アプリケーションとTinyUSBコンポーネントが`xTaskCreate()`または`xTaskCreatePinnedToCore()`へ渡すstackサイズはbyte単位であり、ESP-IDF内部taskの実確保量にはライブラリ側の補正が加わる場合がある。`startup_prep`を生成できない場合は`main`で同じ処理を同期実行し、`ota_led`を生成できない場合は点滅なしで更新を継続する。`ota_confirm`を生成できない場合はrollbackを要求する。
 
-`sensor_task`はGPIO14のtask notification、次のBMP581絶対期限、BMP581再試行時刻、ICM-42688P-HXYのstale期限または再試行時刻のうち最も早い条件までblockし、busy loopにしない。NimBLE HostはESP-IDFが生成する専用タスクで動作し、`ble_tx_task`はセンサーキューやI2Cを直接操作しない。
+上表以外に、現在の設定では次のFreeRTOS／ESP-IDF基盤taskが存在する。
+
+| 基盤task | Core | 優先度 | stack | 主な責務 |
+| --- | --- | ---: | ---: | --- |
+| `ipc0`／`ipc1` | 各番号のcore固定 | `configMAX_PRIORITIES - 1` | `CONFIG_ESP_IPC_TASK_STACK_SIZE`（現在1280 byte） | core間関数呼出し |
+| `esp_timer` | core0固定 | `configMAX_PRIORITIES - 3` | `ESP_TASK_TIMER_STACK`（現在4096 byte） | `esp_timer` callback dispatch |
+| `Tmr Svc` | affinityなし | 1 | `CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH`（現在2048 byte） | FreeRTOS software timer callback |
+| `IDLE0`／`IDLE1` | 各番号のcore固定 | 0 | `CONFIG_FREERTOS_IDLE_TASK_STACKSIZE`（設定値1536 byte） | idle処理、tickless idle、Task Watchdog監視 |
+
+基盤taskの優先度、stackおよび生成条件は使用するESP-IDF 6.0系と`sdkconfig`に従い、アプリケーションからセンサーI2C、音声、GPS UART、USB endpointまたはBLE Notifyを直接操作させない。ESP-IDFまたは採用コンポーネントの更新で新しい内部taskが増える場合は、core競合と省電力への影響を確認して本表を更新する。
+
+共有センサーI2C master busは初回も復旧時もcore1固定の`sensor_task`から生成し、ESP-IDF I2C completion interruptをcore1へ割り当てる。`app_main`またはcore0固定タスクからI2C busを生成しない。`sensor_task`はGPIO14のtask notification、次のBMP581絶対期限、BMP581再試行時刻、ICM-42688P-HXYのstale期限または再試行時刻のうち最も早い条件までblockし、busy loopにしない。NimBLE HostはESP-IDFが生成する専用タスクで動作し、`ble_tx_task`はセンサーキューやI2Cを直接操作しない。
 
 ### データの流れ
 
@@ -682,6 +701,8 @@ typedef struct {
     uint32_t calibration_sample_count;
     uint32_t accel_calibration_sample_count;
     uint32_t missed_interrupt_count;
+    uint32_t buffer_high_watermark;
+    uint32_t buffer_overflow_count;
     float accel_norm_g;
     float accel_offset_mps2[3];
     float gyro_bias_radps[3];
@@ -705,7 +726,7 @@ typedef struct {
 
 `pressure_valid`はBMP581の気圧値が範囲内かつfreshであること、`climb_rate_valid`は選択中の昇降率推定値が範囲内かつfreshであることを個別に表す。`estimate_valid`は高度および昇降率の推定結果を音声処理へ使用できることを表し、BLE送信可否を単独では決定しない。`imu_fusion_active`は現在の出力が融合フィルタ由来であること、`vertical_accel_valid`は直近の姿勢補正済み鉛直加速度を融合へ入力できることを表す。`kalman_accel_bias_mps2`は4状態フィルタが推定した加速度バイアス、`kalman_*_innovation*`は各観測更新直前の残差とその有効性、`kalman_*_r_*`は現在の実効観測分散を表す。`raw_temperature`、`raw_pressure`、`temperature_c_x100`および`pressure_pa_x100`は同一のBMP581サンプル由来とする。BMP581の温度はLK8EX1へ送信せず、温度フィールドを `99` とする。ICM-42688P-HXYの温度は取得しない。system snapshotには少なくとも、timestamp、外部電源状態、実測電池電圧とそのvalid flag、BLE表示電圧とそのvalid flag、debounce後のSW1～SW3、電源OFF要求、移動状態、飛行証拠bit、状態・静止経過秒、高度変動幅、および各入力の採否を含める。
 
-センサーから音声へのキューは長さ1とし、最大100 Hzで常に最新値へ上書きする。vario snapshotとIMU診断snapshotも同じ最大100 Hzの公開境界で更新し、400 HzのIMU内部更新では共有mutexと音声キューを操作しない。`sensor_task`だけがvario snapshot、`system_task`だけがsystem snapshotを書き、BLEとコンソールはそれぞれをmutexまたは短いcritical sectionの下で構造体ごとコピーする。複数writerが古い構造体コピーで互いのフィールドを上書きしてはならない。ロックを保持したまま文字列整形、BLE送信またはUSB出力を行わない。状態変化イベントは最新snapshotと別の固定長診断キューへ置き、通常サンプルによって重要イベントが上書きされないようにする。
+センサーから音声へのキューは長さ1とし、最大100 Hzで常に最新値へ上書きする。vario snapshotとIMU診断snapshotも同じ最大100 Hzの公開境界で更新し、200 HzのIMU取得では共有mutexと音声キューを操作しない。`sensor_task`だけがvario snapshot、`system_task`だけがsystem snapshotを書き、BLEとコンソールはそれぞれをmutexまたは短いcritical sectionの下で構造体ごとコピーする。複数writerが古い構造体コピーで互いのフィールドを上書きしてはならない。ロックを保持したまま文字列整形、BLE送信またはUSB出力を行わない。状態変化イベントは最新snapshotと別の固定長診断キューへ置き、通常サンプルによって重要イベントが上書きされないようにする。
 
 ### モジュール分割
 
@@ -760,8 +781,8 @@ typedef struct {
 8. 電池ADCを一度だけ初期化し、GPIO42 Lowの場合は100 ms間隔、最大5 sampleで起動時電池電圧を取得する。有効かつ有限な電圧が3.2 V以下なら、起動サウンドおよび以降の通常初期化へ進まず`SAFE_STOP`へ移る。同じ測定値をOTA電源判定にも再利用し、`UPDATE.PND/BAD/TXT`を整理した後、GPIO42 High、または電池電圧が3.4 Vを超え、かつ `UPDATE.BIN`がある場合はimageを検証してinactive OTA slotへ書き、成功時は再起動する。OTA pending-verify起動にも3.2 Vの起動禁止は適用するが、3.4 VのOTA適用条件は再適用せず10秒の確認taskを開始する。
 9. GPIO42でVBUSがHighの場合だけTinyUSB CDCを開始して起動中の診断を可能にする。VBUSがLowの場合はTinyUSB taskとUSB PHYを開始せず、通常worker開始後のVBUS接続を監視する。共有FATが正常な場合も、OTA確認、必要な初回加速度較正および起動時ファイル処理が完了するまでは所有者をESP32側の`APP_OWNED`に維持し、MSCのLUNをhostへ公開しない。すべて成功した後だけMSC媒体を有効化し、USB attach中なら`HOST_OWNED`へ切り替える。安全な取り外し、detachまたはVBUS消失ではESP32側へ戻し、再接続時はCDCと許可済みMSCを再開する。USBまたはFAT失敗はfatalとせず、利用できない機能を診断へ示す。
 10. キュー、mutex、Event Groupを生成する。必須同期オブジェクトを生成できない場合はブザーを停止したfatal stateへ入り、電源OFF操作だけを受理する。
-11. I2C busを初期化する。bus初期化に失敗した場合は、`sensor_task`の起動時初期化処理で再生成を試み、BMP581の初期化成否を確定するまで`ACTIVE`へ遷移しない。
-12. `audio_task`、`system_task`、`sensor_task`、`console_task`、`ble_tx_task`の順に開始する。`system_task`はBMP581起動完了まで緑100 %を維持し、完了を最初に観測した周期をLED位相0 msとする。5 task生成後はperipheral成否を待たずOTA初回boot確認条件を満たしたと記録する。BMP581の起動時初期化に失敗した場合は`ACTIVE`へ遷移せず`FATAL`へ移り、ICM-42688P-HXYだけが未検出の場合は気圧単独のまま`ACTIVE`へ移る。
+11. I2C busは`app_main`またはcore0で事前初期化しない。次項で開始するcore1固定の`sensor_task`が共有busを初回生成し、`ACTIVE`中に再生成が必要になった場合も同taskから行う。初回bus生成またはBMP581初期化に失敗した場合は`ACTIVE`へ遷移せず`FATAL`へ移る。
+12. `audio_task`、`system_task`、`sensor_task`、`console_task`、`ble_tx_task`の順に開始し、board identityがGPS搭載を示す場合は続けて`gps_task`を開始する。`system_task`はBMP581起動完了まで緑100 %を維持し、完了を最初に観測した周期をLED位相0 msとする。有効なapplication worker（GPSなし5 task、GPSあり6 task）をすべて生成した後はperipheral成否を待たずOTA初回boot確認条件を満たしたと記録する。BMP581の起動時初期化に失敗した場合は`ACTIVE`へ遷移せず`FATAL`へ移り、ICM-42688P-HXYだけが未検出の場合は気圧単独のまま`ACTIVE`へ移る。
 13. NimBLEを初期化して広告を開始する。失敗時もセンサー、推定、音声と利用可能なconsoleを継続する。
 14. 有効な推定値が得られるまで通常のバリオ音を抑止する。BLEは有効な気圧または昇降率が得られた時点で送信可能とし、無効な側のフィールドには規定の無効値を使用する。
 
@@ -906,7 +927,7 @@ typedef struct {
 | 項目 | 確定値 | 実装条件 |
 | --- | --- | --- |
 | バッテリーADC換算 | バッテリー側1 MΩ、GND側330 kΩ、scale=`133/33`（約4.030303）、gain correction=1.0、offset=0 V | ADC校正後の端子電圧へscale、gain correction、offsetを適用する |
-| ICM-42688P-HXY通信・取得 | SDO Low、7 bit address=`0x18`、`WHO_AM_I` register=`0x01`、value=`0x6A`、I2C最大400 kHz、ODR=400 Hz、accel=±8 g、gyro=±2000 dps、INT1=GPIO14 | `0x19`を探索せず、HXY版レジスタだけを使用し、GPIO14 ISRはtask notificationだけを行う |
+| ICM-42688P-HXY通信・取得 | SDO Low、7 bit address=`0x18`、`WHO_AM_I` register=`0x01`、value=`0x6A`、I2C最大400 kHz、ODR=200 Hz、accel=±8 g、gyro=±2000 dps、INT1=GPIO14 | `0x19`を探索せず、HXY版レジスタだけを使用し、GPIO14 ISRは割り込み時刻を記録してtask notificationだけを行う |
 
 リフト・シンク周波数とPAM8904E増幅モードの正本は、単一の既定値テーブルと [vario_sound_spec.md](vario_sound_spec.md) とする。
 

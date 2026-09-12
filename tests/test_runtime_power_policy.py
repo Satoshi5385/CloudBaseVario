@@ -3,7 +3,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STARTUP = (ROOT / "SRC/app/startup.c").read_text(encoding="utf-8")
+TASKS = (ROOT / "SRC/app/app_tasks.c").read_text(encoding="utf-8")
 WORKERS = (ROOT / "SRC/app/app_workers.c").read_text(encoding="utf-8")
+BMP581 = (ROOT / "SRC/platform/bmp581.c").read_text(encoding="utf-8")
+IMU = (ROOT / "SRC/platform/icm42688_hxy.c").read_text(encoding="utf-8")
+SENSOR_BUS = (ROOT / "SRC/platform/sensor_bus.c").read_text(
+    encoding="utf-8"
+)
 AUDIO_OUTPUT = (ROOT / "SRC/platform/audio_output.c").read_text(
     encoding="utf-8"
 )
@@ -17,17 +24,37 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
 
 
 class RuntimePowerPolicyTests(unittest.TestCase):
-    def test_imu_processing_does_not_publish_at_400_hz(self):
-        imu = function_body(
+    def test_imu_interrupt_read_only_buffers_sample(self):
+        imu_read = function_body(
             WORKERS,
-            "static bool sensor_process_imu(",
-            "static bool sensor_process_bmp581(",
+            "static bool sensor_read_imu(",
+            "static bool sensor_process_buffered_imu_sample(",
         )
-        self.assertIn("state->publication_pending = true;", imu)
-        self.assertNotIn("app_resources_publish_vario", imu)
-        self.assertNotIn("app_resources_publish_imu_diagnostics", imu)
-        self.assertNotIn("app_resources_copy_config", imu)
-        self.assertTrue(imu.rstrip().endswith("return false;\n}"))
+        self.assertIn("icm42688_hxy_read_sample(", imu_read)
+        self.assertIn("imu_sample_buffer_push(", imu_read)
+        self.assertIn("state->publication_pending = true;", imu_read)
+        self.assertNotIn("imu_fusion_update", imu_read)
+        self.assertNotIn("vario_estimator_update_imu", imu_read)
+        self.assertNotIn("app_resources_copy_config", imu_read)
+        self.assertNotIn("app_power_sensor_work_begin", imu_read)
+
+    def test_bmp_read_drains_buffer_and_runs_estimators_without_imu_wait(self):
+        bmp = function_body(
+            WORKERS,
+            "static bool sensor_process_bmp581(",
+            "static bool sensor_check_stale(",
+        )
+        self.assertLess(
+            bmp.index("bmp581_read_sample("),
+            bmp.index("sensor_drain_imu_buffer("),
+        )
+        self.assertLess(
+            bmp.index("sensor_drain_imu_buffer("),
+            bmp.index("vario_estimator_update("),
+        )
+        self.assertNotIn("icm42688_hxy_read_sample", bmp)
+        self.assertNotIn("ulTaskNotifyTake", bmp)
+        self.assertNotIn("vTaskDelay", bmp)
 
     def test_sensor_publication_is_capped_at_100_hz(self):
         publisher = function_body(
@@ -41,7 +68,7 @@ class RuntimePowerPolicyTests(unittest.TestCase):
             "static bool system_sound_abort_requested(",
         )
         self.assertIn(
-            "#define SENSOR_PUBLICATION_PERIOD_US BMP581_SAMPLE_PERIOD_US",
+            "#define SENSOR_PUBLICATION_PERIOD_US INT64_C(10000)",
             WORKERS,
         )
         self.assertIn("app_resources_publish_vario", publisher)
@@ -69,7 +96,7 @@ class RuntimePowerPolicyTests(unittest.TestCase):
         self.assertIn("CONFIG_COMPILER_OPTIMIZATION_PERF=y", DEFAULTS)
         self.assertNotIn("CONFIG_COMPILER_OPTIMIZATION_DEBUG=y", DEFAULTS)
 
-    def test_sensor_cpu_lock_only_wraps_due_sample_processing(self):
+    def test_cpu_lock_wraps_computation_but_not_i2c(self):
         measurement = function_body(
             WORKERS,
             "static bool sensor_execute_measurement_work(",
@@ -80,20 +107,27 @@ class RuntimePowerPolicyTests(unittest.TestCase):
             "static bool sensor_execute_work(",
             "void app_sensor_worker_task(",
         )
-        calibration = function_body(
+        bmp = function_body(
             WORKERS,
-            "static bool sensor_process_factory_accel_calibration(",
-            "static bool sensor_process_imu(",
+            "static bool sensor_process_bmp581(",
+            "static bool sensor_check_stale(",
         )
 
-        self.assertIn("sensor_measurement_work_due(state, now_us)", measurement)
+        self.assertIn("sensor_read_imu(", measurement)
+        self.assertIn("sensor_process_bmp581(", measurement)
+        self.assertNotIn("app_power_sensor_work_begin", measurement)
+        self.assertNotIn("app_power_sensor_work_end", measurement)
         self.assertLess(
-            measurement.index("app_power_sensor_work_begin()"),
-            measurement.index("sensor_process_imu("),
+            bmp.index("bmp581_read_sample("),
+            bmp.index("app_power_sensor_work_begin()"),
         )
         self.assertLess(
-            measurement.index("sensor_process_bmp581("),
-            measurement.index("app_power_sensor_work_end()"),
+            bmp.index("app_power_sensor_work_begin()"),
+            bmp.index("sensor_drain_imu_buffer("),
+        )
+        self.assertLess(
+            bmp.index("vario_estimator_update("),
+            bmp.index("app_power_sensor_work_end()"),
         )
         for excluded in (
             "sensor_try_initialize_devices",
@@ -102,41 +136,124 @@ class RuntimePowerPolicyTests(unittest.TestCase):
             "sensor_check_stale",
             "sensor_recover_shared_bus",
         ):
-            self.assertNotIn(excluded, measurement)
             self.assertIn(excluded, maintenance)
         self.assertNotIn("app_power_sensor_work_begin", maintenance)
         self.assertNotIn("app_power_sensor_work_end", maintenance)
-        self.assertNotIn("sensor_try_save_accel_calibration", calibration)
 
-    def test_bmp_overrun_tracking_starts_with_first_read_attempt(self):
-        state_definition = function_body(
-            WORKERS,
-            "typedef struct {\n    vario_result_t result;",
-            "static const char *TAG",
-        )
+    def test_sensor_bus_uses_xtal_clock_source(self):
+        self.assertIn(".clk_source = I2C_CLK_SRC_XTAL", SENSOR_BUS)
+
+    def test_sensor_bus_is_created_by_core1_sensor_task(self):
         initialization = function_body(
             WORKERS,
             "static bool sensor_try_initialize_devices(",
             "static bool imu_configs_match(",
         )
-        bmp = function_body(
+        descriptor_start = TASKS.index("{APP_TASK_WORKER_SENSOR")
+        descriptor_end = TASKS.index("},", descriptor_start)
+        sensor_descriptor = TASKS[descriptor_start:descriptor_end]
+
+        self.assertNotIn("sensor_bus_init();", STARTUP)
+        self.assertIn("ret = sensor_bus_init();", initialization)
+        self.assertLess(
+            initialization.index("sensor_bus_init();"),
+            initialization.index("sensor_try_initialize_imu("),
+        )
+        self.assertIn(
+            "#define HIGH_RATE_TASK_CORE ((BaseType_t) 1)", TASKS
+        )
+        self.assertIn("HIGH_RATE_TASK_CORE", sensor_descriptor)
+
+    def test_scheduler_uses_only_data_ready_events_for_sensor_reads(self):
+        due = function_body(
             WORKERS,
-            "static bool sensor_process_bmp581(",
-            "static bool sensor_check_stale(",
+            "static bool sensor_measurement_work_due(",
+            "static void sensor_collect_data_ready_events(",
+        )
+        collect = function_body(
+            WORKERS,
+            "static void sensor_collect_data_ready_events(",
+            "static bool sensor_execute_measurement_work(",
+        )
+        self.assertIn("state->imu_interrupt_pending", due)
+        self.assertIn("state->bmp_interrupt_pending", due)
+        self.assertIn("icm42688_hxy_take_data_ready_event", collect)
+        self.assertIn("bmp581_take_data_ready_event", collect)
+        self.assertNotIn("next_bmp_deadline_us", WORKERS)
+        self.assertNotIn("BMP581_SAMPLE_PERIOD_US", WORKERS)
+
+    def test_initialization_cannot_immediately_trigger_stale_detection(self):
+        initialization = function_body(
+            WORKERS,
+            "static bool sensor_try_initialize_imu(",
+            "static void sensor_invalidate_estimate(",
+        ) + function_body(
+            WORKERS,
+            "static bool sensor_try_initialize_devices(",
+            "static bool imu_configs_match(",
+        )
+        work = function_body(
+            WORKERS,
+            "static bool sensor_execute_work(",
+            "void app_sensor_worker_task(",
         )
 
-        self.assertIn("bool bmp_period_tracking_started;", state_definition)
         self.assertIn(
-            "state->bmp_period_tracking_started = false;", initialization
+            "state->last_imu_valid_us = esp_timer_get_time();",
+            initialization,
         )
-        tracking_start = bmp.index("if (!state->bmp_period_tracking_started)")
-        overrun_calculation = bmp.index("periods_elapsed =", tracking_start)
-        first_read = bmp.index("bmp581_read_sample(&sample)")
-        self.assertLess(tracking_start, overrun_calculation)
-        self.assertLess(overrun_calculation, first_read)
         self.assertIn(
-            "state->next_bmp_deadline_us = now_us + BMP581_SAMPLE_PERIOD_US;",
-            bmp,
+            "state->last_bmp_valid_us = esp_timer_get_time();",
+            initialization,
         )
+        self.assertNotIn("state->last_imu_valid_us = now_us;", initialization)
+        self.assertNotIn("state->last_bmp_valid_us = now_us;", initialization)
+        self.assertLess(
+            work.index("sensor_try_initialize_devices("),
+            work.index("sensor_collect_data_ready_events("),
+        )
+        self.assertLess(
+            work.index("sensor_collect_data_ready_events("),
+            work.index("sensor_check_stale("),
+        )
+
+    def test_bmp_data_ready_read_uses_two_i2c_transactions(self):
+        read = BMP581[BMP581.index("esp_err_t bmp581_read_sample(") :]
+        self.assertEqual(2, read.count("bmp581_read_registers("))
+        self.assertIn("BMP581_REG_INT_STATUS", read)
+        self.assertIn("BMP581_REG_DATA_START", read)
+        self.assertIn("interrupt_timestamp_us", read)
+        self.assertIn("GPIO_INTR_POSEDGE", BMP581)
+        self.assertIn("PIN_INT_BMP", BMP581)
+        self.assertIn("vTaskNotifyGiveFromISR", BMP581)
+        self.assertIn("BMP581_INT_CONFIG_VALUE UINT8_C(0x3A)", BMP581)
+        self.assertIn("BMP581_INT_SOURCE_DATA_READY UINT8_C(0x01)", BMP581)
+
+    def test_imu_odr_is_200_hz_and_timestamp_comes_from_isr(self):
+        self.assertIn("ICM42688_HXY_SAMPLE_RATE_HZ == UINT32_C(200)", IMU)
+
+        initialization = function_body(
+            IMU,
+            "esp_err_t icm42688_hxy_init(",
+            "static int16_t decode_be_int16(",
+        )
+        self.assertLess(
+            initialization.index(
+                "ret = configure_data_ready_gpio(sensor_task);"
+            ),
+            initialization.index("ret = configure_sensor();"),
+        )
+        self.assertIn(
+            "ICM42688_HXY_ACC_CONF_200HZ_VALUE UINT8_C(0xA9)", IMU
+        )
+        self.assertIn(
+            "ICM42688_HXY_GYR_CONF_200HZ_VALUE UINT8_C(0xA9)", IMU
+        )
+        self.assertIn("latest_data_ready_timestamp_us = esp_timer_get_time()", IMU)
+        self.assertIn("sample->timestamp_us = interrupt_timestamp_us", IMU)
+        self.assertIn("GPIO_INTR_POSEDGE", IMU)
+        self.assertIn("vTaskNotifyGiveFromISR", IMU)
+
+
 if __name__ == "__main__":
     unittest.main()

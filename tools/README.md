@@ -57,7 +57,7 @@ GUI上部でCloudBaseVarioのTinyUSB CDC COMポートを選び、`Connect`を押
 
 - yawは磁気センサーによる絶対方位ではなく、6DoF姿勢推定開始時を基準とした相対角です。
 - `pressure_valid`、`estimate_valid`、`climb_valid`、`vertical_accel_valid`が偽の値は、数値カードとグラフで無効表示になります。
-- `Diagnostics`のKalman innovationは対応する`*_innovation_valid`が真のときだけ値を表示します。I²C error、overrun、missed IMU sample、stream dropは0以外を警告色で表示します。
+- `Diagnostics`のKalman innovationは対応する`*_innovation_valid`が真のときだけ値を表示します。I²C error、BMP581 Data Ready取りこぼし、missed IMU sample、IMU buffer overflow、stream dropは0以外を警告色で表示します。IMU buffer high watermarkでは、32サンプル固定長バッファの最大使用数を確認できます。
 - IMU加速度校正は`READY`、`CALIBRATING`、`SAVING`、`SKIPPED`、`SAVE ERROR`として区別します。`SKIPPED`は圧力のみモードであり、校正済みを意味しません。
 - BLE欄は実際のLK8EX1送信と同じ整形済み値です。LK8EX1の無効sentinel（気圧`999999`、高度`99999`、vario`9999`、温度`99`、battery`999`）は`--`として表示します。`ble_notify=0`では接続先へ実際のNotifyは行われていません。
 - GPS欄は搭載、L96識別、通信、fix、UTC、緯度・経度、高度、衛星数、HDOP、速度、進行方向と診断counterを表示します。緯度・経度は10進度、速度はkm/hです。測位値は対応するvalidが偽の場合`--`となり、GPSレコードが`max(3秒, 3 × interval_ms)`を超えて更新されない場合は`STALE`となります。

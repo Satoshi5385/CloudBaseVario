@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "driver/gpio.h"
+#include "esp_attr.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -14,6 +17,8 @@
 #define BMP581_RESET_SETTLE_MS UINT32_C(2)
 
 #define BMP581_REG_CHIP_ID UINT8_C(0x01)
+#define BMP581_REG_INT_CONFIG UINT8_C(0x14)
+#define BMP581_REG_INT_SOURCE UINT8_C(0x15)
 #define BMP581_REG_INT_STATUS UINT8_C(0x27)
 #define BMP581_REG_STATUS UINT8_C(0x28)
 #define BMP581_REG_DSP_CONFIG UINT8_C(0x30)
@@ -30,12 +35,16 @@
 #define BMP581_NVM_READY_MASK UINT8_C(0x02)
 #define BMP581_NVM_ERROR_MASK UINT8_C(0x0C)
 #define BMP581_ODR_VALID_MASK UINT8_C(0x80)
+#define BMP581_DATA_READY_MASK UINT8_C(0x01)
 
 #define BMP581_DSP_CONFIG_VALUE UINT8_C(0x03)
 #define BMP581_DSP_IIR_VALUE UINT8_C(0x00)
 #define BMP581_OSR_CONFIG_VALUE UINT8_C(0x58)
 #define BMP581_ODR_CONFIG_VALUE UINT8_C(0xA9)
 #define BMP581_ODR_STANDBY_VALUE UINT8_C(0xA8)
+#define BMP581_INT_CONFIG_VALUE UINT8_C(0x3A)
+#define BMP581_INT_SOURCE_DISABLED UINT8_C(0x00)
+#define BMP581_INT_SOURCE_DATA_READY UINT8_C(0x01)
 
 #define BMP581_TEMPERATURE_MIN_C_X100 INT32_C(-4000)
 #define BMP581_TEMPERATURE_MAX_C_X100 INT32_C(8500)
@@ -44,6 +53,101 @@
 
 static const char *TAG = "bmp581";
 static i2c_master_dev_handle_t bmp581_device = NULL;
+static bool bmp581_isr_registered = false;
+static portMUX_TYPE data_ready_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t latest_data_ready_timestamp_us = 0;
+static uint32_t pending_data_ready_count = 0U;
+
+static void IRAM_ATTR data_ready_isr(void *context) {
+    BaseType_t high_priority_task_woken = pdFALSE;
+    TaskHandle_t task = (TaskHandle_t) context;
+
+    portENTER_CRITICAL_ISR(&data_ready_lock);
+    latest_data_ready_timestamp_us = esp_timer_get_time();
+    if (pending_data_ready_count < UINT32_MAX) {
+        pending_data_ready_count++;
+    }
+    portEXIT_CRITICAL_ISR(&data_ready_lock);
+    if (task != NULL) {
+        vTaskNotifyGiveFromISR(task, &high_priority_task_woken);
+    }
+    if (high_priority_task_woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static esp_err_t configure_data_ready_gpio(TaskHandle_t sensor_task) {
+    gpio_config_t gpio_config_data_ready = {
+        .pin_bit_mask = UINT64_C(1) << PIN_INT_BMP,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_POSEDGE,
+    };
+    esp_err_t ret = ESP_OK;
+
+    if (sensor_task == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&data_ready_lock);
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
+    ret = gpio_config(&gpio_config_data_ready);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        return ret;
+    }
+    ret = gpio_isr_handler_add(PIN_INT_BMP, data_ready_isr, sensor_task);
+    if (ret == ESP_OK) {
+        bmp581_isr_registered = true;
+    }
+    return ret;
+}
+
+static esp_err_t disable_data_ready_gpio(void) {
+    esp_err_t first_error = gpio_intr_disable(PIN_INT_BMP);
+    esp_err_t ret = ESP_OK;
+
+    if (bmp581_isr_registered) {
+        ret = gpio_isr_handler_remove(PIN_INT_BMP);
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;
+        }
+        if (ret == ESP_OK) {
+            bmp581_isr_registered = false;
+        }
+    }
+    ret = gpio_reset_pin(PIN_INT_BMP);
+    if (ret != ESP_OK && first_error == ESP_OK) {
+        first_error = ret;
+    }
+    portENTER_CRITICAL(&data_ready_lock);
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
+    return first_error;
+}
+
+bool bmp581_take_data_ready_event(int64_t *timestamp_us,
+                                  uint32_t *interrupt_count) {
+    bool pending = false;
+
+    if (timestamp_us == NULL || interrupt_count == NULL) {
+        return false;
+    }
+    portENTER_CRITICAL(&data_ready_lock);
+    pending = pending_data_ready_count > 0U;
+    *timestamp_us = latest_data_ready_timestamp_us;
+    *interrupt_count = pending_data_ready_count;
+    latest_data_ready_timestamp_us = 0;
+    pending_data_ready_count = 0U;
+    portEXIT_CRITICAL(&data_ready_lock);
+    return pending;
+}
 
 static esp_err_t bmp581_read_registers(uint8_t register_address, uint8_t *data, size_t length) {
     if (bmp581_device == NULL || data == NULL || length == 0U) {
@@ -119,7 +223,8 @@ bool bmp581_decode_sample(const uint8_t data[6], int64_t timestamp_us, bmp581_sa
     return sample->valid;
 }
 
-esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle) {
+esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle,
+                      TaskHandle_t sensor_task) {
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BMP581_I2C_ADDRESS,
@@ -131,12 +236,13 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle) {
     uint8_t dsp_readback[2] = {0U};
     uint8_t measurement_readback[2] = {0U};
     uint8_t osr_effective = 0U;
+    uint8_t interrupt_readback[2] = {0U};
     esp_err_t ret = ESP_OK;
 
-    if (bus_handle == NULL) {
+    if (bus_handle == NULL || sensor_task == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (bmp581_device != NULL) {
+    if (bmp581_device != NULL || bmp581_isr_registered) {
         ret = bmp581_deinit();
         if (ret != ESP_OK) {
             return ret;
@@ -197,10 +303,40 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle) {
          (osr_effective & BMP581_ODR_VALID_MASK) == 0U)) {
         ret = ESP_ERR_INVALID_STATE;
     }
+    if (ret == ESP_OK) {
+        ret = bmp581_write_register(BMP581_REG_INT_SOURCE,
+                                    BMP581_INT_SOURCE_DISABLED);
+    }
+    if (ret == ESP_OK) {
+        ret = bmp581_read_registers(BMP581_REG_INT_STATUS,
+                                    &interrupt_status,
+                                    sizeof(interrupt_status));
+    }
+    if (ret == ESP_OK) {
+        ret = bmp581_write_register(BMP581_REG_INT_CONFIG,
+                                    BMP581_INT_CONFIG_VALUE);
+    }
+    if (ret == ESP_OK) {
+        ret = configure_data_ready_gpio(sensor_task);
+    }
+    if (ret == ESP_OK) {
+        ret = bmp581_write_register(BMP581_REG_INT_SOURCE,
+                                    BMP581_INT_SOURCE_DATA_READY);
+    }
+    if (ret == ESP_OK) {
+        ret = bmp581_read_registers(BMP581_REG_INT_CONFIG,
+                                    interrupt_readback,
+                                    sizeof(interrupt_readback));
+    }
+    if (ret == ESP_OK &&
+        (interrupt_readback[0] != BMP581_INT_CONFIG_VALUE ||
+         interrupt_readback[1] != BMP581_INT_SOURCE_DATA_READY)) {
+        ret = ESP_ERR_INVALID_STATE;
+    }
 
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "initialization failed: %s", esp_err_to_name(ret));
-        (void) bmp581_remove_device();
+        (void) bmp581_deinit();
         return ret;
     }
 
@@ -209,35 +345,55 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus_handle) {
 }
 
 esp_err_t bmp581_deinit(void) {
-    esp_err_t first_error = ESP_OK;
+    esp_err_t first_error = disable_data_ready_gpio();
     esp_err_t ret = ESP_OK;
 
     if (bmp581_device == NULL) {
-        return ESP_OK;
+        return first_error;
     }
 
-    first_error = bmp581_write_register(BMP581_REG_ODR_CONFIG, BMP581_ODR_STANDBY_VALUE);
+    ret = bmp581_write_register(BMP581_REG_INT_SOURCE,
+                                BMP581_INT_SOURCE_DISABLED);
+    if (ret != ESP_OK && first_error == ESP_OK) {
+        first_error = ret;
+    }
+    ret = bmp581_write_register(BMP581_REG_ODR_CONFIG,
+                                BMP581_ODR_STANDBY_VALUE);
+    if (ret != ESP_OK && first_error == ESP_OK) {
+        first_error = ret;
+    }
     ret = bmp581_remove_device();
-    if (first_error == ESP_OK) {
+    if (ret != ESP_OK && first_error == ESP_OK) {
         first_error = ret;
     }
     return first_error;
 }
 
-esp_err_t bmp581_read_sample(bmp581_sample_t *sample) {
+esp_err_t bmp581_read_sample(int64_t interrupt_timestamp_us,
+                             bmp581_sample_t *sample) {
     uint8_t data[6] = {0U};
+    uint8_t interrupt_status = 0U;
     esp_err_t ret = ESP_OK;
 
-    if (sample == NULL) {
+    if (sample == NULL || interrupt_timestamp_us <= 0) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(sample, 0, sizeof(*sample));
 
+    ret = bmp581_read_registers(BMP581_REG_INT_STATUS,
+                                &interrupt_status,
+                                sizeof(interrupt_status));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if ((interrupt_status & BMP581_DATA_READY_MASK) == 0U) {
+        return ESP_ERR_NOT_FINISHED;
+    }
     ret = bmp581_read_registers(BMP581_REG_DATA_START, data, sizeof(data));
     if (ret != ESP_OK) {
         return ret;
     }
 
-    (void) bmp581_decode_sample(data, esp_timer_get_time(), sample);
+    (void) bmp581_decode_sample(data, interrupt_timestamp_us, sample);
     return ESP_OK;
 }

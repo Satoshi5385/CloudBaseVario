@@ -14,7 +14,7 @@ static esp_err_t sensor_bus_create(void) {
         .i2c_port = BOARD_I2C_PORT,
         .sda_io_num = PIN_I2C_SDA,
         .scl_io_num = PIN_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .clk_source = I2C_CLK_SRC_XTAL,
         .glitch_ignore_cnt = SENSOR_BUS_GLITCH_IGNORE_COUNT,
         .flags.enable_internal_pullup = false,
     };

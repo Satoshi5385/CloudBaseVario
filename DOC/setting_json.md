@@ -220,7 +220,7 @@ PARAM SAVE
 
 | パラメータ | 型 | 既定値 | 設定範囲 | 詳細 |
 | --- | --- | ---: | --- | --- |
-| `imu_gyro_calibration_samples` | uint32 | 200 | 50～2000 samples | 起動後のジャイロ bias と初期姿勢を求める連続静止サンプル数です。公称 400 Hz では既定値 200 が約 0.5 秒に相当します。加速度 norm が 0.9～1.1 g 外、またはいずれかのジャイロ軸が ±3 dps を超えると蓄積をやり直します。 |
+| `imu_gyro_calibration_samples` | uint32 | 200 | 50～2000 samples | 起動後のジャイロ bias と初期姿勢を求める連続静止サンプル数です。公称 200 Hz では既定値 200 が約1秒に相当します。加速度 norm が 0.9～1.1 g 外、またはいずれかのジャイロ軸が ±3 dps を超えると蓄積をやり直します。 |
 Mahony 姿勢フィルタの gain はファームウェア固定で、Kpは5.0、Kiは0.05です。実効値は IMU confidence を掛けた値となり、`DIAG STATUS` の `confidence`、`kp_effective`、`ki_effective`、`ki_active`、または `BARO` 行の対応フィールドで確認できます。Kiは静止に近い状態が0.5秒継続した場合だけ有効です。
 
 ### 4.3 ボード固定の IMU 軸変換

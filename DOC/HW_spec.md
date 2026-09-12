@@ -98,7 +98,7 @@ ESP32-S3-WROOM-1-N16R8 を搭載したバリオメーターに適応する
 | `PIN_INT_ICM` | 14 | ICM-42688P-HXY INT1 Data Ready |
 | `PIN_INT_BMP` | 21 | BMP581 INT |
 
-ICM-42688P-HXYはSDO Low固定とし、7 bit I2Cアドレスを`0x18`に固定する。`0x19`は使用しない。CSBはI2C modeとなるHighを維持する。ソフトウェアはBMP581のdevice handleを1 MHz、ICM-42688P-HXYのdevice handleを400 kHz以下とし、HXY品の識別レジスタ`0x01`が`0x6A`であることを確認する。識別後はHXY版レジスタで400 Hz、加速度±8 g、ジャイロ±2000 dpsへ設定し、INT1 Data ReadyをGPIO14の立上り割り込みへ接続する。
+ICM-42688P-HXYはSDO Low固定とし、7 bit I2Cアドレスを`0x18`に固定する。`0x19`は使用しない。CSBはI2C modeとなるHighを維持する。ソフトウェアはBMP581のdevice handleを1 MHz、ICM-42688P-HXYのdevice handleを400 kHz以下とし、HXY品の識別レジスタ`0x01`が`0x6A`であることを確認する。識別後はHXY版レジスタで200 Hz、加速度±8 g、ジャイロ±2000 dpsへ設定し、INT1 Data ReadyをGPIO14の立上り割り込みへ接続する。BMP581のData ReadyはGPIO21の立上り割り込みへ接続する。
 
 ### 3.4 GPS
 

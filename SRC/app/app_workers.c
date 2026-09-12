@@ -21,6 +21,7 @@
 #include "domain/imu_calibration_controller.h"
 #include "domain/imu_fusion.h"
 #include "domain/imu_motion.h"
+#include "domain/imu_sample_buffer.h"
 #include "domain/system_policy.h"
 #include "domain/vario_audio.h"
 #include "domain/vario_estimator.h"
@@ -76,8 +77,7 @@
 #define USB_LIFECYCLE_DRAIN_RETRY_MS UINT32_C(50)
 #define USB_LIFECYCLE_ERROR_RETRY_MS UINT32_C(1000)
 
-#define BMP581_SAMPLE_PERIOD_US INT64_C(10000)
-#define SENSOR_PUBLICATION_PERIOD_US BMP581_SAMPLE_PERIOD_US
+#define SENSOR_PUBLICATION_PERIOD_US INT64_C(10000)
 #define SENSOR_STALE_TIMEOUT_US INT64_C(100000)
 #define IMU_STALE_TIMEOUT_US INT64_C(100000)
 #define SENSOR_IDLE_WAKE_US INT64_C(100000)
@@ -104,9 +104,12 @@ typedef struct {
     bool bmp_bus_failed;
     bool bus_timeout_detected;
     bool imu_ready;
+    bool bmp_interrupt_pending;
     bool imu_interrupt_pending;
-    bool bmp_period_tracking_started;
-    int64_t next_bmp_deadline_us;
+    int64_t bmp_interrupt_timestamp_us;
+    int64_t imu_interrupt_timestamp_us;
+    uint32_t bmp_interrupt_count;
+    uint32_t imu_interrupt_count;
     int64_t next_publication_us;
     int64_t next_bmp_retry_us;
     int64_t next_imu_retry_us;
@@ -130,6 +133,8 @@ static const char *TAG = "app_tasks";
 
 /* Application task handles are retained for diagnostics and future shutdown work. */
 static uint32_t serial_monitor_drop_count = 0U;
+static imu_sample_buffer_t sensor_imu_sample_buffer;
+static void sensor_sync_imu_buffer_diagnostics(sensor_task_state_t *state);
 static app_config_profiles_t system_profile_snapshot;
 static app_config_profiles_t console_profile_snapshot;
 static auto_power_off_state_t system_auto_power_off_state;
@@ -630,9 +635,11 @@ static bool sensor_try_initialize_imu(sensor_task_state_t *state,
     state->imu_diagnostics.last_error = (int32_t) ret;
     if (ret == ESP_OK) {
         state->imu_ready = true;
-        state->imu_interrupt_pending = true;
+        state->imu_interrupt_pending = false;
+        state->imu_interrupt_timestamp_us = 0;
+        state->imu_interrupt_count = 0U;
         state->imu_consecutive_errors = 0U;
-        state->last_imu_valid_us = now_us;
+        state->last_imu_valid_us = esp_timer_get_time();
         state->imu_diagnostics.online = true;
         state->imu_diagnostics.configured = true;
         state->imu_diagnostics.stale = false;
@@ -696,7 +703,12 @@ static void sensor_enter_storage_mode(sensor_task_state_t *state) {
     state->bmp_bus_failed = false;
     state->bus_timeout_detected = false;
     state->imu_ready = false;
+    state->bmp_interrupt_pending = false;
     state->imu_interrupt_pending = false;
+    state->bmp_interrupt_timestamp_us = 0;
+    state->imu_interrupt_timestamp_us = 0;
+    state->bmp_interrupt_count = 0U;
+    state->imu_interrupt_count = 0U;
     state->imu_config_valid = false;
     state->bmp_consecutive_errors = 0U;
     state->imu_consecutive_errors = 0U;
@@ -714,6 +726,8 @@ static void sensor_enter_storage_mode(sensor_task_state_t *state) {
     state->imu_diagnostics.fusion_active = false;
     state->imu_diagnostics.stale = false;
     state->imu_diagnostics.consecutive_error_count = 0U;
+    imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+    sensor_sync_imu_buffer_diagnostics(state);
     sensor_reset_imu_motion(state);
     set_bmp581_recovering(false);
     set_imu_lifecycle_state(false, false);
@@ -735,7 +749,14 @@ static void sensor_leave_storage_mode(sensor_task_state_t *state) {
     state->next_imu_retry_us = now_us;
     state->last_bmp_valid_us = now_us;
     state->last_imu_valid_us = now_us;
-    state->next_bmp_deadline_us = now_us;
+    state->bmp_interrupt_pending = false;
+    state->imu_interrupt_pending = false;
+    state->bmp_interrupt_timestamp_us = 0;
+    state->imu_interrupt_timestamp_us = 0;
+    state->bmp_interrupt_count = 0U;
+    state->imu_interrupt_count = 0U;
+    imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+    sensor_sync_imu_buffer_diagnostics(state);
     imu_fusion_reset(&state->imu_fusion);
     vario_estimator_reset(&state->estimator);
 }
@@ -762,6 +783,8 @@ static void sensor_invalidate_imu(sensor_task_state_t *state, bool stale) {
     }
     state->imu_ready = false;
     state->imu_interrupt_pending = false;
+    state->imu_interrupt_timestamp_us = 0;
+    state->imu_interrupt_count = 0U;
     state->imu_config_valid = false;
     state->imu_consecutive_errors = 0U;
     state->result.imu_online = false;
@@ -777,6 +800,8 @@ static void sensor_invalidate_imu(sensor_task_state_t *state, bool stale) {
     state->imu_diagnostics.fusion_active = false;
     state->imu_diagnostics.stale = stale;
     state->imu_diagnostics.consecutive_error_count = 0U;
+    imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+    sensor_sync_imu_buffer_diagnostics(state);
     sensor_reset_imu_motion(state);
     memset(state->imu_diagnostics.quaternion, 0,
            sizeof(state->imu_diagnostics.quaternion));
@@ -821,6 +846,9 @@ static bool sensor_recover_shared_bus(sensor_task_state_t *state, int64_t now_us
     ret = sensor_bus_recover();
 
     state->bmp_ready = false;
+    state->bmp_interrupt_pending = false;
+    state->bmp_interrupt_timestamp_us = 0;
+    state->bmp_interrupt_count = 0U;
     state->result.bmp581_online = false;
     sensor_invalidate_estimate(state, true);
     set_bmp581_recovering(true);
@@ -864,15 +892,22 @@ static bool sensor_try_initialize_devices(sensor_task_state_t *state, int64_t no
         return changed;
     }
 
+    if (!state->bus_timeout_detected) {
+        changed |= sensor_try_initialize_imu(state, bus_handle, now_us);
+    }
+
     if (!state->bmp_ready && now_us >= state->next_bmp_retry_us) {
-        ret = bmp581_init(bus_handle);
+        ret = bmp581_init(bus_handle, xTaskGetCurrentTaskHandle());
         if (ret == ESP_OK) {
             state->bmp_ready = true;
             state->bmp_consecutive_errors = 0U;
             state->bmp_bus_failed = false;
-            state->bmp_period_tracking_started = false;
-            state->last_bmp_valid_us = now_us;
-            state->next_bmp_deadline_us = now_us;
+            state->bmp_interrupt_pending = false;
+            state->bmp_interrupt_timestamp_us = 0;
+            state->bmp_interrupt_count = 0U;
+            state->last_bmp_valid_us = esp_timer_get_time();
+            imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+            sensor_sync_imu_buffer_diagnostics(state);
             set_bmp581_recovering(false);
         } else {
             sensor_record_bmp_error(state, ret, false);
@@ -880,10 +915,6 @@ static bool sensor_try_initialize_devices(sensor_task_state_t *state, int64_t no
             set_bmp581_recovering(true);
         }
         changed = true;
-    }
-
-    if (!state->bus_timeout_detected) {
-        changed |= sensor_try_initialize_imu(state, bus_handle, now_us);
     }
 
     return changed;
@@ -905,6 +936,8 @@ static void sensor_restart_imu_fusion(sensor_task_state_t *state,
     }
     state->imu_config = *config;
     state->imu_config_valid = true;
+    imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+    sensor_sync_imu_buffer_diagnostics(state);
     imu_fusion_reset(&state->imu_fusion);
     vario_estimator_disable_fusion(&state->estimator);
     state->result.imu_calibrated = false;
@@ -1051,7 +1084,11 @@ static bool sensor_handle_accel_calibration_skip(
     }
     state->imu_ready = false;
     state->imu_interrupt_pending = false;
+    state->imu_interrupt_timestamp_us = 0;
+    state->imu_interrupt_count = 0U;
     state->imu_config_valid = false;
+    imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+    sensor_sync_imu_buffer_diagnostics(state);
     imu_fusion_reset(&state->imu_fusion);
     vario_estimator_disable_fusion(&state->estimator);
 
@@ -1112,23 +1149,45 @@ static bool sensor_process_factory_accel_calibration(
     return true;
 }
 
-static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
+static void sensor_sync_imu_buffer_diagnostics(sensor_task_state_t *state) {
+    if (state == NULL) {
+        return;
+    }
+    state->imu_diagnostics.buffer_high_watermark = (uint32_t)
+        imu_sample_buffer_high_watermark(&sensor_imu_sample_buffer);
+    state->imu_diagnostics.buffer_overflow_count =
+        imu_sample_buffer_overflow_count(&sensor_imu_sample_buffer);
+}
+
+static bool sensor_read_imu(sensor_task_state_t *state, int64_t now_us) {
     icm42688_hxy_sample_t hxy_sample = {0};
     imu_sample_t sensor_sample = {0};
-    imu_sample_t board_sample = {0};
-    imu_fusion_output_t fusion_output = {0};
-    imu_motion_output_t motion_output = {0};
     uint32_t error_limit = SENSOR_CONSECUTIVE_ERROR_LIMIT;
-    const imu_accel_calibration_t *accel_calibration = NULL;
+    uint32_t interrupt_count = 0U;
+    int64_t interrupt_timestamp_us = 0;
     esp_err_t ret = ESP_OK;
 
     if (state == NULL || !state->imu_ready ||
         !state->imu_interrupt_pending) {
         return false;
     }
+    interrupt_count = state->imu_interrupt_count;
+    interrupt_timestamp_us = state->imu_interrupt_timestamp_us;
     state->imu_interrupt_pending = false;
-    ret = icm42688_hxy_read_sample(&hxy_sample);
+    state->imu_interrupt_count = 0U;
+    state->imu_interrupt_timestamp_us = 0;
+    if (interrupt_count > 1U) {
+        add_saturating_u32(&state->result.missed_imu_sample_count,
+                           interrupt_count - 1U);
+        add_saturating_u32(
+            &state->imu_diagnostics.missed_interrupt_count,
+            interrupt_count - 1U);
+    }
+    ret = icm42688_hxy_read_sample(interrupt_timestamp_us, &hxy_sample);
     if (ret == ESP_ERR_NOT_FINISHED) {
+        add_saturating_u32(&state->result.missed_imu_sample_count, 1U);
+        add_saturating_u32(
+            &state->imu_diagnostics.missed_interrupt_count, 1U);
         return false;
     }
     if (ret != ESP_OK) {
@@ -1164,11 +1223,31 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
            sizeof(sensor_sample.gyro_radps));
     sensor_sample.timestamp_us = hxy_sample.timestamp_us;
     sensor_sample.valid = hxy_sample.valid;
-    if (imu_motion_update(&state->imu_motion, sensor_sample.accel_mps2,
-                          sensor_sample.gyro_radps,
-                          sensor_sample.timestamp_us, &motion_output)) {
+    if (!imu_sample_buffer_push(&sensor_imu_sample_buffer,
+                                &sensor_sample)) {
+        add_saturating_u32(&state->result.missed_imu_sample_count, 1U);
+        add_saturating_u32(
+            &state->imu_diagnostics.missed_interrupt_count, 1U);
+    }
+    sensor_sync_imu_buffer_diagnostics(state);
+    return false;
+}
+
+static bool sensor_process_buffered_imu_sample(
+    sensor_task_state_t *state, const imu_sample_t *sensor_sample) {
+    imu_sample_t board_sample = {0};
+    imu_fusion_output_t fusion_output = {0};
+    imu_motion_output_t motion_output = {0};
+    const imu_accel_calibration_t *accel_calibration = NULL;
+
+    if (state == NULL || sensor_sample == NULL || !sensor_sample->valid) {
+        return false;
+    }
+    if (imu_motion_update(&state->imu_motion, sensor_sample->accel_mps2,
+                          sensor_sample->gyro_radps,
+                          sensor_sample->timestamp_us, &motion_output)) {
         state->imu_diagnostics.motion_timestamp_us =
-            sensor_sample.timestamp_us;
+            sensor_sample->timestamp_us;
         state->imu_diagnostics.motion_acceleration_rms_g =
             motion_output.acceleration_rms_g;
         state->imu_diagnostics.motion_gyro_rms_dps =
@@ -1192,11 +1271,11 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
             return false;
         }
         (void) sensor_process_factory_accel_calibration(
-            state, &sensor_sample, now_us);
+            state, sensor_sample, sensor_sample->timestamp_us);
         return false;
     }
     if (!imu_fusion_apply_calibration_and_axis_map(
-            &sensor_sample, board_imu_axis_map(),
+            sensor_sample, board_imu_axis_map(),
             accel_calibration,
             &board_sample) ||
         !imu_fusion_update(&state->imu_fusion, &board_sample,
@@ -1264,40 +1343,53 @@ static bool sensor_process_imu(sensor_task_state_t *state, int64_t now_us) {
     return false;
 }
 
+static bool sensor_drain_imu_buffer(sensor_task_state_t *state,
+                                    int64_t bmp_timestamp_us) {
+    imu_sample_t sensor_sample = {0};
+    bool processed = false;
+
+    if (state == NULL || bmp_timestamp_us <= 0) {
+        return false;
+    }
+    while (imu_sample_buffer_pop_through(&sensor_imu_sample_buffer,
+                                         bmp_timestamp_us,
+                                         &sensor_sample)) {
+        (void) sensor_process_buffered_imu_sample(state, &sensor_sample);
+        processed = true;
+    }
+    sensor_sync_imu_buffer_diagnostics(state);
+    return processed;
+}
+
 static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
     bmp581_sample_t sample = {0};
     app_config_t config = {0};
     vario_estimate_t estimate = {0};
-    int64_t periods_elapsed = 0;
+    uint32_t interrupt_count = 0U;
+    int64_t interrupt_timestamp_us = 0;
     uint32_t error_limit = SENSOR_CONSECUTIVE_ERROR_LIMIT;
+    esp_err_t power_ret = ESP_OK;
     esp_err_t ret = ESP_OK;
 
-    if (state == NULL || !state->bmp_ready || now_us < state->next_bmp_deadline_us) {
+    if (state == NULL || !state->bmp_ready ||
+        !state->bmp_interrupt_pending) {
         return false;
     }
-
-    if (!state->bmp_period_tracking_started) {
-        state->bmp_period_tracking_started = true;
-        state->next_bmp_deadline_us = now_us + BMP581_SAMPLE_PERIOD_US;
-    } else {
-        periods_elapsed =
-            (now_us - state->next_bmp_deadline_us) /
-            BMP581_SAMPLE_PERIOD_US;
-        if (periods_elapsed > 0) {
-            uint32_t overrun_increment = UINT32_MAX;
-
-            if (periods_elapsed <= (int64_t) UINT32_MAX) {
-                overrun_increment = (uint32_t) periods_elapsed;
-            }
-            add_saturating_u32(
-                &state->result.bmp_period_overrun_count,
-                overrun_increment);
-        }
-        state->next_bmp_deadline_us +=
-            (periods_elapsed + 1) * BMP581_SAMPLE_PERIOD_US;
+    interrupt_count = state->bmp_interrupt_count;
+    interrupt_timestamp_us = state->bmp_interrupt_timestamp_us;
+    state->bmp_interrupt_pending = false;
+    state->bmp_interrupt_count = 0U;
+    state->bmp_interrupt_timestamp_us = 0;
+    if (interrupt_count > 1U) {
+        add_saturating_u32(&state->result.bmp_period_overrun_count,
+                           interrupt_count - 1U);
     }
 
-    ret = bmp581_read_sample(&sample);
+    ret = bmp581_read_sample(interrupt_timestamp_us, &sample);
+    if (ret == ESP_ERR_NOT_FINISHED) {
+        add_saturating_u32(&state->result.bmp_period_overrun_count, 1U);
+        return false;
+    }
     if (ret != ESP_OK) {
         sensor_record_bmp_error(state, ret, true);
         if (state->bmp_consecutive_errors >= error_limit) {
@@ -1305,7 +1397,12 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
                      state->bmp_consecutive_errors);
             (void) bmp581_deinit();
             state->bmp_ready = false;
+            state->bmp_interrupt_pending = false;
+            state->bmp_interrupt_timestamp_us = 0;
+            state->bmp_interrupt_count = 0U;
             state->result.bmp581_online = false;
+            imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+            sensor_sync_imu_buffer_diagnostics(state);
             sensor_invalidate_estimate(state, true);
             state->next_bmp_retry_us = now_us + SENSOR_RETRY_INTERVAL_US;
             set_bmp581_recovering(true);
@@ -1325,9 +1422,18 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
         state->result.pressure_pa_x100 = sample.pressure_pa_x100;
         state->result.pressure_valid = true;
         state->result.bmp581_online = true;
+        state->publication_pending = true;
         if (!app_resources_copy_config(&config)) {
             app_config_set_defaults(&config);
         }
+        power_ret = app_power_sensor_work_begin();
+        if (power_ret != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "sensor computation CPU-frequency lock unavailable: %s",
+                     esp_err_to_name(power_ret));
+            block_safe_stop_light_sleep();
+        }
+        (void) sensor_drain_imu_buffer(state, sample.timestamp_us);
         if (!state->estimator_reference_valid ||
             fabsf(config.sea_level_pressure_pa -
                   state->estimator_reference_pressure_pa) > 0.01f) {
@@ -1360,6 +1466,15 @@ static bool sensor_process_bmp581(sensor_task_state_t *state, int64_t now_us) {
         }
         state->imu_diagnostics.fusion_active =
             state->result.imu_fusion_active;
+        if (power_ret == ESP_OK) {
+            power_ret = app_power_sensor_work_end();
+            if (power_ret != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "sensor computation CPU-frequency lock release failed: %s",
+                         esp_err_to_name(power_ret));
+                block_safe_stop_light_sleep();
+            }
+        }
     }
     return true;
 }
@@ -1375,7 +1490,12 @@ static bool sensor_check_stale(sensor_task_state_t *state, int64_t now_us) {
         ESP_LOGW(TAG, "BMP581 stale; scheduling device reinitialization");
         (void) bmp581_deinit();
         state->bmp_ready = false;
+        state->bmp_interrupt_pending = false;
+        state->bmp_interrupt_timestamp_us = 0;
+        state->bmp_interrupt_count = 0U;
         state->result.bmp581_online = false;
+        imu_sample_buffer_clear(&sensor_imu_sample_buffer);
+        sensor_sync_imu_buffer_diagnostics(state);
         sensor_invalidate_estimate(state, true);
         state->next_bmp_retry_us = now_us + SENSOR_RETRY_INTERVAL_US;
         set_bmp581_recovering(true);
@@ -1450,9 +1570,7 @@ static TickType_t sensor_wait_ticks(const sensor_task_state_t *state, int64_t no
         return pdMS_TO_TICKS(SENSOR_MINIMUM_WAIT_MS);
     }
 
-    if (state->bmp_ready && state->next_bmp_deadline_us < wake_time_us) {
-        wake_time_us = state->next_bmp_deadline_us;
-    } else if (!state->bmp_ready && state->next_bmp_retry_us < wake_time_us) {
+    if (!state->bmp_ready && state->next_bmp_retry_us < wake_time_us) {
         wake_time_us = state->next_bmp_retry_us;
     }
     if (state->bmp_ready && state->last_bmp_valid_us + SENSOR_STALE_TIMEOUT_US < wake_time_us) {
@@ -1488,37 +1606,49 @@ static TickType_t sensor_wait_ticks(const sensor_task_state_t *state, int64_t no
 
 static bool sensor_measurement_work_due(const sensor_task_state_t *state,
                                         int64_t now_us) {
+    (void) now_us;
     if (state == NULL) {
         return false;
     }
     return (state->imu_ready && state->imu_interrupt_pending) ||
-           (state->bmp_ready && now_us >= state->next_bmp_deadline_us);
+           (state->bmp_ready && state->bmp_interrupt_pending);
+}
+
+static void sensor_collect_data_ready_events(sensor_task_state_t *state) {
+    int64_t timestamp_us = 0;
+    uint32_t interrupt_count = 0U;
+
+    if (state == NULL) {
+        return;
+    }
+    if (icm42688_hxy_take_data_ready_event(&timestamp_us,
+                                            &interrupt_count) &&
+        state->imu_ready) {
+        state->imu_interrupt_pending = true;
+        state->imu_interrupt_timestamp_us = timestamp_us;
+        add_saturating_u32(&state->imu_interrupt_count,
+                           interrupt_count);
+    }
+    timestamp_us = 0;
+    interrupt_count = 0U;
+    if (bmp581_take_data_ready_event(&timestamp_us, &interrupt_count) &&
+        state->bmp_ready) {
+        state->bmp_interrupt_pending = true;
+        state->bmp_interrupt_timestamp_us = timestamp_us;
+        add_saturating_u32(&state->bmp_interrupt_count,
+                           interrupt_count);
+    }
 }
 
 static bool sensor_execute_measurement_work(sensor_task_state_t *state,
                                             int64_t now_us) {
-    esp_err_t power_ret;
     bool changed = false;
 
     if (!sensor_measurement_work_due(state, now_us)) {
         return false;
     }
-    power_ret = app_power_sensor_work_begin();
-    if (power_ret != ESP_OK) {
-        ESP_LOGW(TAG, "sensor CPU-frequency lock unavailable: %s", esp_err_to_name(power_ret));
-        block_safe_stop_light_sleep();
-    }
-
-    changed |= sensor_process_imu(state, esp_timer_get_time());
+    changed |= sensor_read_imu(state, esp_timer_get_time());
     changed |= sensor_process_bmp581(state, esp_timer_get_time());
-    if (power_ret == ESP_OK) {
-        power_ret = app_power_sensor_work_end();
-        if (power_ret != ESP_OK) {
-            ESP_LOGW(TAG, "sensor CPU-frequency lock release failed: %s",
-                     esp_err_to_name(power_ret));
-            block_safe_stop_light_sleep();
-        }
-    }
     return changed;
 }
 
@@ -1527,6 +1657,7 @@ static bool sensor_execute_work(sensor_task_state_t *state, int64_t now_us) {
 
     changed |= sensor_handle_accel_calibration_skip(state);
     changed |= sensor_try_initialize_devices(state, now_us);
+    sensor_collect_data_ready_events(state);
     if (state->imu_ready &&
         (!state->imu_config_valid ||
          now_us >= state->next_publication_us)) {
@@ -1580,7 +1711,9 @@ void app_sensor_worker_task(void *context) {
         (int32_t) initial_imu_accel_calibration_diagnostics.result;
     state.imu_diagnostics.accel_calibration_storage_error =
         initial_imu_accel_calibration_diagnostics.io_error;
+    imu_sample_buffer_reset(&sensor_imu_sample_buffer);
     sensor_sync_accel_calibration_diagnostics(&state);
+    sensor_sync_imu_buffer_diagnostics(&state);
     imu_fusion_reset(&state.imu_fusion);
     imu_motion_reset(&state.imu_motion);
     state.publication_pending = true;
@@ -1607,7 +1740,6 @@ void app_sensor_worker_task(void *context) {
     for (;;) {
         bool work_changed;
         int64_t now_us = 0;
-        uint32_t notification_count = 0U;
 
         if (app_stop_requested()) {
             sensor_shutdown_devices();
@@ -1645,20 +1777,9 @@ void app_sensor_worker_task(void *context) {
         }
 
         now_us = esp_timer_get_time();
-        notification_count =
-            ulTaskNotifyTake(pdTRUE, sensor_wait_ticks(&state, now_us));
-        if (notification_count > 0U) {
-            state.imu_interrupt_pending = true;
-            if (notification_count > 1U) {
-                uint32_t missed_count = notification_count - 1U;
-
-                add_saturating_u32(
-                    &state.result.missed_imu_sample_count, missed_count);
-                add_saturating_u32(
-                    &state.imu_diagnostics.missed_interrupt_count,
-                    missed_count);
-            }
-        }
+        (void) ulTaskNotifyTake(pdTRUE,
+                                sensor_wait_ticks(&state, now_us));
+        sensor_collect_data_ready_events(&state);
         now_us = esp_timer_get_time();
 
         work_changed = sensor_execute_work(&state, now_us);
@@ -2691,6 +2812,8 @@ static bool console_write_monitor_line(void) {
         " kalman_baro_r_m2=%.5f kalman_accel_r_m2_s4=%.5f"
         " imu_samples=%" PRIu32
         " imu_missed=%" PRIu32
+        " imu_buffer_high_watermark=%" PRIu32
+        " imu_buffer_overflows=%" PRIu32
         " imu_confidence=%.3f imu_vibration_rms_g=%.4f"
         " imu_motion_valid=%d imu_motion_accel_rms_g=%.4f"
         " imu_motion_gyro_rms_dps=%.3f"
@@ -2735,6 +2858,7 @@ static bool console_write_monitor_line(void) {
         (double) vario.kalman_baro_r_m2,
         (double) vario.kalman_accel_r_m2_s4,
         imu.sample_count, vario.missed_imu_sample_count,
+        imu.buffer_high_watermark, imu.buffer_overflow_count,
         (double) imu.confidence, (double) imu.vibration_rms_g,
         imu.motion_valid, (double) imu.motion_acceleration_rms_g,
         (double) imu.motion_gyro_rms_dps,
@@ -2952,7 +3076,9 @@ static void console_diag_status(void) {
         "address=0x%02x who_am_i=0x%02x status=0x%02x "
         "retries=%" PRIu32 " samples=%" PRIu32 " calibration=%" PRIu32
         " accel_calibration=%" PRIu32
-        " missed=%" PRIu32 " errors=%" PRIu32 " accel_norm_g=%.3f "
+        " missed=%" PRIu32 " buffer_high_watermark=%" PRIu32
+        " buffer_overflows=%" PRIu32
+        " errors=%" PRIu32 " accel_norm_g=%.3f "
         "accel_offset_mps2=%.5f,%.5f,%.5f "
         "gyro_bias_radps=%.5f,%.5f,%.5f "
         "confidence=%.3f vibration_rms_g=%.4f "
@@ -2972,6 +3098,8 @@ static void console_diag_status(void) {
         imu.calibration_sample_count,
         imu.accel_calibration_sample_count,
         imu.missed_interrupt_count,
+        imu.buffer_high_watermark,
+        imu.buffer_overflow_count,
         imu.consecutive_error_count, (double) imu.accel_norm_g,
         (double) imu.accel_offset_mps2[0],
         (double) imu.accel_offset_mps2[1],

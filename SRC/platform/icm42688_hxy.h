@@ -11,7 +11,7 @@
 #define ICM42688_HXY_I2C_ADDRESS UINT16_C(0x18)
 #define ICM42688_HXY_WHO_AM_I_REGISTER UINT8_C(0x01)
 #define ICM42688_HXY_WHO_AM_I_VALUE UINT8_C(0x6A)
-#define ICM42688_HXY_SAMPLE_RATE_HZ UINT32_C(400)
+#define ICM42688_HXY_SAMPLE_RATE_HZ UINT32_C(200)
 #define ICM42688_HXY_ACCEL_RANGE_G 8.0f
 #define ICM42688_HXY_GYRO_RANGE_DPS 2000.0f
 
@@ -33,7 +33,7 @@ typedef struct {
 /**
  * @brief Detect and configure the C46550687 HXY IMU for fused-vario use.
  *
- * The device is configured at 400 Hz, +/-8 g, and +/-2000 dps. GPIO14 is
+ * The device is configured at 200 Hz, +/-8 g, and +/-2000 dps. GPIO14 is
  * routed from the HXY gyro Data Ready signal and only notifies sensor_task;
  * I2C is never accessed from the ISR.
  *
@@ -51,7 +51,12 @@ esp_err_t icm42688_hxy_init(i2c_master_bus_handle_t bus_handle,
  * @param[out] sample Raw and physical HXY sample in sensor coordinates.
  * @return ESP_OK for a complete Data Ready frame.
  */
-esp_err_t icm42688_hxy_read_sample(icm42688_hxy_sample_t *sample);
+esp_err_t icm42688_hxy_read_sample(int64_t interrupt_timestamp_us,
+                                   icm42688_hxy_sample_t *sample);
+
+/** Atomically consume pending Data Ready edges and their latest ISR time. */
+bool icm42688_hxy_take_data_ready_event(int64_t *timestamp_us,
+                                        uint32_t *interrupt_count);
 
 /**
  * @brief Disable GPIO14 notification, power down, and remove the I2C handle.
