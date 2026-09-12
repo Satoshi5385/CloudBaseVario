@@ -23,18 +23,28 @@ class UsbMscEjectDurabilityTests(unittest.TestCase):
         self.assertIn("CONFIG_TINYUSB_MSC_BUFSIZE=4096", SDKCONFIG_DEFAULTS)
         self.assertNotIn("CONFIG_TINYUSB_MSC_BUFSIZE=8192", SDKCONFIG_DEFAULTS)
 
-    def test_write_runs_on_worker_and_queues_ownership_transition(self) -> None:
+    def test_write_runs_on_worker_and_drains_in_usb_task(self) -> None:
         write = function_body(
             MSC,
             "static void msc_storage_process_write(",
             "static void msc_storage_write_worker_task",
         )
-        self.assertIn("storage->deffered_writes--;", write)
-        self.assertIn("tud_msc_async_io_done", write)
-        self.assertIn("usbd_defer_func(tusb_apply_requested_mount", write)
+        self.assertIn("usbd_defer_func(msc_storage_complete_write", write)
+        self.assertNotIn("storage->deffered_writes--;", write)
+        complete = function_body(
+            MSC,
+            "static void msc_storage_complete_write(",
+            "static void msc_storage_process_write(",
+        )
+        self.assertIn("msc_device_complete_write", complete)
+        self.assertNotIn("usbd_defer_func", complete)
         self.assertLess(
-            write.index("tud_msc_async_io_done"),
-            write.index("usbd_defer_func(tusb_apply_requested_mount"),
+            complete.index("msc_device_complete_write"),
+            complete.index("storage->deffered_writes--;"),
+        )
+        self.assertLess(
+            complete.index("storage->deffered_writes--;"),
+            complete.index("tusb_apply_requested_mount(storage)"),
         )
 
         worker = function_body(

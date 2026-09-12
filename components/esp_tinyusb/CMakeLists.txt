@@ -91,3 +91,31 @@ endif()
 # Pass tusb_config.h from this component to TinyUSB
 idf_component_get_property(tusb_lib ${tinyusb_name} COMPONENT_LIB)
 target_include_directories(${tusb_lib} PRIVATE "include")
+
+if(CONFIG_TINYUSB_MSC_ENABLED)
+    # Replace only the MSC translation unit. The bridge includes the original
+    # pinned source, so component-manager downloads are never edited in place.
+    get_target_property(tinyusb_sources ${tusb_lib} SOURCES)
+    get_target_property(tinyusb_source_dir ${tusb_lib} SOURCE_DIR)
+    set(tinyusb_msc_source "")
+    foreach(source IN LISTS tinyusb_sources)
+        if(source MATCHES "(^|/)msc_device\\.c$")
+            if(tinyusb_msc_source)
+                message(FATAL_ERROR "Multiple TinyUSB MSC drivers found")
+            endif()
+            get_filename_component(tinyusb_msc_source "${source}" ABSOLUTE
+                                   BASE_DIR "${tinyusb_source_dir}")
+            list(REMOVE_ITEM tinyusb_sources "${source}")
+        endif()
+    endforeach()
+    if(NOT EXISTS "${tinyusb_msc_source}")
+        message(FATAL_ERROR "Pinned TinyUSB MSC driver not found for reset bridge")
+    endif()
+    configure_file(msc_device_bridge.c.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/msc_device_bridge.c" @ONLY)
+    set_property(TARGET ${tusb_lib} PROPERTY SOURCES "${tinyusb_sources}")
+    target_sources(${tusb_lib} PRIVATE
+                   "${CMAKE_CURRENT_BINARY_DIR}/msc_device_bridge.c")
+    target_include_directories(${tusb_lib} PRIVATE
+                               "${CMAKE_CURRENT_SOURCE_DIR}/include_private")
+endif()

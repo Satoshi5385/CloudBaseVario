@@ -23,6 +23,7 @@
 #include "storage_spiflash.h"
 #include "storage_psram.h"
 #include "msc_storage.h"
+#include "msc_device_bridge.h"
 #include "tinyusb_msc.h"
 
 #if (SOC_SDMMC_HOST_SUPPORTED)
@@ -80,7 +81,11 @@ typedef struct {
     } fat_fs;
     // Buffer for storage operations
     msc_storage_buffer_t storage_buffer;        /*!< Buffer for storing data during write operations. */
-    uint32_t deffered_writes;                   /*!< Number of deferred writes pending in the buffer. */
+    uint32_t deffered_writes;                   /*!< Reserved writes, including USB completion callbacks. */
+    bool completion_callback_active;            /*!< Retains storage until the USB callback returns. */
+    bool write_worker_ready;                   /*!< Published only after the reserved buffer is filled. */
+    uint64_t write_token;                       /*!< TinyUSB request identity; invalidated by reset. */
+    esp_err_t write_result;                     /*!< Immutable until the USB completion callback drains. */
     tinyusb_msc_mount_point_t requested_mount_point; /*!< Latest ownership requested by attach/eject/detach. */
     bool mount_transition_pending;              /*!< Apply requested ownership after accepted writes drain. */
     bool host_io_enabled;                       /*!< Host read/write gate used during shutdown. */
@@ -360,10 +365,61 @@ static inline esp_err_t msc_storage_write_sector(uint8_t lun, uint32_t lba, uint
     return ret;
 }
 
+/* Runs only in the TinyUSB task, serialized with bus/BOT reset handling. */
+static void msc_storage_complete_write(void *param)
+{
+    msc_storage_obj_t *storage = (msc_storage_obj_t *)param;
+    tusb_msc_write_callback_t write_cb = NULL;
+    void *write_arg = NULL;
+    tinyusb_msc_write_event_t event = {
+        .id = TINYUSB_MSC_WRITE_EVENT_COMPLETE,
+        .lun = storage->storage_buffer.lun,
+        .lba = storage->storage_buffer.lba,
+        .offset = storage->storage_buffer.offset,
+        .size = storage->storage_buffer.bufsize,
+    };
+    esp_err_t result;
+    uint64_t token;
+
+    MSC_ENTER_CRITICAL();
+    storage->completion_callback_active = true;
+    result = storage->write_result;
+    token = storage->write_token;
+    MSC_EXIT_CRITICAL();
+    /* Complete inline: a second queued callback would reopen the reset race. */
+    bool completed = msc_device_complete_write(token, event.lun,
+        result == ESP_OK ? (int32_t)event.size : TUD_MSC_RET_ERROR);
+    if (!completed) {
+        ESP_LOGW(TAG, "WRITE(10) completion discarded after USB reset");
+    }
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Write failed, error=0x%x", result);
+    }
+
+    MSC_ENTER_CRITICAL();
+    assert(storage->deffered_writes == 1U);
+    storage->deffered_writes--;
+    event.pending_count = storage->deffered_writes;
+    event.result = result;
+    if (p_msc_driver != NULL) {
+        write_cb = p_msc_driver->dynamic.write_cb;
+        write_arg = p_msc_driver->dynamic.write_arg;
+    }
+    MSC_EXIT_CRITICAL();
+    if (write_cb != NULL) {
+        write_cb((tinyusb_msc_storage_handle_t)storage, &event, write_arg);
+    }
+    /* Apply directly after completion; never leave another raw-pointer event. */
+    tusb_apply_requested_mount(storage);
+    MSC_ENTER_CRITICAL();
+    storage->completion_callback_active = false;
+    MSC_EXIT_CRITICAL();
+}
+
 /**
  * @brief Handles deferred USB MSC write operations.
  *
- * This function is invoked via TinyUSB's deferred execution mechanism to perform
+ * This function is invoked by the dedicated storage worker to perform
  * write operations to the underlying storage. It writes data from the
  * `storage_buffer` stored within the `s_storage_handle`.
  *
@@ -372,7 +428,6 @@ static inline esp_err_t msc_storage_write_sector(uint8_t lun, uint32_t lba, uint
 static void msc_storage_process_write(msc_storage_obj_t *storage)
 {
     assert(storage); // Ensure storage is not NULL
-    const uint32_t completed_size = storage->storage_buffer.bufsize;
     tusb_msc_write_callback_t write_cb = NULL;
     void *write_arg = NULL;
     tinyusb_msc_write_event_t write_event = {
@@ -404,52 +459,11 @@ static void msc_storage_process_write(msc_storage_obj_t *storage)
                         (const void *)storage->storage_buffer.data_buffer
                     );
 
-    // Decrement the deferred writes counter
     MSC_ENTER_CRITICAL();
-    assert(storage->deffered_writes > 0); // Ensure there are deferred writes pending
-    storage->deffered_writes--;
-    write_event.pending_count = storage->deffered_writes;
-    bool apply_requested_mount = storage->mount_transition_pending &&
-                                 storage->deffered_writes == 0U;
+    storage->write_result = err;
     MSC_EXIT_CRITICAL();
-
-    write_event.id = TINYUSB_MSC_WRITE_EVENT_COMPLETE;
-    write_event.result = err;
-    if (write_cb != NULL) {
-        write_cb((tinyusb_msc_storage_handle_t)storage, &write_event,
-                 write_arg);
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Write failed, error=0x%x", err);
-    }
-
-    /*
-     * Keep the WRITE(10) command pending until the flash operation has really
-     * completed. Returning success from tud_msc_write10_cb() before this point
-     * lets the host eject or disconnect while Wear Levelling still owns the
-     * only write buffer, which can leave the final sectors erased or stale.
-     */
-    bool completion_queued = tud_msc_async_io_done(
-                                 err == ESP_OK ? (int32_t)completed_size
-                                               : TUD_MSC_RET_ERROR,
-                                 false);
-    if (!completion_queued) {
-        /*
-         * A physical USB disconnect can reset TinyUSB's pending command while
-         * the flash write is in progress. The write is already complete here;
-         * there is no host command left to acknowledge, so do not panic.
-         */
-        ESP_LOGW(TAG, "WRITE(10) completion discarded after USB reset");
-    }
-    if (apply_requested_mount) {
-        /*
-         * Queue the ownership transition after TinyUSB processes the async
-         * WRITE completion. On reset the command may already be gone, but
-         * the flash write above is complete before this transition.
-         */
-        usbd_defer_func(tusb_apply_requested_mount, (void *)storage, false);
-    }
+    /* The reservation also owns this queued callback and prevents deletion. */
+    usbd_defer_func(msc_storage_complete_write, storage, false);
 }
 
 /**
@@ -465,14 +479,15 @@ static void msc_storage_write_worker_task(void *param)
         (void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         for (;;) {
             bool stop_requested;
-            uint32_t pending_writes;
+            bool write_ready;
 
             MSC_ENTER_CRITICAL();
             stop_requested = storage->write_worker_stop_requested;
-            pending_writes = storage->deffered_writes;
+            write_ready = storage->write_worker_ready;
+            storage->write_worker_ready = false;
             MSC_EXIT_CRITICAL();
 
-            if (pending_writes != 0U) {
+            if (write_ready) {
                 msc_storage_process_write(storage);
                 continue;
             }
@@ -513,7 +528,7 @@ static void msc_storage_stop_write_worker(msc_storage_obj_t *storage)
  * @brief Write a sector to the storage medium using deferred execution.
  *
  * This function copies the data to be written into an internal buffer and
- * defers the actual write operation to be executed in the TinyUSB task context.
+ * publishes the actual write operation to the dedicated storage worker.
  *
  * @param[in] lun The logical unit number (LUN) to write to.
  * @param[in] lba Logical Block Address of the sector to write to.
@@ -551,16 +566,14 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
                         ESP_ERR_INVALID_SIZE, TAG,
                         "WRITE(10) exceeds internal transfer buffer");
 
-    // Copy data to the buffer
-    memcpy((void *)storage->storage_buffer.data_buffer, src, size);
-    storage->storage_buffer.lun = lun;
-    storage->storage_buffer.lba = lba;
-    storage->storage_buffer.offset = offset;
-    storage->storage_buffer.bufsize = size;
-
-    // Increment the deferred writes counter
+    /* Reserve before touching either the payload or its address metadata.
+     * Count the reservation immediately so stop/mount cannot pass the drain
+     * barrier while memcpy is running. Do not wake the worker until published.
+     */
     MSC_ENTER_CRITICAL();
-    if (!storage->host_io_enabled || storage->deffered_writes != 0U ||
+    if (!storage->host_io_enabled ||
+        storage->mount_point != TINYUSB_MSC_STORAGE_MOUNT_USB ||
+        storage->deffered_writes != 0U ||
         storage->write_worker_stop_requested ||
         storage->write_worker_handle == NULL) {
         MSC_EXIT_CRITICAL();
@@ -568,6 +581,18 @@ static inline esp_err_t msc_storage_write_sector_deferred(uint8_t lun, uint32_t 
     }
     storage->deffered_writes++;
     worker_handle = storage->write_worker_handle;
+    MSC_EXIT_CRITICAL();
+
+    memcpy(storage->storage_buffer.data_buffer, src, size);
+    storage->storage_buffer.lun = lun;
+    storage->storage_buffer.lba = lba;
+    storage->storage_buffer.offset = offset;
+    storage->storage_buffer.bufsize = size;
+    uint64_t token = msc_device_begin_write();
+
+    MSC_ENTER_CRITICAL();
+    storage->write_token = token;
+    storage->write_worker_ready = true;
     MSC_EXIT_CRITICAL();
 
     // Wake the dedicated worker; never block the TinyUSB event task on flash.
@@ -876,7 +901,7 @@ static esp_err_t msc_storage_sync_lun(uint8_t lun)
     }
 
     /*
-     * Every medium write is synchronous. Taking the medium mutex and
+     * Reservations include the queued USB completion. Taking the medium mutex and
      * rechecking the state makes SYNCHRONIZE CACHE a real drain barrier.
      */
     xSemaphoreTake(storage->mux_lock, portMAX_DELAY);
@@ -1422,7 +1447,8 @@ esp_err_t tinyusb_msc_delete_storage(tinyusb_msc_storage_handle_t handle)
     MSC_ENTER_CRITICAL();
     MSC_CHECK_ON_CRITICAL(p_msc_driver != NULL, ESP_ERR_INVALID_STATE);
     MSC_CHECK_ON_CRITICAL(p_msc_driver->dynamic.lun_count > 0, ESP_ERR_INVALID_STATE);
-    MSC_CHECK_ON_CRITICAL(storage->deffered_writes == 0, ESP_ERR_INVALID_STATE);
+    MSC_CHECK_ON_CRITICAL(storage->deffered_writes == 0 &&
+                          !storage->completion_callback_active, ESP_ERR_INVALID_STATE);
     MSC_EXIT_CRITICAL();
 
     msc_storage_stop_write_worker(storage);
@@ -1505,6 +1531,9 @@ esp_err_t tinyusb_msc_stop_host_io(
     MSC_CHECK_ON_CRITICAL(p_msc_driver != NULL, ESP_ERR_INVALID_STATE);
     storage->host_io_enabled = false;
     *pending_write_count = storage->deffered_writes;
+    if (*pending_write_count == 0U && storage->completion_callback_active) {
+        *pending_write_count = 1U;
+    }
     MSC_EXIT_CRITICAL();
     return ESP_OK;
 }
@@ -1718,7 +1747,7 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
 // - Application write data from buffer to address contents (up to bufsize) and return number of written byte.
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize)
 {
-    // There is no way to return the error from the deferred function, so we need to check everything here
+    // Reject invalid requests before reserving the shared buffer.
     if (bufsize > MSC_STORAGE_BUFFER_SIZE) {
         ESP_LOGE(TAG, "Buffer size %"PRIu32" exceeds maximum allowed size %d", bufsize, MSC_STORAGE_BUFFER_SIZE);
         goto error;
@@ -1731,7 +1760,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     /*
      * The deferred flash write owns the single storage buffer. TinyUSB must
      * not accept another transfer or report command completion until
-     * The dedicated storage worker calls tud_msc_async_io_done().
+     * the TinyUSB task consumes the worker completion for this request token.
      */
     return TUD_MSC_RET_ASYNC;
 
