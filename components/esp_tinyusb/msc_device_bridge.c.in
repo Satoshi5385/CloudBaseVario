@@ -1,0 +1,70 @@
+/*
+ * Compile the pinned TinyUSB MSC driver through a small reset/completion bridge.
+ * Upstream stays unmodified in managed_components. This translation unit replaces
+ * its msc_device.c, retaining its license and all normal protocol handling.
+ * Internal access is deliberate: validation and completion must happen in one
+ * TinyUSB task event, without tud_msc_async_io_done() queueing a second event.
+ */
+#include "class/msc/msc_device.h"
+#include "msc_device_bridge.h"
+
+#define mscd_init cbv_upstream_mscd_init
+#define mscd_deinit cbv_upstream_mscd_deinit
+#define mscd_reset cbv_upstream_mscd_reset
+#define mscd_control_xfer_cb cbv_upstream_mscd_control_xfer_cb
+#include "@tinyusb_msc_source@"
+#undef mscd_init
+#undef mscd_deinit
+#undef mscd_reset
+#undef mscd_control_xfer_cb
+
+/* Only the TinyUSB task reads/writes this sequence. Never reset it at init. */
+static uint64_t write_sequence;
+
+uint64_t msc_device_begin_write(void)
+{
+    return ++write_sequence;
+}
+
+bool msc_device_complete_write(uint64_t token, uint8_t lun, int32_t bytes)
+{
+    if (token != write_sequence || !_mscd_itf.pending_io ||
+        _mscd_itf.cbw.command[0] != SCSI_CMD_WRITE_10 ||
+        _mscd_itf.cbw.lun != lun) {
+        return false;
+    }
+    proc_async_io_done((void *)(intptr_t)bytes);
+    return true;
+}
+
+void mscd_init(void)
+{
+    ++write_sequence;
+    cbv_upstream_mscd_init();
+}
+
+bool mscd_deinit(void)
+{
+    ++write_sequence;
+    return cbv_upstream_mscd_deinit();
+}
+
+void mscd_reset(uint8_t rhport)
+{
+    ++write_sequence;
+    cbv_upstream_mscd_reset(rhport);
+}
+
+bool mscd_control_xfer_cb(uint8_t rhport, uint8_t stage,
+                        tusb_control_request_t const *request)
+{
+    bool result = cbv_upstream_mscd_control_xfer_cb(rhport, stage, request);
+    if (result && stage == CONTROL_STAGE_SETUP &&
+        request->bmRequestType_bit.type == TUSB_REQ_TYPE_CLASS &&
+        request->bRequest == MSC_REQ_RESET) {
+        ++write_sequence;
+        /* TinyUSB 0.21.0 proc_bot_reset does not clear pending_io. */
+        _mscd_itf.pending_io = false;
+    }
+    return result;
+}
